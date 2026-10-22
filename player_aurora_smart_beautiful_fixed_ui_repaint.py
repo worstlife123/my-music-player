@@ -1,8 +1,7 @@
 # Music Player Green Edition — Spotify-inspired redesign, artist profiles and track radio.
 # Пока новый трек запускается в тихом плеере, старый продолжает играть.
 # Когда позиция нового потока начинает двигаться, звук плавно переключается.
-# Важно: Manrope загружается из установленных шрифтов Windows либо из папки fonts/.
-# Сам файл шрифта в проект не включён.
+# Inter с кириллицей включён в fonts/ под лицензией SIL OFL 1.1.
 
 import sys
 import logging
@@ -61,21 +60,21 @@ def yt_dlp_tls_options():
 
 
 # -------------------------------------------------------------
-# Загрузка шрифта Manrope, установленного пользователем.
-# Можно установить его в Windows ИЛИ положить .ttf/.otf в fonts/.
-# Если Manrope не найден, приложение остаётся рабочим с Segoe UI.
+# Локальный шрифт включается и в сборку PyInstaller, установки в Windows не требует.
 # -------------------------------------------------------------
 
 def setup_font(app):
     fonts_dir = Path(__file__).resolve().parent / "fonts"
     if fonts_dir.is_dir():
-        for font_path in list(fonts_dir.glob("*.ttf")) + list(fonts_dir.glob("*.otf")):
+        for font_path in sorted(list(fonts_dir.glob("*.ttf")) + list(fonts_dir.glob("*.otf"))):
             QFontDatabase.addApplicationFont(str(font_path))
 
-    families = QFontDatabase.families()
-    manrope = next((family for family in families if family.lower() == "manrope"), None)
-    family = manrope or app.font().family()
-    app.setFont(QFont(family, 10))
+    families = {family.casefold(): family for family in QFontDatabase.families()}
+    family = next((families[name] for name in ("inter variable", "inter", "segoe ui")
+                   if name in families), app.font().family())
+    font = QFont(family, 10)
+    font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
+    app.setFont(font)
     return family
 
 
@@ -2445,7 +2444,7 @@ class AnimatedNavButton(QPushButton):
         super().__init__(parent)
         self.setObjectName("navButton")
         self.setCheckable(True)
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(50)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._nav_icon = icon_text
@@ -2514,9 +2513,9 @@ class AnimatedNavButton(QPushButton):
         if self.isChecked() or self.underMouse() or self.isDown():
             painter.setPen(Qt.PenStyle.NoPen)
             if self._theme == "light":
-                background = QColor("#E1F4E7" if self.isChecked() else ("#DDDDDD" if self.isDown() else "#EEEEEE"))
+                background = QColor("#E4F3E9" if self.isChecked() else ("#DFE7EF" if self.isDown() else "#EFF3F7"))
             else:
-                background = QColor("#202020" if self.isChecked() else ("#333333" if self.isDown() else "#282828"))
+                background = QColor("#1C3028" if self.isChecked() else ("#29323D" if self.isDown() else "#1B222B"))
             painter.setBrush(background)
             painter.drawRoundedRect(rect, 9, 9)
         if self.isChecked():
@@ -2540,7 +2539,10 @@ class AnimatedNavButton(QPushButton):
             icon_rect = QRectF(rect.left() + 14, rect.center().y() - 12, 24, 24)
             draw_vector_icon(painter, icon_kind, icon_rect, self._text_color, self._active_color)
             text_rect = QRect(rect.left() + 49, rect.top(), max(0, rect.width() - 56), rect.height())
-            painter.setFont(QFont(self.font().family(), 10, QFont.Weight.DemiBold))
+            nav_font = QFont(self.font())
+            nav_font.setPixelSize(13)
+            nav_font.setWeight(QFont.Weight.DemiBold if self.isChecked() else QFont.Weight.Medium)
+            painter.setFont(nav_font)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._nav_title)
         painter.end()
 
@@ -2958,6 +2960,18 @@ def control_icon(name, color="#D4CDD5", side=32):
     elif name == "stop":
         p.setBrush(QColor(color))
         p.drawRoundedRect(10, 10, 12, 12, 2, 2)
+    elif name == "search":
+        p.drawEllipse(QPointF(14, 14), 8, 8)
+        p.drawLine(20, 20, 27, 27)
+    elif name == "settings":
+        for angle in range(0, 360, 45):
+            p.save()
+            p.translate(16, 16)
+            p.rotate(angle)
+            p.drawLine(0, -10, 0, -13)
+            p.restore()
+        p.drawEllipse(QPointF(16, 16), 9, 9)
+        p.drawEllipse(QPointF(16, 16), 3, 3)
     elif name == "menu":
         for y in (10, 16, 22):
             p.drawLine(8, y, 24, y)
@@ -3343,7 +3357,7 @@ class RadioDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """Настройки с Manrope, удобными пресетами и настоящим сохранением."""
+    """Настройки плеера с сохранением выбранных параметров."""
 
     def __init__(self, player):
         super().__init__(player)
@@ -3406,7 +3420,7 @@ class SettingsDialog(QDialog):
         general_layout.addStretch(1)
         self._add_hint(
             general_layout,
-            "Manrope берётся из шрифтов Windows или из папки fonts рядом с программой."
+            "Шрифт Inter включён в плеер. Устанавливать его в Windows не нужно."
         )
         tabs.addTab(general, "Общие")
 
@@ -4025,6 +4039,8 @@ class MiniPlayer(PlayerBar):
 
 
 class MusicPlayer(QMainWindow):
+    RECENT_TRACK_LIMIT = 40
+    RECENT_PREVIEW_COUNT = 12
     PENDING_MEDIA_TIMEOUT_MS = 20_000
     PLAYBACK_STALL_SECONDS = 8
     MAX_STREAM_RECOVERIES = 2
@@ -4206,6 +4222,7 @@ class MusicPlayer(QMainWindow):
         self.youtube_auth_browser = str(self.settings.value("youtube_auth_browser", "chrome") or "chrome")
         self.youtube_auth_profile = str(self.settings.value("youtube_auth_profile", "") or "").strip()
         self.recent_tracks = self.load_recent_tracks()
+        self._recent_expanded_sources = set()
         self.youtube_liked_tracks = self.load_youtube_likes()
         self._youtube_rating_workers = set()
         self._youtube_rating_pending = set()
@@ -4270,7 +4287,7 @@ class MusicPlayer(QMainWindow):
         self._shuffle_history = deque(maxlen=min(20, 200))
         self._shuffle_weights_cache = {}
         self.saved_sidebar = self.settings.value("sidebar_collapsed", False, type=bool)
-        self.setWindowTitle("Music Player · Green Edition")
+        self.setWindowTitle("Aurora Music Player")
         self.resize(1380, 860)
         self.setMinimumSize(1000, 650)
 
@@ -4611,23 +4628,33 @@ class MusicPlayer(QMainWindow):
     def create_sidebar(self):
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(184)
+        self.sidebar.setFixedWidth(216)
         side_layout = QVBoxLayout(self.sidebar)
-        side_layout.setContentsMargins(12, 14, 12, 14)
-        side_layout.setSpacing(10)
+        side_layout.setContentsMargins(14, 20, 14, 16)
+        side_layout.setSpacing(8)
 
         top = QHBoxLayout()
-        self.menu_hint = QLabel("БИБЛИОТЕКА")
-        self.menu_hint.setObjectName("eyebrow")
+        top.setSpacing(9)
+        self.brand_mark = QLabel("A")
+        self.brand_mark.setObjectName("brandMark")
+        self.brand_mark.setFixedSize(32, 32)
+        self.brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.brand_name = QLabel("Aurora")
+        self.brand_name.setObjectName("brandName")
         self.sidebar_toggle = QPushButton("‹")
         self.sidebar_toggle.setObjectName("iconButton")
         self.sidebar_toggle.setToolTip("Свернуть меню")
-        self.sidebar_toggle.setFixedSize(34, 34)
-        top.addWidget(self.menu_hint)
+        self.sidebar_toggle.setFixedSize(28, 32)
+        top.addWidget(self.brand_mark)
+        top.addWidget(self.brand_name)
         top.addStretch(1)
         top.addWidget(self.sidebar_toggle)
         side_layout.addLayout(top)
-        side_layout.addSpacing(9)
+        side_layout.addSpacing(24)
+        self.menu_hint = QLabel("МУЗЫКА")
+        self.menu_hint.setObjectName("eyebrow")
+        self.menu_hint.setContentsMargins(14, 0, 0, 8)
+        side_layout.addWidget(self.menu_hint)
 
         self.nav_buttons = []
         self.nav_data = [
@@ -4641,9 +4668,15 @@ class MusicPlayer(QMainWindow):
             self.nav_buttons.append(btn)
 
         side_layout.addStretch(1)
-        settings_button = QPushButton("⚙  Настройки")
+        self.sidebar_divider = QFrame()
+        self.sidebar_divider.setObjectName("sidebarDivider")
+        self.sidebar_divider.setFixedHeight(1)
+        side_layout.addWidget(self.sidebar_divider)
+        settings_button = QPushButton("Настройки")
         self.sidebar_settings_button = settings_button
         settings_button.setObjectName("sidebarSettings")
+        settings_button.setMinimumHeight(44)
+        settings_button.setIconSize(QSize(18, 18))
         settings_button.setToolTip("Настройки плеера")
         settings_button.clicked.connect(self.open_settings)
         side_layout.addWidget(settings_button)
@@ -4691,10 +4724,30 @@ class MusicPlayer(QMainWindow):
         self.back_button.setAccessibleName("Назад к подборкам")
         self.back_button.hide()
 
+        self.search_shell = QFrame()
+        self.search_shell.setObjectName("searchBox")
+        self.search_shell.setMinimumHeight(54)
+        self.search_shell.setProperty("focused", False)
+        shell_layout = QHBoxLayout(self.search_shell)
+        shell_layout.setContentsMargins(16, 5, 6, 5)
+        shell_layout.setSpacing(10)
+        self.search_icon = QLabel()
+        self.search_icon.setFixedSize(20, 20)
+        shell_layout.addWidget(self.search_icon)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("⌕   Трек или исполнитель...")
+        self.search_input.setObjectName("catalogSearch")
+        self.search_input.setPlaceholderText("Найти трек или исполнителя")
+        self.search_input.setAccessibleName("Поиск музыки")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setMinimumHeight(44)
+        self.search_input.setMinimumWidth(0)
+        self.search_input.setMinimumHeight(40)
+        self.search_input.installEventFilter(self)
+        self.search_shell.installEventFilter(self)
+        shell_layout.addWidget(self.search_input, 1)
+        self.search_shortcut = QLabel("Ctrl F")
+        self.search_shortcut.setObjectName("searchShortcut")
+        self.search_shortcut.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        shell_layout.addWidget(self.search_shortcut)
 
         # Переключатель сортировки убран из интерфейса: профиль показывает
         # обычную выдачу исполнителя без меню «Популярные / Сначала новые».
@@ -4706,13 +4759,11 @@ class MusicPlayer(QMainWindow):
 
         # Количество результатов теперь только в настройках.
         self.search_button = QPushButton("Найти")
-        self.search_button.setObjectName("accentButton")
-        self.search_button.setMinimumHeight(44)
-        self.search_button.setFixedWidth(90)
+        self.search_button.setObjectName("searchSubmit")
+        self.search_button.setFixedSize(80, 40)
+        shell_layout.addWidget(self.search_button)
         search_layout.addWidget(self.back_button)
-        search_layout.addWidget(self.search_input, 1)
-        # Фильтр сортировки находится в карточке исполнителя, а не в поисковой строке.
-        search_layout.addWidget(self.search_button)
+        search_layout.addWidget(self.search_shell, 1)
         browse.addWidget(self.search_row)
 
         self.start_cards_widget = QWidget()
@@ -4731,7 +4782,15 @@ class MusicPlayer(QMainWindow):
         recent_layout.setSpacing(8)
         self.recent_heading = QLabel("Недавно слушал")
         self.recent_heading.setObjectName("sectionTitle")
-        recent_layout.addWidget(self.recent_heading)
+        recent_header = QHBoxLayout()
+        recent_header.addWidget(self.recent_heading)
+        recent_header.addStretch(1)
+        self.recent_more_button = QPushButton("Показать все")
+        self.recent_more_button.setObjectName("textButton")
+        self.recent_more_button.clicked.connect(self.toggle_recent_tracks)
+        self.recent_more_button.hide()
+        recent_header.addWidget(self.recent_more_button)
+        recent_layout.addLayout(recent_header)
         self.recent_rows_widget = QWidget()
         self.recent_rows_layout = QVBoxLayout(self.recent_rows_widget)
         self.recent_rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -5163,7 +5222,7 @@ class MusicPlayer(QMainWindow):
         return bar
 
     # ---------------------------------------------------------
-    # Единая палитра, Manrope берётся из QApplication.font().
+    # Единая палитра; семейство шрифта берётся из QApplication.font().
     # Все QLabel прозрачные: никаких тёмных полос за надписями.
     # ---------------------------------------------------------
 
@@ -5172,7 +5231,7 @@ class MusicPlayer(QMainWindow):
         # Диалоги ошибок тоже тёмные: белый текст больше не будет на белом фоне.
         dark_styles = r"""
             QMainWindow, QWidget#root { background: #121212; }
-            QWidget { color: #F5F5F5; font-size: 10pt; }
+            QWidget { color: #F5F5F5; font-size: 14px; }
             QLabel { background: transparent; border: none; }
 
             QFrame#sidebar { background: #181818; border: none; border-radius: 8px; }
@@ -5367,7 +5426,7 @@ class MusicPlayer(QMainWindow):
             QLabel#sectionTitle { font-size: 18px; font-weight: 700; color: #F4F6F9; }
             QLabel#bottomTitle { font-size: 15px; font-weight: 700; }
             QLabel#bottomArtist, QLabel#trackArtist, QLabel#mutedText, QLabel#statusText { color: #ADB6C5; font-size: 12px; }
-            QLabel#trackTitle { font-size: 13px; font-weight: 600; }
+            QLabel#trackTitle { font-size: 14px; font-weight: 600; }
             QLabel#recentEmpty { color: #A4AFBE; font-size: 13px; padding: 18px; background: #1C2027; border-radius: 12px; }
             QLabel#eyebrow { color: #8591A3; font-size: 10px; letter-spacing: 1.2px; }
             QLabel#timeText { color: #A4AFBE; font-size: 11px; }
@@ -5435,6 +5494,32 @@ class MusicPlayer(QMainWindow):
             QSlider#seekSlider::sub-page:horizontal { background: #278454; }
             QSlider#seekSlider::handle:horizontal { background: #278454; }
         """
+        dark_styles += r"""
+            QLabel#brandMark { background: #67D99A; color: #10251A; border-radius: 10px; font-size: 20px; font-weight: 800; }
+            QLabel#brandName { color: #F0F4F8; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+            QFrame#sidebarDivider { background: #252D37; }
+            QFrame#searchBox { background: #1E242D; border: 1px solid #303A48; border-radius: 16px; }
+            QFrame#searchBox[focused="true"] { border-color: #66CD94; background: #222B35; }
+            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { background: transparent; border: none; padding: 0; color: #EDF2F7; font-size: 14px; }
+            QLabel#searchShortcut { background: #29333F; color: #A8B4C4; border: 1px solid #3A4554; border-radius: 5px; padding: 4px 6px; font-size: 11px; }
+            QPushButton#searchSubmit { background: #67D99A; color: #10251A; border-radius: 11px; font-weight: 600; }
+            QPushButton#searchSubmit:hover { background: #83E5AF; }
+            QPushButton#searchSubmit:pressed { background: #4BBE7E; }
+            QPushButton#searchSubmit:disabled { background: #2A3C33; color: #899F93; }
+        """
+        light_styles += r"""
+            QLabel#brandMark { background: #D8F3E4; color: #237B4A; }
+            QLabel#brandName { color: #1C2938; }
+            QFrame#sidebarDivider { background: #E0E6ED; }
+            QFrame#searchBox { background: #F2F5F8; border-color: #D8E0EA; }
+            QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #278454; }
+            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { color: #1C2938; }
+            QLabel#searchShortcut { background: #E7EDF3; color: #627085; border-color: #D7E0E9; }
+            QPushButton#searchSubmit { background: #23834D; color: #FFFFFF; }
+            QPushButton#searchSubmit:hover { background: #2B965B; }
+            QPushButton#searchSubmit:pressed { background: #1B6A3D; }
+            QPushButton#searchSubmit:disabled { background: #DEE8E2; color: #7A8E81; }
+        """
         self.setStyleSheet(dark_styles if self.theme == "dark" else dark_styles + light_styles)
         if self.mini_player is not None:
             self.mini_player.apply_theme()
@@ -5445,6 +5530,8 @@ class MusicPlayer(QMainWindow):
         self.repeat_button.setIcon(control_icon("repeat", "#1DB954" if self.repeat_mode != "off" else icon_color))
         self.bottom_queue_button.setIcon(control_icon("queue", "#1DB954" if self.queue_open else icon_color))
         self.volume_icon.setPixmap(control_icon("volume", icon_color).pixmap(18, 18))
+        self.search_icon.setPixmap(control_icon("search", icon_color).pixmap(20, 20))
+        self.sidebar_settings_button.setIcon(control_icon("settings", icon_color))
         if hasattr(self, "artist_header"):
             self.artist_header.setStyleSheet("")
             avatar_url = self.artist_avatar.property("requested_image") if hasattr(self, "artist_avatar") else ""
@@ -6099,10 +6186,12 @@ class MusicPlayer(QMainWindow):
     def toggle_sidebar(self):
         self.sidebar_collapsed = not self.sidebar_collapsed
         collapsed = self.sidebar_collapsed
-        self.sidebar.setFixedWidth(65 if collapsed else 184)
-        self.sidebar.layout().setContentsMargins(8 if collapsed else 12, 14, 8 if collapsed else 12, 14)
+        self.sidebar.setFixedWidth(72 if collapsed else 216)
+        self.sidebar.layout().setContentsMargins(8 if collapsed else 14, 20, 8 if collapsed else 14, 16)
         self.menu_hint.setVisible(not collapsed)
-        self.sidebar_settings_button.setText("⚙" if collapsed else "⚙  Настройки")
+        self.brand_mark.setVisible(not collapsed)
+        self.brand_name.setVisible(not collapsed)
+        self.sidebar_settings_button.setText("" if collapsed else "Настройки")
         self.sidebar_toggle.setText("›" if collapsed else "‹")
         self.sidebar_toggle.setToolTip("Развернуть меню" if collapsed else "Свернуть меню")
         for button, (icon, title, _) in zip(self.nav_buttons, self.nav_data):
@@ -7234,6 +7323,13 @@ class MusicPlayer(QMainWindow):
         self.refresh_home_likes_counts()
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "search_input", None) and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.search_shell.setProperty("focused", event.type() == QEvent.Type.FocusIn)
+            self.search_shell.style().unpolish(self.search_shell)
+            self.search_shell.style().polish(self.search_shell)
+            self.search_shell.update()
+        if watched is getattr(self, "search_shell", None) and event.type() == QEvent.Type.Resize:
+            self.search_shortcut.setVisible(self.search_shell.width() >= 430)
         if (event.type() == QEvent.Type.Resize and hasattr(self, "start_cards_scroll")
                 and watched is self.start_cards_scroll.viewport() and not self._force_exit):
             QTimer.singleShot(0, self.layout_home_tiles)
@@ -7289,7 +7385,7 @@ class MusicPlayer(QMainWindow):
                 if track and self.favorite_key(track) not in seen:
                     tracks.append(track)
                     seen.add(self.favorite_key(track))
-            return tracks[:40]
+            return tracks[:self.RECENT_TRACK_LIMIT]
         except (ValueError, TypeError):
             return []
 
@@ -7299,21 +7395,34 @@ class MusicPlayer(QMainWindow):
             return
         key = self.favorite_key(saved)
         self.recent_tracks = [saved] + [item for item in self.recent_tracks if self.favorite_key(item) != key]
-        self.recent_tracks = self.recent_tracks[:40]
+        self.recent_tracks = self.recent_tracks[:self.RECENT_TRACK_LIMIT]
         self.settings.setValue("recent_tracks_json", json.dumps(self.recent_tracks, ensure_ascii=False))
         self.refresh_recent_tracks()
+
+    def toggle_recent_tracks(self):
+        source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
+        if source in self._recent_expanded_sources:
+            self._recent_expanded_sources.discard(source)
+        else:
+            self._recent_expanded_sources.add(source)
+        self.refresh_recent_tracks()
+        self.update_playing_row_highlight()
 
     def refresh_recent_tracks(self):
         if not hasattr(self, "recent_rows_layout"):
             return
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
-        tracks = [track for track in self.recent_tracks if track.get("source") == source and not self.is_disliked(track)][:4]
+        history = [track for track in self.recent_tracks if track.get("source") == source and not self.is_disliked(track)]
+        expanded = source in self._recent_expanded_sources
+        tracks = history if expanded else history[:self.RECENT_PREVIEW_COUNT]
+        self.recent_more_button.setVisible(len(history) > self.RECENT_PREVIEW_COUNT)
+        self.recent_more_button.setText("Свернуть" if expanded else f"Показать все · {len(history)}")
         heading = "Недавно слушал"
         if not tracks:
             own_tracks = self.soundcloud_liked_tracks if source == "soundcloud" else self._youtube_likes_for_display()
-            tracks = [dict(track) for track in own_tracks if isinstance(track, dict) and track.get("url") and not self.is_disliked(track)][:4]
+            tracks = [dict(track) for track in own_tracks if isinstance(track, dict) and track.get("url") and not self.is_disliked(track)][:self.RECENT_PREVIEW_COUNT]
             heading = "Из твоих лайков"
-        signature = (source, heading, tuple((self.favorite_key(t), t.get("title"), t.get("artist"), t.get("thumbnail")) for t in tracks))
+        signature = (source, heading, expanded, tuple((self.favorite_key(t), t.get("title"), t.get("artist"), t.get("thumbnail")) for t in tracks))
         if signature == getattr(self, "_recent_rows_signature", None):
             return
         self._recent_rows_signature = signature
@@ -11215,6 +11324,7 @@ def run_smoke_test():
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         app = QApplication([sys.argv[0]])
         app.setStyle("Fusion")
+        setup_font(app)
         window = MusicPlayer(settings=QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat))
         for player in window.players:
             player.setAudioOutput(None)

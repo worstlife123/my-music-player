@@ -25,11 +25,12 @@ os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 spec = importlib.util.spec_from_file_location('aurora', ROOT / FILENAME)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-from PyQt6.QtTest import QSignalSpy
+from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QEventLoop, QSettings
 from PyQt6.QtGui import QEnterEvent, QImage
 app = m.QApplication([])
 app.setStyle('Fusion')
+m.setup_font(app)
 app.setQuitOnLastWindowClosed(False)
 
 
@@ -397,6 +398,77 @@ class PlayerChanges(unittest.TestCase):
         self.assertNotIn('queue_id', saved)
         self.w.settings.setValue('recent_tracks_json', '{invalid')
         self.assertEqual(self.w.load_recent_tracks(), [])
+
+    def test_recent_history_expands_beyond_twelve_and_keeps_service_and_playback_state(self):
+        w = self.w
+        youtube = [self.youtube_track(f'recent{i:05}') for i in range(18)]
+        soundcloud = [dict(track, source='soundcloud', url=f'https://soundcloud.com/test/recent-{i}')
+                      for i, track in enumerate(youtube[:3])]
+        w.recent_tracks = youtube + soundcloud
+        w.disliked_track_keys.add(w.radio_track_key(youtube[2]))
+        w.current_track = youtube[-1]
+        w.rebuild_start_cards()
+        self.assertEqual(len(w.recent_rows), 12)
+        self.assertFalse(w.recent_more_button.isHidden())
+        w.recent_more_button.click()
+        self.assertEqual([row.track['url'] for row in w.recent_rows],
+                         [t['url'] for i, t in enumerate(youtube) if i != 2])
+        self.assertEqual(w.recent_more_button.text(), 'Свернуть')
+        self.assertTrue(w.recent_rows[-1].property('playing'))
+        with patch.object(w, 'add_to_queue') as play:
+            w.recent_rows[-1].play_requested.emit(w.recent_rows[-1].track)
+            play.assert_called_once_with(youtube[-1], True)
+        w.set_source('soundcloud')
+        self.assertEqual(len(w.recent_rows), 3)
+        self.assertTrue(w.recent_more_button.isHidden())
+        w.set_source('youtube')
+        self.assertEqual(len(w.recent_rows), 17)
+        w.recent_more_button.click()
+        self.assertEqual(len(w.recent_rows), 12)
+
+    def test_recent_preview_uses_twelve_likes_without_fabricating_history(self):
+        w = self.w
+        w.youtube_liked_tracks = [self.youtube_track(f'recent{i:05}') for i in range(20)]
+        w.rebuild_start_cards()
+        self.assertEqual(w.recent_heading.text(), 'Из твоих лайков')
+        self.assertEqual(len(w.recent_rows), 12)
+        self.assertTrue(w.recent_more_button.isHidden())
+        self.assertEqual(w.recent_tracks, [])
+
+    def test_bundled_font_supports_cyrillic(self):
+        self.assertIn('Inter', app.font().family())
+        metrics = m.QFontMetrics(app.font())
+        self.assertTrue(all(metrics.inFontUcs4(ord(ch)) for ch in 'МузыкаЯё'))
+
+    def test_search_keyboard_and_submit_work_inside_new_search_box(self):
+        w = self.w
+        w.search_input.setText('MF DOOM')
+        w.search_debounce_timer.stop()
+        w.sidebar_settings_button.setFocus()
+        app.processEvents()
+        QTest.keyClick(w.sidebar_settings_button, m.Qt.Key.Key_F, m.Qt.KeyboardModifier.ControlModifier)
+        self.assertTrue(w.search_input.hasFocus())
+        self.assertEqual(w.search_input.selectedText(), 'MF DOOM')
+        self.assertTrue(w.search_shell.property('focused'))
+        with patch.object(m, 'SearchWorker') as worker:
+            QTest.keyClick(w.search_input, m.Qt.Key.Key_Return)
+            self.assertEqual(worker.call_count, 1)
+            self.assertEqual(worker.call_args.args[:2], ('MF DOOM', 'youtube'))
+            worker.return_value.start.assert_called_once()
+            w.search_button.setEnabled(True)
+            w.search_button.click()
+            self.assertEqual(worker.call_count, 2)
+        w.search_worker = None
+        w.sidebar_settings_button.setFocus()
+        app.processEvents()
+        self.assertFalse(w.search_shell.property('focused'))
+        w.toggle_sidebar()
+        w.nav_buttons[1].click()
+        self.assertEqual(w.current_source, 'soundcloud')
+        self.assertTrue(w.brand_name.isHidden())
+        w.toggle_sidebar()
+        self.assertFalse(w.brand_name.isHidden())
+        self.assertEqual(w.sidebar_settings_button.text(), 'Настройки')
 
     def test_home_recent_tracks_are_scoped_to_service_and_play_the_selected_track(self):
         youtube = self.youtube_track('history0001')

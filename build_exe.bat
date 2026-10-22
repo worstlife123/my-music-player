@@ -56,8 +56,7 @@ echo [2/3] Installing or updating build dependencies. Internet is required.
 "%PLAYER_BUILD_PYTHON%" -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2"
 if errorlevel 1 goto failed
 
-if exist "fonts\*.ttf" set "PLAYER_FONT_OPTIONS=--add-data=fonts/*.ttf:fonts"
-if exist "fonts\*.otf" set "PLAYER_FONT_OPTIONS=%PLAYER_FONT_OPTIONS% --add-data=fonts/*.otf:fonts"
+if exist "fonts\" set "PLAYER_FONT_OPTIONS=--add-data=fonts:fonts"
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
 "%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
