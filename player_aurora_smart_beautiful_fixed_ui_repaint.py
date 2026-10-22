@@ -4294,134 +4294,131 @@ class MusicPlayer(QMainWindow):
 
     def apply_styles(self):
         """Spotify-inspired palette: matte black, graphite panels, Spotify green."""
+        # Диалоги ошибок тоже тёмные: белый текст больше не будет на белом фоне.
         dark_styles = r"""
-            QMainWindow, QWidget#root { background: #0A0A0A; }
+            QMainWindow, QWidget#root { background: #121212; }
             QWidget { color: #F5F5F5; font-size: 10pt; }
             QLabel { background: transparent; border: none; }
-            /* Диалоги ошибок тоже тёмные: белый текст больше не будет на белом фоне. */
-            QMessageBox { background: #181818; color: #F5F5F5; }
-            QMessageBox QLabel { background: transparent; color: #F5F5F5; min-width: 280px; }
-            QMessageBox QPushButton { background: #282828; color: #FFFFFF; border: 1px solid #444444; border-radius: 8px; padding: 7px 18px; min-width: 72px; }
-            QMessageBox QPushButton:hover { background: #353535; border-color: #1DB954; }
-            QFrame#sidebar { background: #121212; border: 1px solid #1F1F1F; border-radius: 15px; }
-            QFrame#queuePanel { background: #141414; border: 1px solid #222222; border-radius: 15px; }
-            QFrame#playerBar { background: #181818; border: 1px solid #292929; border-radius: 14px; }
-            QFrame#centerPanel { background: #141414; border: 1px solid #222222; border-radius: 15px; }
-            QLabel#bottomCover, QLabel#rowCover { background: #282828; border-radius: 8px; }
+
+            QFrame#sidebar { background: #181818; border: none; border-radius: 8px; }
+            QFrame#queuePanel { background: #181818; border: none; border-radius: 8px; }
+            QFrame#centerPanel { background: #181818; border: none; border-radius: 8px; }
+            QFrame#playerBar { background: #181818; border: none; border-radius: 8px; }
+
+            QLabel#bottomCover, QLabel#rowCover { background: #282828; border-radius: 6px; }
             QLabel#bottomArtist, QLabel#mutedText, QLabel#trackArtist, QLabel#statusText,
-            QLabel#durationText, QLabel#sourceText, QLabel#artistMeta { color: #B3B3B3; }
+            QLabel#durationText, QLabel#sourceText, QLabel#artistMeta { color: #A7A7A7; }
             QLabel#bottomTitle, QLabel#pageTitle, QLabel#trackTitle, QLabel#queueTitle { color: #FFFFFF; font-weight: 700; }
-            QWidget#trackRow[playing="true"] { background: #1A2B20; border: 1px solid #1DB954; border-radius: 10px; }
+
+            QWidget#trackRow[playing="true"] { background: rgba(29, 185, 84, 0.15); border: 1px solid #1DB954; border-radius: 8px; }
             QLabel#trackTitle[playing="true"] { color: #1DB954; font-weight: 800; }
             QLabel#trackIndex[playing="true"] { color: #1DB954; font-weight: 900; }
-            QLabel#pageTitle { font-size: 24px; }
+            QLabel#pageTitle { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
             QLabel#queueTitle { font-size: 17px; }
-            QLabel#eyebrow { color: #B3B3B3; font-size: 9pt; font-weight: 700; letter-spacing: 1px; }
-            QLabel#timeText { color: #B3B3B3; font-size: 9pt; }
-            QLabel#trackIndex, QLabel#tableHeaderText { color: #B3B3B3; font-size: 9pt; }
-            QFrame#artistHeader { background: #1E1E1E; border: 1px solid #2D2D2D; border-radius: 16px; }
+            QLabel#eyebrow { color: #A7A7A7; font-size: 9pt; font-weight: 700; letter-spacing: 1px; }
+            QLabel#timeText { color: #A7A7A7; font-size: 9pt; }
+            QLabel#trackIndex, QLabel#tableHeaderText { color: #A7A7A7; font-size: 9pt; }
+
+            QFrame#artistHeader { background: #232323; border: none; border-radius: 12px; }
             QLabel#artistAvatar { background: #282828; border-radius: 62px; }
             QLabel#artistVerified { color: #1DB954; font-size: 9pt; font-weight: 800; letter-spacing: 1px; }
             QPushButton#artistNameLink { color: #FFFFFF; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 27pt; font-weight: 800; }
             QPushButton#artistNameLink:hover { color: #1DB954; background: transparent; }
-            QPushButton#artistNameLink:pressed { color: #1ED760; background: transparent; }
             QLabel#artistPopular { color: #FFFFFF; font-size: 11pt; font-weight: 700; }
+
             QPushButton#artistShuffleButton { background: #1DB954; color: #101010; border: none; border-radius: 17px; padding: 5px 14px; font-weight: 800; min-height: 30px; }
             QPushButton#artistShuffleButton:hover { background: #1ED760; }
-            QPushButton#artistMixButton { background: #282828; color: #F5F5F5; border: 1px solid #454545; border-radius: 17px; padding: 5px 14px; font-weight: 700; min-height: 30px; }
-            QPushButton#artistMixButton:hover { background: #242424; border-color: #1DB954; color: #1DB954; }
-            QFrame#tableHeader { background: transparent; border-bottom: 1px solid #383838; }
-            QFrame#nowPlayingCard { background: #202020; border: 1px solid #303030; border-radius: 13px; }
-            QFrame#likesAccountCard { background: #202020; border: 1px solid #303030; border-radius: 13px; }
-            QLabel#likesAccountIcon { color: #1DB954; background: #173B25; border: 1px solid #1DB954; border-radius: 12px; font-size: 24px; font-weight: 800; }
-            QPushButton#startCard { color: #FFFFFF; text-align: left; }
-            QPushButton#startCard:hover { border: 1px solid #1DB954; }
+            QPushButton#artistMixButton { background: #232323; color: #F5F5F5; border: 1px solid #3E3E3E; border-radius: 17px; padding: 5px 14px; font-weight: 700; min-height: 30px; }
+            QPushButton#artistMixButton:hover { background: #2A2A2A; border-color: #1DB954; color: #1DB954; }
+
+            QFrame#tableHeader { background: transparent; border-bottom: 1px solid #2A2A2A; }
+            QFrame#likesAccountCard { background: #232323; border: none; border-radius: 12px; }
+            QLabel#likesAccountIcon { color: #1DB954; background: #1A2E22; border: none; border-radius: 12px; font-size: 24px; font-weight: 800; }
+
             QScrollArea#startCardsScroll { background: #181818; border: none; }
             QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport { background: #181818; border: none; }
             QWidget#startCardsWidget { background: #181818; border: none; }
-            QScrollBar:vertical { background: #181818; width: 9px; margin: 2px; border: none; }
-            QScrollBar::handle:vertical { background: #454545; min-height: 28px; border-radius: 4px; }
-            QScrollBar::handle:vertical:hover { background: #1DB954; }
+            QScrollBar:vertical { background: #121212; width: 9px; margin: 2px; border: none; }
+            QScrollBar::handle:vertical { background: #4D4D4D; min-height: 28px; border-radius: 4px; }
+            QScrollBar::handle:vertical:hover { background: #A7A7A7; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+
             QLabel#startSectionTitle { color: #FFFFFF; font-size: 17pt; font-weight: 800; padding: 2px 0; }
-            QPushButton#addPlaylistCard { background: #181818; color: #B3B3B3; border: 1px dashed #535353; border-radius: 16px; font-size: 13pt; font-weight: 700; padding: 18px; }
-            QPushButton#addPlaylistCard:hover { background: #242424; color: #FFFFFF; border: 1px dashed #1DB954; }
-            QFrame#likesHeartTile { background: #173B25; border: 1px solid #1DB954; border-radius: 28px; }
-            QLabel#likesHeart { color: #1DB954; font-size: 70px; font-weight: 800; }
-            QLabel#likesTitle { color: #FFFFFF; font-size: 23px; font-weight: 800; }
-            QLabel#likesDescription { color: #B3B3B3; font-size: 11pt; }
-            QLabel#accountBadge { background: #202020; color: #1ED760; border: 1px solid #333333; border-radius: 12px; padding: 12px 18px; }
-            QPushButton { background: transparent; color: #F5F5F5; border: none; border-radius: 9px; padding: 7px 10px; }
-            QPushButton:hover { background: #282828; }
-            QPushButton#navButton { color: #B3B3B3; text-align: left; padding: 0; border: none; background: transparent; }
-            QPushButton#iconButton, QPushButton#transportButton { background: transparent; color: #B3B3B3; border-radius: 9px; padding: 4px; }
-            QPushButton#iconButton:hover, QPushButton#transportButton:hover { background: #282828; color: #1DB954; }
-            QPushButton#transportButton:checked { color: #1DB954; background: #202020; }
-            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 8px; padding: 2px; }
-            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #282828; }
-            QPushButton#bottomFavorite:checked { background: #1B3324; }
-            QPushButton#bottomDislike:checked { background: #382323; }
-            QPushButton#bottomFavorite:disabled, QPushButton#bottomDislike:disabled { background: transparent; }
+            QPushButton#addPlaylistCard { background: #181818; color: #A7A7A7; border: 1px dashed #4D4D4D; border-radius: 12px; font-size: 13pt; font-weight: 700; padding: 18px; }
+            QPushButton#addPlaylistCard:hover { background: #232323; color: #FFFFFF; border: 1px dashed #1DB954; }
+
+            QPushButton { background: transparent; color: #F5F5F5; border: none; border-radius: 8px; padding: 7px 10px; }
+            QPushButton:hover { background: #232323; }
+            QPushButton#navButton { color: #A7A7A7; text-align: left; padding: 0; border: none; background: transparent; }
+            QPushButton#iconButton, QPushButton#transportButton { background: transparent; color: #A7A7A7; border-radius: 8px; padding: 4px; }
+            QPushButton#iconButton:hover, QPushButton#transportButton:hover { background: #232323; color: #1DB954; }
+            QPushButton#transportButton:checked { color: #1DB954; background: #232323; }
+
+            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 6px; padding: 2px; }
+            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #232323; }
+            QPushButton#bottomFavorite:checked { background: #1A2E22; }
+            QPushButton#bottomDislike:checked { background: #361F1F; }
+
             QPushButton#playButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 25px; padding: 0; }
             QPushButton#playButton:hover { background: #1ED760; }
             QPushButton#playButton:pressed { background: #169C46; }
-            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove { background: #282828; color: #B3B3B3; border-radius: 9px; font-size: 13px; padding: 2px; font-weight: 700; }
+
+            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove { background: #232323; color: #A7A7A7; border-radius: 8px; font-size: 13px; padding: 2px; font-weight: 700; }
             QPushButton#rowPlay:hover { background: #1DB954; color: #121212; }
-            QPushButton#rowFavorite { font-size: 21px; color: #B3B3B3; }
-            QPushButton#rowFavorite:checked { color: #1DB954; background: #1B3324; }
-            QPushButton#rowFavorite:hover, QPushButton#rowRemove:hover { background: #282828; color: #1ED760; }
-            QPushButton#trackArtistLink { color: #B3B3B3; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 9pt; font-weight: 500; }
-            QPushButton#trackArtistLink:hover { color: #1DB954; text-decoration: underline; }
-            QPushButton#themeButton { background: #282828; color: #1DB954; border: 1px solid #3A3A3A; border-radius: 10px; font-size: 17px; padding: 3px; }
-            QPushButton#themeButton:hover { background: #333333; border-color: #1DB954; }
-            QPushButton#accentButton { background: #1DB954; color: #101010; border: none; border-radius: 10px; padding: 10px 18px; font-weight: 800; }
+            QPushButton#rowFavorite { font-size: 21px; color: #A7A7A7; }
+            QPushButton#rowFavorite:checked { color: #1DB954; background: #1A2E22; }
+            QPushButton#rowFavorite:hover, QPushButton#rowRemove:hover { background: #2A2A2A; color: #1ED760; }
+
+            QPushButton#trackArtistLink { color: #A7A7A7; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 9pt; font-weight: 500; }
+            QPushButton#trackArtistLink:hover { color: #FFFFFF; text-decoration: underline; }
+
+            QPushButton#themeButton { background: #232323; color: #1DB954; border: 1px solid #3E3E3E; border-radius: 8px; font-size: 17px; padding: 3px; }
+            QPushButton#themeButton:hover { background: #2A2A2A; border-color: #1DB954; }
+            QPushButton#accentButton { background: #1DB954; color: #101010; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 800; }
             QPushButton#accentButton:hover { background: #1ED760; }
             QPushButton#textButton { color: #1DB954; background: transparent; font-size: 9pt; padding: 5px; }
-            QPushButton#textButton:hover { color: #1ED760; background: #282828; }
-            QPushButton#filterButton { color: #F5F5F5; background: #282828; border: 1px solid #3A3A3A; text-align: left; }
-            QPushButton#filterButton:hover { border: 1px solid #1DB954; background: #303030; }
-            QPushButton#filterButton::menu-indicator { image: none; width: 0px; height: 0px; }
-            QPushButton#backButton { background: #282828; color: #FFFFFF; border: 1px solid #383838; padding: 9px 13px; }
-            QPushButton#backButton:hover { background: #333333; }
-            QPushButton:disabled { background: #242424; color: #686868; }
-            QLineEdit { background: #242424; color: #FFFFFF; border: 1px solid #3A3A3A; border-radius: 11px; padding: 10px 13px; selection-background-color: #1DB954; }
-            QLineEdit:hover, QLineEdit:focus { border: 1px solid #1DB954; }
-            QListWidget { background: #121212; color: #F5F5F5; border: 1px solid #303030; border-radius: 12px; outline: 0; padding: 4px; }
-            QListWidget::item { background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 0; }
-            QListWidget::item:hover { background: #282828; }
-            QListWidget::item:selected { background: #282828; border: 1px solid #1DB954; }
+            QPushButton#textButton:hover { color: #1ED760; background: #232323; }
+            QPushButton#filterButton { color: #F5F5F5; background: #232323; border: 1px solid #3E3E3E; text-align: left; }
+            QPushButton#filterButton:hover { border: 1px solid #1DB954; background: #2A2A2A; }
+            QPushButton:disabled { background: #232323; color: #6A6A6A; }
+
+            QLineEdit { background: #232323; color: #FFFFFF; border: 1px solid #3E3E3E; border-radius: 8px; padding: 10px 13px; selection-background-color: #1DB954; }
+            QLineEdit:hover, QLineEdit:focus { border: 1px solid #1DB954; background: #2A2A2A; }
+
+            QListWidget { background: #121212; color: #F5F5F5; border: none; border-radius: 8px; outline: 0; padding: 4px; }
+            QListWidget::item { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0; }
+            QListWidget::item:hover { background: #232323; }
+            QListWidget::item:selected { background: #232323; border: 1px solid #1DB954; }
+
             QWidget#trackRow { background: transparent; border: none; border-radius: 8px; }
-            QWidget#trackRow:hover { background: #1F1F1F; }
-            QWidget#trackRow[playing="true"]:hover { background: #1A2B20; border: 1px solid #1DB954; }
-            QScrollBar:vertical { background: transparent; width: 9px; border: none; margin: 4px 1px; }
-            QScrollBar::handle:vertical { background: #535353; min-height: 27px; border-radius: 4px; }
-            QScrollBar::handle:vertical:hover { background: #1DB954; }
-            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical { height: 0; border: none; }
-            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical { background: transparent; }
-            QSlider::groove:horizontal { background: #535353; height: 5px; border-radius: 3px; }
-            QSlider::sub-page:horizontal { background: #1DB954; border-radius: 3px; }
-            QSlider::handle:horizontal { background: #1DB954; width: 12px; margin: -4px 0; border-radius: 6px; }
+            QWidget#trackRow:hover { background: #232323; }
+            QWidget#trackRow[playing="true"]:hover { background: rgba(29, 185, 84, 0.25); border: 1px solid #1DB954; }
+
+            QSlider::groove:horizontal { background: #4D4D4D; height: 4px; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #1DB954; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #FFFFFF; width: 12px; margin: -4px 0; border-radius: 6px; }
             QSlider::handle:horizontal:hover { background: #1ED760; }
-            QSlider:disabled::handle:horizontal { background: #535353; }
-            QMenu#darkMenu, QMenu { background: #282828; color: #FFFFFF; border: 1px solid #3B3B3B; padding: 7px; }
-            QMenu#darkMenu::item, QMenu::item { background: transparent; color: #FFFFFF; padding: 10px 22px 10px 14px; border: none; margin: 1px; border-radius: 7px; }
-            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #3A3A3A; color: #1DB954; }
-            QMenu#darkMenu::separator, QMenu::separator { height: 1px; background: #444444; margin: 5px 10px; }
-            QTabWidget::pane { border: 1px solid #333333; background: #181818; }
-            QTabBar::tab { background: #202020; color: #B3B3B3; padding: 10px 16px; border-radius: 8px; margin-right: 4px; }
-            QTabBar::tab:selected { background: #1B3324; color: #1DB954; }
+            QSlider:disabled::handle:horizontal { background: #4D4D4D; }
+
+            QMenu#darkMenu, QMenu { background: #232323; color: #FFFFFF; border: 1px solid #3E3E3E; padding: 7px; border-radius: 8px; }
+            QMenu#darkMenu::item, QMenu::item { background: transparent; color: #FFFFFF; padding: 10px 22px 10px 14px; border: none; margin: 1px; border-radius: 6px; }
+            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #3E3E3E; color: #1DB954; }
+            QMenu#darkMenu::separator, QMenu::separator { height: 1px; background: #3E3E3E; margin: 5px 10px; }
+
+            QTabWidget::pane { border: 1px solid #2A2A2A; background: #181818; border-radius: 8px; }
+            QTabBar::tab { background: #232323; color: #A7A7A7; padding: 10px 16px; border-radius: 6px; margin-right: 4px; border: none; }
+            QTabBar::tab:selected { background: #1DB954; color: #101010; font-weight: 700; }
+            QTabBar::tab:hover:!selected { background: #2A2A2A; color: #FFFFFF; }
+
             QCheckBox { spacing: 9px; }
             QCheckBox::indicator { width: 17px; height: 17px; }
             QCheckBox::indicator:checked { background: #1DB954; border: 1px solid #1DB954; border-radius: 4px; }
-            QCheckBox::indicator:unchecked { background: #282828; border: 1px solid #666666; border-radius: 4px; }
-            QFrame#radioCard { background: #181818; border: 1px solid #3A3A3A; border-radius: 24px; }
+            QCheckBox::indicator:unchecked { background: #232323; border: 1px solid #4D4D4D; border-radius: 4px; }
+
+            QFrame#radioCard { background: #181818; border: 1px solid #3E3E3E; border-radius: 24px; }
             QLabel#radioBrand { color: #1DB954; font-size: 10pt; font-weight: 800; letter-spacing: 2px; }
             QLabel#radioTrackTitle { color: #FFFFFF; font-size: 15pt; font-weight: 800; }
-            QLabel#radioStatus { color: #B3B3B3; font-size: 10pt; }
-            QDialog#settingsDialog { background: #121212; }
-            QLabel#settingsTitle { color: #FFFFFF; font-size: 22pt; font-weight: 800; }
-            QLabel#settingsHint { color: #B3B3B3; }
-            QFrame#settingsGeneral, QFrame#settingsPlayback, QFrame#settingsServices { background: #181818; }
+            QLabel#radioStatus { color: #A7A7A7; font-size: 10pt; }
         """
         light_styles = r"""
             QMainWindow, QWidget#root { background: #F5F5F7; }
@@ -7287,7 +7284,7 @@ class MusicPlayer(QMainWindow):
                     button.update()
                     button.style().unpolish(button)
                     button.style().polish(button)
-                    button.update()
+                    button.repaint()
                 finally:
                     button.blockSignals(signals_were_blocked)
 
@@ -7355,6 +7352,8 @@ class MusicPlayer(QMainWindow):
             self.save_youtube_likes()
             # Сначала обновляем видимые сердечки в поиске, лайках и очереди.
             self._refresh_youtube_like_buttons(video_id)
+            if self.source_list.isVisible():
+                self.source_list.viewport().update()
             # Затем перестраиваем списки лайков и синхронизируем нижнюю панель.
             self.refresh_likes_list()
             self.update_bottom_track_actions()
@@ -8855,9 +8854,10 @@ class MusicPlayer(QMainWindow):
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url:
             player.stop()
-            player.setSource(media_url)
             self.standby_key = None
             self.standby_ready = False
+            player.setSource(media_url)
+        # Запускаем сразу, не ожидая LoadedMedia; звук переключится по движению позиции.
         player.play()
         self.set_status("Загружаю звук на втором плеере; предыдущий продолжает играть…")
         logging.getLogger("aurora").info(f"[Music Player] Qt запускает второй поток ({origin})")
@@ -8866,7 +8866,6 @@ class MusicPlayer(QMainWindow):
         """Отслеживает позицию обоих плееров и безопасно запускает автопереход."""
         if slot == self.pending_slot:
             if (position > 0 and not self.pending_position_seen
-                    and self.pending_ever_loaded
                     and self.players[slot].source() == self.pending_media_url):
                 self.pending_position_seen = True
                 elapsed = time.perf_counter() - (self.request_started or time.perf_counter())
@@ -9021,9 +9020,21 @@ class MusicPlayer(QMainWindow):
 
         # Делаем короткое перекрытие двух треков. Если старый остановлен,
         # просто выводим громкость нового за те же 300 мс.
-        self.fade_old_slot = old
+        # Для остановленного или пустого слота пропускаем этот переход.
+        self.fade_old_slot = (
+            old if (not self.players[old].source().isEmpty()
+                    and self.players[old].playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+            else None
+        )
         self.fade_step_count = 0
-        self.fade_timer.start()
+        if self.fade_old_slot is None:
+            self.fade_timer.stop()
+            self.players[old].stop()
+            self.audio_outputs[old].setVolume(0.0)
+            self.players[old].setSource(QUrl())
+            self.audio_outputs[new].setVolume(self.volume)
+        else:
+            self.fade_timer.start()
 
     def fade_step(self):
         if self.fade_old_slot is None:
