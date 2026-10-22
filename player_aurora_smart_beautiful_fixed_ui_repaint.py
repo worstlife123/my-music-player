@@ -561,11 +561,13 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
 
 class SpotifyPlaylistCard(QPushButton):
     """Карточка быстрого старта с рисуемым градиентом и мягкой подсветкой."""
-    def __init__(self, title, subtitle, symbol, color_a, color_b, parent=None, cover_url="", action_icon="play"):
+    def __init__(self, title, subtitle, symbol, color_a, color_b, parent=None, cover_url="", action_icon="play", artwork_style=""):
         super().__init__(parent)
         self.title = title
         self.subtitle = subtitle
         self.action_icon = action_icon
+        self.artwork_style = artwork_style
+        self._artwork = self._make_artwork(artwork_style) if artwork_style else None
         self.symbol = symbol
         self.color_a = QColor(color_a)
         self.color_b = QColor(color_b)
@@ -616,7 +618,108 @@ class SpotifyPlaylistCard(QPushButton):
             round(a.alpha() * (1 - amount) + b.alpha() * amount),
         )
 
+    @staticmethod
+    def _make_artwork(style):
+        """Квадратная обложка рисуется один раз и работает без внешних картинок."""
+        size = 384
+        image = QPixmap(size, size)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(0, 0, size, size)
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, 24, 24)
+        painter.setClipPath(clip)
+        colors = {
+            "likes": ("#352684", "#AD65EF"),
+            "soundcloud-likes": ("#FD5C26", "#712657"),
+            "supermix": ("#EC412B", "#F5AF45"),
+            "shuffle": ("#123959", "#29CEBA"),
+        }
+        first, last = colors.get(style, colors["likes"])
+        gradient = QLinearGradient(0, 0, size, size)
+        gradient.setColorAt(0, QColor(first))
+        gradient.setColorAt(1, QColor(last))
+        painter.fillRect(rect, gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        glow = QRadialGradient(QPointF(300, 50), 330)
+        glow.setColorAt(0, QColor(255, 255, 255, 100))
+        glow.setColorAt(1, QColor(255, 255, 255, 0))
+        painter.fillRect(rect, glow)
+
+        if style == "supermix":
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for index in range(9):
+                painter.setPen(QPen(QColor(80, 13, 40, 130), 11))
+                radius = 46 + index * 31
+                painter.drawEllipse(QPointF(340, 45), radius, radius)
+            painter.setPen(QColor("#FFF5E8"))
+            font = QFont("Arial", 60, QFont.Weight.Black)
+            painter.setFont(font)
+            painter.drawText(QRectF(24, 122, 342, 96), Qt.AlignmentFlag.AlignLeft, "SUPER")
+            painter.drawText(QRectF(24, 202, 342, 96), Qt.AlignmentFlag.AlignLeft, "MIX")
+        elif style == "shuffle":
+            painter.save()
+            painter.translate(190, 190)
+            painter.rotate(-28)
+            for index in range(7):
+                shade = QColor("#B8FFE8") if index % 2 == 0 else QColor("#117C87")
+                shade.setAlpha(125)
+                painter.setBrush(shade)
+                painter.drawRoundedRect(QRectF(-280, -230 + index * 67, 560, 37), 18, 18)
+            painter.restore()
+            draw_vector_icon(painter, "headphones", QRectF(100, 96, 184, 184), "#FFFFFF")
+        else:
+            painter.setBrush(QColor(255, 255, 255, 16))
+            for center, radius in ((QPointF(25, 370), 180), (QPointF(340, 25), 126)):
+                painter.drawEllipse(center, radius, radius)
+            draw_vector_icon(painter, "heart", QRectF(102, 92, 180, 180), "#FFFFFF")
+
+        painter.setPen(QColor(255, 255, 255, 205))
+        painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        footer = {"likes": "LIKED MUSIC", "soundcloud-likes": "YOUR LIKES",
+                  "supermix": "MADE FROM YOUR LIKES", "shuffle": "ON REPEAT"}.get(style, "MUSIC")
+        painter.drawText(QRectF(26, 333, 340, 26), Qt.AlignmentFlag.AlignLeft, footer)
+        painter.end()
+        return image
+
+    def _paint_artwork_card(self):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        path = QPainterPath()
+        path.addRoundedRect(bounds, 14, 14)
+        painter.fillPath(path, QColor("#242427" if self._hover > 0 else "#1E1E21"))
+        painter.setPen(QPen(QColor(255, 255, 255, int(15 + 32 * self._hover)), 1))
+        painter.drawPath(path)
+        side = min(112.0, bounds.height() - 28)
+        cover = QRectF(bounds.left() + 14, bounds.center().y() - side / 2, side, side)
+        painter.drawPixmap(cover, self._artwork, QRectF(self._artwork.rect()))
+        left = cover.right() + 22
+        width = max(24.0, bounds.right() - left - 74)
+        title_font = QFont(self.font().family(), 15, QFont.Weight.Bold)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(QRectF(left, bounds.center().y() - 29, width, 32),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(width)))
+        detail_font = QFont(self.font().family(), 9)
+        painter.setFont(detail_font)
+        painter.setPen(QColor("#B8B8BE"))
+        painter.drawText(QRectF(left, bounds.center().y() + 9, width, 23),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(detail_font).elidedText(self.subtitle, Qt.TextElideMode.ElideRight, int(width)))
+        button = QRectF(bounds.right() - 56, bounds.center().y() - 20, 40, 40)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(button)
+        draw_vector_icon(painter, self.action_icon, button.adjusted(11, 11, -11, -11), "#171719")
+        painter.end()
+
     def paintEvent(self, event):
+        if self._artwork is not None:
+            self._paint_artwork_card()
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bounds = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
@@ -5232,29 +5335,65 @@ class MusicPlayer(QMainWindow):
         self.search_input.setText(query)
         self.start_search()
 
+    def _eligible_mix_tracks(self, source):
+        if source == "youtube":
+            candidates = self.youtube_liked_tracks
+        elif source == "soundcloud":
+            candidates = self.soundcloud_liked_tracks
+        else:
+            candidates = list(self.favorites.values())
+        tracks, seen = [], set()
+        for track in candidates:
+            if not isinstance(track, dict) or not track.get("url") or self.is_disliked(track):
+                continue
+            key = self.youtube_video_id(track) if source == "youtube" else self.favorite_key(track)
+            key = key or self.favorite_key(track)
+            if key not in seen:
+                tracks.append(dict(track))
+                seen.add(key)
+        return tracks
+
     def play_personal_mix(self, source=None):
         """Создаёт персональный микс из уже импортированных лайков."""
         source = source or self.current_source
-        if source == "youtube":
-            tracks = list(self.youtube_liked_tracks)
-        elif source == "soundcloud":
-            tracks = list(self.soundcloud_liked_tracks)
-        else:
-            tracks = list(self.favorites.values())
-
-        tracks = [track for track in tracks
-                  if isinstance(track, dict) and track.get("url") and not self.is_disliked(track)]
+        tracks = self._eligible_mix_tracks(source)
         if not tracks:
-            QMessageBox.information(
-                self,
-                "Нет любимых треков",
-                "Синхронизируйте лайки во вкладке «Лайки» или добавьте треки в избранное, "
-                "чтобы собрать персональный микс."
-            )
+            QMessageBox.information(self, "Нет любимых треков",
+                                    "Открой «Мои лайки» и добавь любимые треки или синхронизируй библиотеку.")
             return
-
         random.shuffle(tracks)
         mix_tracks = tracks[:50]
+        self._start_likes_queue(mix_tracks, source, f"Перемешаны твои лайки: {len(mix_tracks)} треков.")
+
+    def play_supermix(self):
+        """Чередует исполнителей из собственных лайков без общего поиска музыки."""
+        tracks = self._eligible_mix_tracks("youtube")
+        if not tracks:
+            QMessageBox.information(self, "Супермикс",
+                                    "Сначала добавь треки в «Мои лайки» YouTube Music.")
+            return
+        buckets = {}
+        for track in tracks:
+            artist = str(track.get("artist") or "Исполнитель неизвестен").strip().casefold()
+            buckets.setdefault(artist, []).append(track)
+        for group in buckets.values():
+            random.shuffle(group)
+        result, previous = [], None
+        while buckets and len(result) < 75:
+            artists = list(buckets)
+            random.shuffle(artists)
+            if len(artists) > 1 and artists[0] == previous:
+                artists[0], artists[1] = artists[1], artists[0]
+            for artist in artists:
+                result.append(buckets[artist].pop())
+                previous = artist
+                if not buckets[artist]:
+                    del buckets[artist]
+                if len(result) >= 75:
+                    break
+        self._start_likes_queue(result, "youtube", f"Супермикс из твоих лайков: {len(result)} треков.")
+
+    def _start_likes_queue(self, tracks, source, message):
         self.cancel_pending_request()
         self.queue_tracks = []
         self.queue_list.clear()
@@ -5269,7 +5408,7 @@ class MusicPlayer(QMainWindow):
         self._radio_waiting_for_tracks = False
         self._shuffle_history.clear()
         self._soundcloud_queue_waiting = False
-        for track in mix_tracks:
+        for track in tracks:
             queued_track = dict(track)
             queued_track["queue_id"] = uuid4().hex
             if source == "youtube":
@@ -5278,7 +5417,7 @@ class MusicPlayer(QMainWindow):
 
         self.refresh_queue_list()
         self.toggle_queue_if_hidden()
-        self.set_status(f"Перемешаны твои лайки: {len(mix_tracks)} треков.", source)
+        self.set_status(message, source)
         self.play_queue_index(0)
 
     def start_playlist_url(self, title, url, source=None):
@@ -5827,15 +5966,10 @@ class MusicPlayer(QMainWindow):
         accent = "#FF5500" if source == "soundcloud" else "#1DB954"
         card = SpotifyPlaylistCard(
             "Мои лайки", subtitle, "♥", accent, "#181818", self.start_cards_widget,
-            action_icon="open"
+            action_icon="open", artwork_style="soundcloud-likes" if source == "soundcloud" else "likes"
         )
-        card.setMinimumHeight(190)
+        card.setFixedHeight(148)
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        if source == "soundcloud":
-            cover_url = next((normalize_artwork_url(track.get("thumbnail"))
-                              for track in tracks if isinstance(track, dict) and track.get("thumbnail")), "")
-            if cover_url:
-                self.request_card_cover(cover_url, card)
         card.clicked.connect(lambda checked=False, src=source: self.open_likes_library(src))
         self.start_cards.append(card)
         self.start_cards_layout.addWidget(card)
@@ -5852,17 +5986,22 @@ class MusicPlayer(QMainWindow):
                 widget.deleteLater()
         self.start_cards = []
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
-        heading = QLabel("ТВОЯ МУЗЫКА")
-        heading.setObjectName("startSectionTitle")
-        self.start_cards_layout.addWidget(heading)
         self._add_likes_start_card(source)
 
         if source == "youtube":
+            supermix = SpotifyPlaylistCard(
+                "Супермикс", "Из твоих лайков · с чередованием исполнителей",
+                "🪄", "#EC412B", "#F5AF45", self.start_cards_widget, artwork_style="supermix"
+            )
+            supermix.setFixedHeight(148)
+            supermix.clicked.connect(lambda checked=False: self.play_supermix())
+            self.start_cards.append(supermix)
+            self.start_cards_layout.addWidget(supermix)
             mix = SpotifyPlaylistCard(
                 "Перемешать мои лайки", "До 50 треков из твоих лайков в случайном порядке",
-                "🎧", "#315C62", "#171C22", self.start_cards_widget
+                "🎧", "#315C62", "#171C22", self.start_cards_widget, artwork_style="shuffle"
             )
-            mix.setMinimumHeight(150)
+            mix.setFixedHeight(148)
             mix.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             mix.clicked.connect(lambda checked=False, src=source: self.play_personal_mix(src))
             self.start_cards.append(mix)

@@ -267,7 +267,9 @@ class PlayerChanges(unittest.TestCase):
         self.w.rebuild_start_cards()
         self.assertEqual([card.title for card in self.w.start_cards], ['Мои лайки'])
         self.assertEqual(self.w.start_cards[0].action_icon, 'open')
-        self.assertEqual(self.w.start_cards_layout.count(), 3)
+        self.assertFalse(any(isinstance(self.w.start_cards_layout.itemAt(i).widget(), m.QLabel)
+                             for i in range(self.w.start_cards_layout.count())))
+        self.assertEqual(self.w.start_cards_layout.count(), 2)
         with patch.object(self.w, 'start_search') as search, \
              patch.object(self.w, 'start_playlist_url') as playlist, \
              patch.object(self.w, 'play_queue_index') as play:
@@ -282,11 +284,11 @@ class PlayerChanges(unittest.TestCase):
             play.assert_not_called()
         self.assertEqual(self.w.custom_playlists[0]['title'], 'Saved playlist')
 
-    def test_youtube_home_has_likes_navigation_and_shuffle_only(self):
+    def test_youtube_home_has_one_supermix_and_likes_actions(self):
         self.w.current_source = 'youtube'
         self.w.rebuild_start_cards()
         self.assertEqual([card.title for card in self.w.start_cards],
-                         ['Мои лайки', 'Перемешать мои лайки'])
+                         ['Мои лайки', 'Супермикс', 'Перемешать мои лайки'])
         self.w.likes_tabs.setCurrentIndex(1)
         self.w.likes_search_input.setText('old filter')
         with patch.object(self.w, 'start_search') as search, \
@@ -309,7 +311,7 @@ class PlayerChanges(unittest.TestCase):
         with patch.object(m.random, 'shuffle', side_effect=lambda tracks: tracks.reverse()), \
              patch.object(self.w, 'play_track') as play, \
              patch.object(self.w, 'start_search') as search:
-            self.w.start_cards[1].click()
+            self.w.start_cards[2].click()
             self.assertEqual(len(self.w.queue_tracks), 50)
             self.assertEqual(self.w.queue_tracks[0]['url'], liked[-2]['url'])
             allowed = {track['url'] for track in liked[:-1]}
@@ -332,6 +334,51 @@ class PlayerChanges(unittest.TestCase):
                 self.w.ensure_following_track_prepared()
                 radio.assert_not_called()
             play.assert_not_called()
+
+    def test_supermix_alternates_artists_and_uses_unique_own_likes(self):
+        tracks = [dict(self.youtube_track(f'super{artist}{i:05}'), artist=artist)
+                  for artist in ('Alpha', 'Beta', 'Gamma') for i in range(40)]
+        self.w.youtube_liked_tracks = tracks + [dict(tracks[0])]
+        self.w.disliked_track_keys.add(self.w.radio_track_key(tracks[-1]))
+        self.w.current_source = 'youtube'
+        self.w.rebuild_start_cards()
+        with patch.object(self.w, 'play_track') as play, \
+             patch.object(self.w, 'start_search') as search:
+            self.w.start_cards[1].click()
+            queue = self.w.queue_tracks
+            self.assertEqual(len(queue), 75)
+            ids = [self.w.youtube_video_id(track) for track in queue]
+            self.assertEqual(len(set(ids)), 75)
+            self.assertNotIn(self.w.youtube_video_id(tracks[-1]), ids)
+            self.assertTrue(set(ids) <= {self.w.youtube_video_id(track) for track in tracks})
+            self.assertTrue(all(a['artist'] != b['artist'] for a, b in zip(queue, queue[1:])))
+            self.assertEqual(self.w.queue_mode, 'youtube_likes')
+            play.assert_called_once_with(queue[0], 0)
+            search.assert_not_called()
+        self.assertEqual(self.w.youtube_liked_tracks, tracks + [dict(tracks[0])])
+
+    def test_supermix_single_artist_and_duplicate_video_ids(self):
+        first = dict(self.youtube_track('samevideo01'), artist='Artist')
+        alternate_url = dict(first, url='https://youtu.be/samevideo01')
+        second = dict(self.youtube_track('samevideo02'), artist=' Artist ')
+        self.w.youtube_liked_tracks = [first, alternate_url, second]
+        with patch.object(self.w, 'play_track'):
+            self.w.play_supermix()
+        self.assertEqual(len(self.w.queue_tracks), 2)
+        self.assertEqual({self.w.youtube_video_id(t) for t in self.w.queue_tracks},
+                         {'samevideo01', 'samevideo02'})
+
+    def test_supermix_without_likes_preserves_current_queue(self):
+        existing = self.youtube_track('alreadyplay1')
+        self.w.queue_tracks = [existing]
+        with patch.object(m.QMessageBox, 'information') as message, \
+             patch.object(self.w, 'start_search') as search, \
+             patch.object(self.w, 'play_track') as play:
+            self.w.play_supermix()
+            message.assert_called_once()
+            search.assert_not_called()
+            play.assert_not_called()
+        self.assertEqual(self.w.queue_tracks, [existing])
 
     def test_shuffle_without_likes_does_not_search_for_generic_music(self):
         self.w.current_source = 'youtube'
