@@ -42,6 +42,16 @@ from PyQt6.QtWidgets import (
 from yt_dlp import YoutubeDL
 
 
+def yt_dlp_tls_options():
+    """Проверяет HTTPS и учитывает явно настроенное системное хранилище CA."""
+    options = {"nocheckcertificate": False}
+    # yt-dlp по умолчанию выбирает certifi и игнорирует SSL_CERT_FILE/SSL_CERT_DIR.
+    # Поддерживаем доверенные CA пользователя/прокси без отключения проверки TLS.
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        options["compat_opts"] = {"no-certifi"}
+    return options
+
+
 # -------------------------------------------------------------
 # Загрузка шрифта Manrope, установленного пользователем.
 # Можно установить его в Windows ИЛИ положить .ttf/.otf в fonts/.
@@ -1279,13 +1289,13 @@ class SearchWorker(QThread):
             # Обычному поиску SoundCloud достаточно плоской выдачи без структуры плейлиста.
             extract_flat_mode = True
         options = {
+            **yt_dlp_tls_options(),
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
             "extract_flat": extract_flat_mode,
             "lazy_playlist": True,
             "ignoreerrors": True,
-            "nocheckcertificate": True,
             "noplaylist": False,
             # playliststart/end позволяют получать следующую страницу лайков,
             # а не каждый раз останавливаться на первых 100 элементах.
@@ -1856,6 +1866,7 @@ class StreamWorker(QThread):
             "compatibility": "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best",
         }
         options = {
+            **yt_dlp_tls_options(),
             "format": format_options.get(self.audio_quality, format_options["auto"]),
             "quiet": True,
             "no_warnings": True,
@@ -1942,6 +1953,7 @@ class TrackArtworkWorker(QThread):
         url = str(self.track.get("url") or "")
         try:
             options = {
+                **yt_dlp_tls_options(),
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
@@ -2957,7 +2969,7 @@ class SettingsDialog(QDialog):
 
         self.fade = MenuChoice(
             [(f"{ms} мс", ms) for ms in (120, 180, 240, 300, 450, 600, 900, 1200, 1500, 1800, 2400, 3000)],
-            player.fade_total_steps * 30, width=214, suffix=" мс"
+            player.fade_duration_ms, width=214, suffix=" мс"
         )
         play_layout.addLayout(self._form_row("Плавный переход", self.fade))
 
@@ -3186,7 +3198,7 @@ class SettingsDialog(QDialog):
             player.apply_styles()
         player.minimize_to_tray = self.minimize_to_tray.isChecked()
         player.hide_on_minimize = self.hide_on_minimize.isChecked()
-        player.fade_total_steps = max(4, min(200, round(int(self.fade.value()) / 30)))
+        player.fade_duration_ms = max(120, min(6000, int(self.fade.value())))
         player.repeat_mode = self.repeat.currentData()
         player.refresh_repeat_button()
         player.shuffle_button.setChecked(self.shuffle.isChecked())
@@ -3282,7 +3294,7 @@ class DownloadWorker(QThread):
                     total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
                     if total:
                         self.progress.emit(min(100, int(status.get("downloaded_bytes", 0) * 100 / total)))
-            options = {"format": "bestaudio/best", "outtmpl": str(folder / (stem + ".%(ext)s")),
+            options = {**yt_dlp_tls_options(), "format": "bestaudio/best", "outtmpl": str(folder / (stem + ".%(ext)s")),
                        "noplaylist": True, "quiet": True, "no_warnings": True, "progress_hooks": [hook]}
             with YoutubeDL(options) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -3301,6 +3313,8 @@ class DownloadWorker(QThread):
 
 
 class MusicPlayer(QMainWindow):
+    PENDING_MEDIA_TIMEOUT_MS = 20_000
+
     def install_shortcuts(self):
         self._shortcuts = []
         def bind(keys, callback):
@@ -3474,6 +3488,9 @@ class MusicPlayer(QMainWindow):
         self.youtube_liked_tracks = self.load_youtube_likes()
         self._youtube_rating_workers = set()
         self._youtube_rating_pending = set()
+        # Оптимистическое состояние кнопок не попадает в подтверждённый кэш.
+        self._youtube_rating_targets = {}
+        self._youtube_sync_rating_changes = {}
         # SoundCloud: сессия браузера для личных данных либо публичный URL профиля.
         self.soundcloud_auth_mode = str(self.settings.value("soundcloud_auth_mode", "profile") or "profile")
         self.soundcloud_browser = str(self.settings.value("soundcloud_browser", "chrome") or "chrome")
@@ -3623,6 +3640,9 @@ class MusicPlayer(QMainWindow):
         self.request_id = 0                   # Игнорируем устаревшие запросы.
         self.pending_slot = None              # Плеер, в котором запускаем новую песню.
         self.pending_started = None
+        self.pending_media_timer = QTimer(self)
+        self.pending_media_timer.setSingleShot(True)
+        self.pending_media_timer.timeout.connect(self.on_pending_media_timeout)
         self.pending_media_url = None
         self.pending_position_seen = False
         self.pending_ever_loaded = False
@@ -3636,8 +3656,13 @@ class MusicPlayer(QMainWindow):
         self.fade_timer.setInterval(30)
         self.fade_timer.timeout.connect(self.fade_step)
         self.fade_old_slot = None
-        self.fade_step_count = 0
-        self.fade_total_steps = max(4, min(200, int(self.settings.value("fade_steps", 50))))  # Шаг 30 мс.
+        self.fade_started_at = None
+        # Старые настройки шагов сохраняют выбранную пользователем длительность.
+        legacy_fade_ms = max(4, min(200, int(self.settings.value("fade_steps", 10)))) * 30
+        self.fade_duration_ms = max(120, min(6000, int(
+            self.settings.value("fade_duration_ms", legacy_fade_ms)
+        )))
+        self.fade_active_duration_ms = self.fade_duration_ms
         self.last_switch_seconds = None
 
         # Обложки кэшируются в памяти (LRU) и на диске между запусками.
@@ -4631,7 +4656,8 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("audio_quality", self.audio_quality)
         self.settings.setValue("minimize_to_tray", self.minimize_to_tray)
         self.settings.setValue("hide_on_minimize", self.hide_on_minimize)
-        self.settings.setValue("fade_steps", self.fade_total_steps)
+        self.settings.setValue("fade_duration_ms", self.fade_duration_ms)
+        self.settings.setValue("fade_steps", round(self.fade_duration_ms / 30))
         self.settings.setValue("sidebar_collapsed", self.sidebar_collapsed)
         self.settings.setValue("repeat_mode", self.repeat_mode)
         self.settings.setValue("shuffle", self.shuffle_enabled)
@@ -7041,6 +7067,7 @@ class MusicPlayer(QMainWindow):
             self.set_status("Синхронизация уже выполняется…", "likes")
             return
         self._youtube_likes_before_sync = [dict(track) for track in self.youtube_liked_tracks]
+        self._youtube_sync_rating_changes = {}
         self._youtube_sync_error = ""
         self._youtube_sync_had_results = False
         self.sync_account_button.setEnabled(False)
@@ -7058,6 +7085,19 @@ class MusicPlayer(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
+    def _merge_youtube_sync_rating_changes(self, tracks):
+        """Свежие подтверждённые клики имеют приоритет над снимком плейлиста LM."""
+        changes = self._youtube_sync_rating_changes
+        merged = [dict(track) for track in tracks if isinstance(track, dict)
+                  and (self.youtube_video_id(track) not in changes
+                       or changes[self.youtube_video_id(track)][1])]
+        seen = {self.youtube_video_id(track) for track in merged}
+        for video_id, (track, liked) in changes.items():
+            if liked and video_id not in seen:
+                merged.append(dict(track))
+                seen.add(video_id)
+        return merged
+
     def on_youtube_likes_results(self, worker, tracks, note):
         if worker is not self.youtube_sync_worker:
             return
@@ -7066,6 +7106,8 @@ class MusicPlayer(QMainWindow):
         is_page = note.startswith("__SC_LIKES_PAGE__:")
         is_done = note.startswith("__SC_LIKES_DONE__:")
         if is_done:
+            if not self._youtube_sync_page_seen:
+                self.youtube_liked_tracks = self._merge_youtube_sync_rating_changes([])
             self._youtube_sync_had_results = bool(self.youtube_liked_tracks)
             self.set_status(
                 f"Получено {len(self.youtube_liked_tracks)} треков из YouTube Music…", "likes"
@@ -7108,7 +7150,9 @@ class MusicPlayer(QMainWindow):
 
         if normalized:
             self._youtube_sync_had_results = True
+        self.youtube_liked_tracks = self._merge_youtube_sync_rating_changes(self.youtube_liked_tracks)
         self.refresh_likes_list()
+        self._refresh_youtube_like_buttons()
         self.set_status(f"Получено {len(self.youtube_liked_tracks)} треков из YouTube Music…", "likes")
 
     def on_youtube_likes_error(self, worker, error):
@@ -7124,8 +7168,11 @@ class MusicPlayer(QMainWindow):
         if self._youtube_sync_error:
             # При неудачном обновлении сохраняем последний удачный импорт,
             # даже если worker успел показать промежуточную порцию.
-            self.youtube_liked_tracks = self._youtube_likes_before_sync
+            self.youtube_liked_tracks = self._merge_youtube_sync_rating_changes(self._youtube_likes_before_sync)
+            self._youtube_sync_rating_changes.clear()
+            self.save_youtube_likes()
             self.refresh_likes_list()
+            self._refresh_youtube_like_buttons()
             raw_error = self._youtube_sync_error.replace("\n", " ")
             if any(token in raw_error.casefold() for token in (
                 "не смог прочитать cookies", "cookies database", "cookie database",
@@ -7145,12 +7192,15 @@ class MusicPlayer(QMainWindow):
         if self._youtube_sync_had_results or not self._youtube_sync_error:
             if not self._youtube_sync_had_results:
                 self.youtube_liked_tracks = []
+            self.youtube_liked_tracks = self._merge_youtube_sync_rating_changes(self.youtube_liked_tracks)
+            self._youtube_sync_rating_changes.clear()
             self._youtube_last_sync_at = time.time()
             self.settings.setValue("youtube_last_sync_at", self._youtube_last_sync_at)
             self.save_youtube_likes()
             count = len(self.youtube_liked_tracks)
             self.set_status(f"Синхронизировано с YouTube Music: {count} треков", "likes")
             self.refresh_likes_list()
+            self._refresh_youtube_like_buttons()
         else:
             self.set_status("YouTube Music не вернул лайки. Проверь авторизацию и доступ к плейлисту LM.", "likes")
 
@@ -7227,21 +7277,19 @@ class MusicPlayer(QMainWindow):
         video_id = self.youtube_video_id(track)
         if not video_id:
             return bool(isinstance(track, dict) and track.get("youtube_music_like"))
+        if video_id in self._youtube_rating_targets:
+            return self._youtube_rating_targets[video_id]
         return any(self.youtube_video_id(saved) == video_id for saved in self.youtube_liked_tracks
                    if isinstance(saved, dict))
 
-    def _refresh_youtube_like_buttons(self, video_id):
+    def _refresh_youtube_like_buttons(self, video_id=None):
         """Обновляет сердечки YouTube во всех видимых списках и нижней панели."""
-        if not video_id:
+        if video_id == "":
             self.update_bottom_track_actions()
             return
 
-        liked = any(
-            self.youtube_video_id(saved) == video_id
-            for saved in self.youtube_liked_tracks
-            if isinstance(saved, dict)
-        )
-        pending = video_id in self._youtube_rating_pending
+        liked_ids = {self.youtube_video_id(saved) for saved in self.youtube_liked_tracks
+                     if isinstance(saved, dict)}
 
         for list_widget in (
             getattr(self, "source_list", None),
@@ -7255,15 +7303,18 @@ class MusicPlayer(QMainWindow):
             for index in range(list_widget.count()):
                 item = list_widget.item(index)
                 row = list_widget.itemWidget(item)
-                row_track = item.data(Qt.ItemDataRole.UserRole)
+                row_track = row.track if isinstance(row, TrackRow) else None
 
-                if not isinstance(row, TrackRow) or not isinstance(row_track, dict):
+                if not isinstance(row_track, dict) or not hasattr(row, "favorite_button"):
                     continue
                 if str(row_track.get("source") or "") != "youtube":
                     continue
-                if self.youtube_video_id(row_track) != video_id:
+                row_video_id = self.youtube_video_id(row_track)
+                if not row_video_id or (video_id is not None and row_video_id != video_id):
                     continue
 
+                liked = self._youtube_rating_targets.get(row_video_id, row_video_id in liked_ids)
+                pending = row_video_id in self._youtube_rating_pending
                 button = row.favorite_button
                 signals_were_blocked = button.blockSignals(True)
                 try:
@@ -7275,8 +7326,9 @@ class MusicPlayer(QMainWindow):
                     button.setIconSize(QSize(22, 22))
                     button.setEnabled(not pending)
                     button.setToolTip(
-                        "Снять лайк в YouTube Music" if liked
-                        else "Поставить настоящий лайк в аккаунте YouTube Music"
+                        "Отправляю изменение в YouTube Music…" if pending else
+                        ("Снять лайк в YouTube Music" if liked
+                         else "Поставить настоящий лайк в аккаунте YouTube Music")
                     )
 
                     # Применяем стиль и запрашиваем перерисовку только ПОСЛЕ
@@ -7311,6 +7363,7 @@ class MusicPlayer(QMainWindow):
             return
 
         self._youtube_rating_pending.add(video_id)
+        self._youtube_rating_targets[video_id] = liked
         self._refresh_youtube_like_buttons(video_id)
         browser_spec = ""
         if self.youtube_auth_mode == "browser":
@@ -7332,6 +7385,7 @@ class MusicPlayer(QMainWindow):
         """Применяет изменение кэша только после успешного ответа YouTube Music."""
         video_id = self.youtube_video_id(track)
         self._youtube_rating_pending.discard(video_id)
+        self._youtube_rating_targets.pop(video_id, None)
         if success:
             if liked:
                 saved = dict(track)
@@ -7346,6 +7400,9 @@ class MusicPlayer(QMainWindow):
                     item for item in self.youtube_liked_tracks
                     if not isinstance(item, dict) or self.youtube_video_id(item) != video_id
                 ]
+            if self.youtube_sync_worker is not None:
+                saved_change = dict(track, source="youtube", video_id=video_id, youtube_music_like=True)
+                self._youtube_sync_rating_changes[video_id] = (saved_change, bool(liked))
             self._youtube_last_sync_at = time.time()
             self.settings.setValue("youtube_last_sync_at", self._youtube_last_sync_at)
             self.settings.sync()
@@ -8562,6 +8619,7 @@ class MusicPlayer(QMainWindow):
             self.audio_outputs[old].setVolume(0.0)
             self.players[old].setSource(QUrl())
             self.fade_old_slot = None
+        self.fade_started_at = None
         self.audio_outputs[self.active_slot].setVolume(self.volume)
 
     def _clear_loading_indicators(self):
@@ -8587,6 +8645,7 @@ class MusicPlayer(QMainWindow):
         self.requested_index = -1
         self.stream_pending_track = None
         self.stop_fade()
+        self.pending_media_timer.stop()
         if self.pending_slot is not None:
             slot = self.pending_slot
             self.pending_slot = None
@@ -8850,6 +8909,7 @@ class MusicPlayer(QMainWindow):
             QMediaPlayer.MediaStatus.BufferedMedia,
         ) and player.source() == media_url
         self.pending_position_seen = False
+        self.pending_media_timer.start(self.PENDING_MEDIA_TIMEOUT_MS)
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url:
@@ -8858,9 +8918,21 @@ class MusicPlayer(QMainWindow):
             self.standby_ready = False
             player.setSource(media_url)
         # Запускаем сразу, не ожидая LoadedMedia; звук переключится по движению позиции.
+        if self.pending_slot != slot or self.requested_track is None:
+            return
         player.play()
-        self.set_status("Загружаю звук на втором плеере; предыдущий продолжает играть…")
+        if self.pending_slot == slot:
+            self.set_status("Загружаю звук на втором плеере; предыдущий продолжает играть…")
         logging.getLogger("aurora").info(f"[Music Player] Qt запускает второй поток ({origin})")
+
+    def on_pending_media_timeout(self):
+        """Ограничивает ожидание Qt; обработчик ошибки сохраняет старый трек."""
+        if self.pending_slot is None or self.requested_track is None:
+            return
+        self.on_slot_error(
+            self.pending_slot, QMediaPlayer.Error.ResourceError,
+            "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз."
+        )
 
     def on_slot_position(self, slot, position):
         """Отслеживает позицию обоих плееров и безопасно запускает автопереход."""
@@ -8970,6 +9042,7 @@ class MusicPlayer(QMainWindow):
         """Второй плеер уже начал проигрывать — можно переключать звук."""
         if self.pending_slot is None or self.requested_track is None:
             return
+        self.pending_media_timer.stop()
         new = self.pending_slot
         old = self.active_slot
         self.active_slot = new
@@ -9018,15 +9091,14 @@ class MusicPlayer(QMainWindow):
         QTimer.singleShot(0, self.prepare_next_track)
         self.set_status(f"Играет: {title}")
 
-        # Делаем короткое перекрытие двух треков. Если старый остановлен,
-        # просто выводим громкость нового за те же 300 мс.
+        # Делаем перекрытие заданной длительности только для играющего старого трека.
         # Для остановленного или пустого слота пропускаем этот переход.
         self.fade_old_slot = (
             old if (not self.players[old].source().isEmpty()
                     and self.players[old].playbackState() == QMediaPlayer.PlaybackState.PlayingState)
             else None
         )
-        self.fade_step_count = 0
+        self.fade_started_at = None
         if self.fade_old_slot is None:
             self.fade_timer.stop()
             self.players[old].stop()
@@ -9034,19 +9106,27 @@ class MusicPlayer(QMainWindow):
             self.players[old].setSource(QUrl())
             self.audio_outputs[new].setVolume(self.volume)
         else:
+            self.fade_active_duration_ms = self.fade_duration_ms
+            self.fade_started_at = time.monotonic()
             self.fade_timer.start()
+
+    def _fade_progress(self):
+        if self.fade_started_at is None:
+            return 1.0
+        elapsed_ms = (time.monotonic() - self.fade_started_at) * 1000
+        return max(0.0, min(1.0, elapsed_ms / self.fade_active_duration_ms))
 
     def fade_step(self):
         if self.fade_old_slot is None:
             self.fade_timer.stop()
             return
-        self.fade_step_count += 1
-        progress = min(1.0, self.fade_step_count / self.fade_total_steps)
+        progress = self._fade_progress()
         self.audio_outputs[self.active_slot].setVolume(self.volume * progress)
         self.audio_outputs[self.fade_old_slot].setVolume(self.volume * (1 - progress))
         if progress >= 1:
             old = self.fade_old_slot
             self.fade_old_slot = None
+            self.fade_started_at = None
             self.fade_timer.stop()
             self.players[old].stop()
             self.players[old].setSource(QUrl())
@@ -9059,6 +9139,7 @@ class MusicPlayer(QMainWindow):
             return
         logging.getLogger("aurora").info(f"[Music Player] Ошибка Qt слота {slot}: {message}")
         if slot == self.pending_slot:
+            self.pending_media_timer.stop()
             self.pending_slot = None
             self.pending_media_url = None
             self.players[slot].stop()
@@ -9120,7 +9201,7 @@ class MusicPlayer(QMainWindow):
         if hasattr(self, "volume_value_label"):
             self.volume_value_label.setText(f"{value}%")
         if self.fade_timer.isActive() and self.fade_old_slot is not None:
-            progress = min(1.0, self.fade_step_count / self.fade_total_steps)
+            progress = self._fade_progress()
             self.audio_outputs[self.active_slot].setVolume(self.volume * progress)
             self.audio_outputs[self.fade_old_slot].setVolume(self.volume * (1.0 - progress))
         else:
@@ -9209,6 +9290,7 @@ class MusicPlayer(QMainWindow):
             event.ignore()
             return
         self.fade_timer.stop()
+        self.pending_media_timer.stop()
         self.save_preferences()
         for player in self.players:
             player.stop()
