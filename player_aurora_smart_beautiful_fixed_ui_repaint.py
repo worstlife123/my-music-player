@@ -430,6 +430,11 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawPolygon(QPolygonF([QPointF(-6, -10), QPointF(-6, 10), QPointF(10, 0)]))
+    elif kind == "pause":
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRectF(-9, -10, 6, 20), 1.5, 1.5)
+        painter.drawRoundedRect(QRectF(3, -10, 6, 20), 1.5, 1.5)
     elif kind in ("arrow-right", "open"):
         painter.setPen(QPen(color, 3, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -575,6 +580,11 @@ class SpotifyPlaylistCard(QPushButton):
         self._hover = 0.0
         self.cover_url = cover_url
         self._cover_pixmap = None
+        self.playback_state = "idle"
+        self._equalizer_phase = 0
+        self._equalizer_timer = QTimer(self)
+        self._equalizer_timer.setInterval(120)
+        self._equalizer_timer.timeout.connect(self._advance_equalizer)
         self.setObjectName("startCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(172)
@@ -586,6 +596,61 @@ class SpotifyPlaylistCard(QPushButton):
         self._hover_animation.setDuration(190)
         self._hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._hover_animation.valueChanged.connect(self._set_hover)
+
+    def set_playback_state(self, state):
+        if state == self.playback_state:
+            return
+        self.playback_state = state
+        descriptions = {"playing": "Сейчас играет", "paused": "На паузе",
+                        "waiting": "Жду продолжение", "loading": "Загружается"}
+        self.setAccessibleName(f"{self.title}: {descriptions.get(state, self.subtitle)}")
+        if state in ("playing", "paused"):
+            self.setToolTip("Поставить супермикс на паузу" if state == "playing" else "Продолжить супермикс")
+        else:
+            self.setToolTip(f"{self.title} — {descriptions.get(state, self.subtitle)}")
+        self._update_equalizer_timer()
+        self.update()
+
+    def _update_equalizer_timer(self):
+        if self.playback_state == "playing" and self.isVisible():
+            if not self._equalizer_timer.isActive():
+                self._equalizer_timer.start()
+        else:
+            self._equalizer_timer.stop()
+
+    def _advance_equalizer(self):
+        self._equalizer_phase = (self._equalizer_phase + 1) % 12
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_equalizer_timer()
+
+    def hideEvent(self, event):
+        self._equalizer_timer.stop()
+        super().hideEvent(event)
+
+    def _paint_playback_badge(self, painter, cover):
+        if self.playback_state == "idle":
+            return
+        labels = {"playing": "Сейчас играет", "paused": "На паузе",
+                  "waiting": "Продолжение…", "loading": "Загрузка…"}
+        label = labels[self.playback_state]
+        font = QFont(self.font().family(), 8, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        width = min(cover.width() - 12, QFontMetrics(font).horizontalAdvance(label) + 40)
+        badge = QRectF(cover.left() + 6, cover.top() + 7, width, 27)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(12, 34, 24, 235))
+        painter.drawRoundedRect(badge, 13, 13)
+        painter.setBrush(QColor("#68E59C"))
+        for index in range(4):
+            height = (5 + 9 * (0.5 + 0.5 * math.sin(self._equalizer_phase * 0.9 + index * 1.8))
+                      if self.playback_state == "playing" else (5, 9, 9, 5)[index])
+            painter.drawRoundedRect(QRectF(badge.left() + 10 + index * 4, badge.center().y() - height / 2, 2.5, height), 1, 1)
+        painter.setPen(QColor("#D8FFE5"))
+        painter.drawText(badge.adjusted(31, 0, -5, 0), Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(font).elidedText(label, Qt.TextElideMode.ElideRight, int(width - 36)))
 
     def set_cover(self, pixmap):
         self._cover_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else None
@@ -737,9 +802,13 @@ class SpotifyPlaylistCard(QPushButton):
         if not self.isEnabled():
             painter.setOpacity(0.55)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        painter.setPen(QPen(QColor("#DDE1E6" if light else "#30343C"), 1))
-        painter.setBrush(QColor(("#EBEEF2" if self._hover > 0 else "#F4F5F7") if light
-                               else ("#272B33" if self._hover > 0 else "#1D2026")))
+        active = self.playback_state in ("playing", "paused", "waiting")
+        border = ("#278454" if light else "#48CB83") if active else ("#DDE1E6" if light else "#30343C")
+        painter.setPen(QPen(QColor(border), 1.5 if active else 1))
+        background = ("#E5F4EB" if light else "#193026") if active else (
+            ("#EBEEF2" if self._hover > 0 else "#F4F5F7") if light else
+            ("#272B33" if self._hover > 0 else "#1D2026"))
+        painter.setBrush(QColor(background))
         painter.drawRoundedRect(bounds, 16, 16)
         side = self.width() - 28
         cover = QRectF(14, 14, side, side)
@@ -754,15 +823,18 @@ class SpotifyPlaylistCard(QPushButton):
             crop = QRectF((scaled.width() - side) / 2, (scaled.height() - side) / 2, side, side)
             painter.drawPixmap(cover, scaled, crop)
             painter.restore()
-        # Every tile stays clickable; hover makes its action more prominent.
+        self._paint_playback_badge(painter, cover)
+        # Active Supermix controls the running session instead of starting another one.
         button = QRectF(cover.right() - 43, cover.bottom() - 43, 35, 35)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#1ED760" if self._hover > 0 else "#FFFFFF"))
+        painter.setBrush(QColor("#1ED760" if active or self._hover > 0 else "#FFFFFF"))
         painter.drawEllipse(button)
-        draw_vector_icon(painter, self.action_icon, button.adjusted(10, 10, -10, -10), "#11161A")
+        action = "pause" if self.playback_state == "playing" else self.action_icon
+        draw_vector_icon(painter, action, button.adjusted(10, 10, -10, -10), "#11161A")
         title_font = QFont(self.font().family(), 11, QFont.Weight.Bold)
         painter.setFont(title_font)
-        painter.setPen(QColor("#18202A" if light else "#F5F7FA"))
+        painter.setPen(QColor(("#237B4A" if light else "#82E8AC") if active else
+                              ("#18202A" if light else "#F5F7FA")))
         painter.drawText(QRectF(14, cover.bottom() + 10, side, 24), Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(side)))
         painter.setFont(QFont(self.font().family(), 9))
@@ -5102,7 +5174,7 @@ class MusicPlayer(QMainWindow):
         self.theme_button.clicked.connect(self.toggle_theme)
         self.connect_account_button.clicked.connect(self.connect_youtube_account)
         self.connect_soundcloud_button.clicked.connect(self.connect_soundcloud_account)
-        self.sync_account_button.clicked.connect(self.sync_youtube_likes)
+        self.sync_account_button.clicked.connect(self.sync_selected_likes)
         self.disconnect_account_button.clicked.connect(self.disconnect_youtube_account)
         # Строки TrackRow сами обрабатывают один клик; не подключаем itemClicked,
         # чтобы одно нажатие не добавляло одну песню в очередь дважды.
@@ -5812,6 +5884,43 @@ class MusicPlayer(QMainWindow):
                                  else "Персональная подборка YouTube Music")
                 card.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.PointingHandCursor)
                 card.update()
+        self.refresh_supermix_card()
+
+    def refresh_supermix_card(self):
+        if not hasattr(self, "player"):
+            return
+        session = self.supermix_session
+        state = "idle"
+        if self.supermix_worker is not None:
+            state = "loading"
+        elif session is not None and self.queue_mode == "supermix":
+            uid = (self.current_track or {}).get("queue_id")
+            current_is_mix = bool(uid and any(track.get("queue_id") == uid for track in self.queue_tracks))
+            playback = self.player.playbackState()
+            if current_is_mix and playback == QMediaPlayer.PlaybackState.PlayingState:
+                state = "playing"
+            elif current_is_mix and playback == QMediaPlayer.PlaybackState.PausedState:
+                state = "paused"
+            else:
+                state = "loading" if self.requested_track is not None else "waiting"
+        for card in self.start_cards:
+            if card.artwork_style == "supermix":
+                card.set_playback_state(state)
+
+    def toggle_supermix(self):
+        if self.supermix_session is not None and self.queue_mode == "supermix":
+            if self.supermix_session["waiting"]:
+                self.maybe_refill_supermix()
+            else:
+                uid = (self.current_track or {}).get("queue_id")
+                current_is_mix = bool(uid and any(track.get("queue_id") == uid for track in self.queue_tracks))
+                if current_is_mix:
+                    self.toggle_playback()
+                elif self.requested_track is None and self.pending_slot is None:
+                    # Retry the first track if its stream failed; leave previous audio alone while loading.
+                    self.play_queue_index(0)
+            return
+        self.play_supermix()
 
     def _cancel_supermix(self):
         if self.supermix_worker is not None:
@@ -5831,6 +5940,7 @@ class MusicPlayer(QMainWindow):
         if self.supermix_refill_worker is not None:
             self.supermix_refill_worker.cancel()
             self.supermix_refill_worker = None
+        self.refresh_supermix_card()
 
     def _make_supermix_worker(self, **kwargs):
         auth = self.youtube_auth_kwargs()
@@ -5971,6 +6081,7 @@ class MusicPlayer(QMainWindow):
         if self.supermix_session is not None:
             self.supermix_session["waiting"] = True
             self.set_status("My Supermix: жду продолжение очереди…", "youtube")
+            self.refresh_supermix_card()
             self.maybe_refill_supermix()
 
     def _start_music_queue(self, tracks, source, message, recommendations=False, supermix_session=None):
@@ -6312,6 +6423,7 @@ class MusicPlayer(QMainWindow):
                 paginate_all=(kind == "likes"), max_total=10000, **auth
             )
             self.soundcloud_profile_workers[kind] = worker
+            self.refresh_connection_badge()
             worker.results_ready.connect(lambda tracks, note, k=kind, w=worker: self.on_soundcloud_account_results(k, w, tracks, note))
             worker.failed.connect(lambda error, k=kind, w=worker: self.on_soundcloud_account_error(k, w, error))
             worker.finished.connect(lambda k=kind, w=worker: self.on_soundcloud_account_finished(k, w))
@@ -6435,10 +6547,12 @@ class MusicPlayer(QMainWindow):
             "SoundCloud: не удалось загрузить личные данные. Проверь профиль/сессию браузера. "
             + self._soundcloud_profile_status[:220]
         )
+        self.refresh_connection_badge()
 
     def on_soundcloud_account_finished(self, kind, worker):
-        if self.soundcloud_profile_workers.get(kind) is worker:
-            self.soundcloud_profile_workers.pop(kind, None)
+        if self.soundcloud_profile_workers.get(kind) is not worker:
+            return
+        self.soundcloud_profile_workers.pop(kind, None)
         if kind == "likes":
             self._soundcloud_likes_loading = False
             total = len(self.soundcloud_liked_tracks)
@@ -6454,6 +6568,7 @@ class MusicPlayer(QMainWindow):
                     QTimer.singleShot(0, lambda i=next_index: self.play_queue_index(i))
                 elif self.current_track is not None:
                     QTimer.singleShot(0, self.handle_track_finished)
+        self.refresh_connection_badge()
 
     def load_custom_playlists(self):
         raw = self.settings.value("custom_playlists_json", "[]")
@@ -6569,7 +6684,7 @@ class MusicPlayer(QMainWindow):
                 "Супермикс", "Персональная подборка YouTube Music", "🪄", "#EC412B", "#F5AF45",
                 self.home_tiles, artwork_style="supermix", tile_mode=True
             )
-            supermix.clicked.connect(lambda checked=False: self.play_supermix())
+            supermix.clicked.connect(lambda checked=False: self.toggle_supermix())
             self.start_cards.append(supermix)
             mix = SpotifyPlaylistCard(
                 "Перемешать лайки", "Любимые треки в новом порядке", "🎧", "#315C62", "#171C22",
@@ -6582,6 +6697,7 @@ class MusicPlayer(QMainWindow):
         self._home_layout_signature = None
         self.layout_home_tiles()
         self.refresh_recent_tracks()
+        self.refresh_supermix_card()
 
     def eventFilter(self, watched, event):
         if (event.type() == QEvent.Type.Resize and hasattr(self, "start_cards_scroll")
@@ -6682,18 +6798,41 @@ class MusicPlayer(QMainWindow):
             self.recent_rows_layout.addWidget(empty)
 
     def refresh_connection_badge(self):
+        """Состояние подключения и обновления относится к выбранной вкладке лайков."""
         if not hasattr(self, "connection_badge"):
             return
-        services = []
-        if self.youtube_auth_kwargs():
-            services.append("YouTube Music")
-        if self.soundcloud_is_connected():
-            services.append("SoundCloud")
-        self.connection_badge.setText("● Подключено" if services else "● Локально")
-        self.connection_badge.setToolTip(" · ".join(services) if services else "Сохранённая библиотека на этом компьютере")
-        self.connection_badge.setProperty("connected", bool(services))
+        index = self.likes_tabs.currentIndex()
+        if index == 2:
+            self.connection_badge.setText("● На устройстве")
+            self.connection_badge.setToolTip("Локальное избранное хранится на этом компьютере")
+            self.connection_badge.setProperty("connected", False)
+            self.sync_account_button.hide()
+        else:
+            youtube = index == 0
+            service = "YouTube Music" if youtube else "SoundCloud"
+            connected = bool(self.youtube_auth_kwargs()) if youtube else self.soundcloud_is_connected()
+            busy = (self.youtube_sync_worker is not None if youtube else
+                    self._soundcloud_likes_loading or "likes" in self.soundcloud_profile_workers)
+            self.connection_badge.setText("● Обновляется" if busy else ("● Подключено" if connected else "● Сохранено"))
+            self.connection_badge.setToolTip(service + (": идёт синхронизация" if busy else
+                                                       ": аккаунт подключён" if connected else ": сохранённая библиотека"))
+            self.connection_badge.setProperty("connected", connected)
+            self.sync_account_button.show()
+            self.sync_account_button.setText(("⟳ " if not busy else "… ") + ("YouTube" if youtube else "SoundCloud"))
+            self.sync_account_button.setToolTip("Синхронизировать лайки " + service)
+            self.sync_account_button.setEnabled(connected and not busy)
         self.connection_badge.style().unpolish(self.connection_badge)
         self.connection_badge.style().polish(self.connection_badge)
+
+    def sync_selected_likes(self):
+        index = self.likes_tabs.currentIndex()
+        if index == 0:
+            self.sync_youtube_likes()
+        elif index == 1:
+            if self.soundcloud_is_connected():
+                self.load_soundcloud_account_content(force=True)
+            else:
+                self.connect_soundcloud_account()
 
     def start_search(self):
         if hasattr(self, "search_debounce_timer"):
@@ -7188,6 +7327,7 @@ class MusicPlayer(QMainWindow):
                 )
                 row.set_playing(matches, animate=(matches and is_actually_playing))
 
+        self.refresh_supermix_card()
         current_uid = (current or {}).get("queue_id")
         for index in range(self.queue_list.count()):
             row = self.queue_list.itemWidget(self.queue_list.item(index))
@@ -7503,7 +7643,6 @@ class MusicPlayer(QMainWindow):
         else:
             auth_label = "Аккаунт не подключён"
         has_auth = bool(self.youtube_auth_kwargs())
-        sync_running = bool(self.youtube_sync_worker is not None and self.youtube_sync_worker.isRunning())
         self.connect_account_button.setText("Настроить подключение" if has_auth else "Подключить аккаунт YouTube Music")
         if self._youtube_rating_pending:
             self.likes_account_title.setText("YouTube Music")
@@ -7525,7 +7664,6 @@ class MusicPlayer(QMainWindow):
             self.likes_account_status.setText(
                 f"{auth_label}. Подключи сессию и нажми «Синхронизировать», чтобы импортировать реальные лайки."
             )
-        self.sync_account_button.setEnabled(has_auth and not sync_running)
         self.disconnect_account_button.setEnabled(has_auth)
 
         sc_connected = self.soundcloud_is_connected()
@@ -7909,7 +8047,6 @@ class MusicPlayer(QMainWindow):
         self._youtube_sync_rating_changes = {}
         self._youtube_sync_error = ""
         self._youtube_sync_had_results = False
-        self.sync_account_button.setEnabled(False)
         self.set_status("Подключаюсь к YouTube Music и загружаю плейлист «Понравившиеся»…", "likes")
         self._youtube_sync_page_seen = False
         worker = SearchWorker(
@@ -7918,6 +8055,7 @@ class MusicPlayer(QMainWindow):
             cache_enabled=False, paginate_all=True, max_total=10000, **auth_kwargs
         )
         self.youtube_sync_worker = worker
+        self.refresh_connection_badge()
         worker.results_ready.connect(lambda tracks, note, w=worker: self.on_youtube_likes_results(w, tracks, note))
         worker.failed.connect(lambda error, w=worker: self.on_youtube_likes_error(w, error))
         worker.finished.connect(lambda w=worker: self.on_youtube_likes_finished(w))
@@ -7997,7 +8135,7 @@ class MusicPlayer(QMainWindow):
         if worker is not self.youtube_sync_worker:
             return
         self.youtube_sync_worker = None
-        self.sync_account_button.setEnabled(True)
+        self.refresh_connection_badge()
         if self._youtube_sync_error:
             # При неудачном обновлении сохраняем последний удачный импорт,
             # даже если worker успел показать промежуточную порцию.
@@ -8901,6 +9039,7 @@ class MusicPlayer(QMainWindow):
     # ---------------------------------------------------------
 
     def on_likes_tab_changed(self, index):
+        self.refresh_connection_badge()
         lists = (self.youtube_likes_list, self.soundcloud_likes_list, self.likes_list)
         if 0 <= int(index) < len(lists):
             list_widget = lists[int(index)]

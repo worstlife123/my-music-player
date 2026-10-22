@@ -406,7 +406,8 @@ class PlayerChanges(unittest.TestCase):
         self.w.layout_home_tiles()
         self.assertGreater(cards[2].y(), cards[0].y())
         self.assertLessEqual(cards[1].geometry().right(), self.w.start_cards_scroll.viewport().width())
-        self.assertEqual(self.w.start_cards_scroll.horizontalScrollBar().maximum(), 0)
+        # The viewport's scroll ranges settle after its queued resize/reflow.
+        wait_for(lambda: self.w.start_cards_scroll.horizontalScrollBar().maximum() == 0)
         self.w.resize(1380, 860)
         app.processEvents()
         self.w.layout_home_tiles()
@@ -454,6 +455,180 @@ class PlayerChanges(unittest.TestCase):
         self.start(self.local_track('menu-stop'))
         self.w.stop_action.trigger()
         self.assertEqual(self.w.player.playbackState(), m.QMediaPlayer.PlaybackState.StoppedState)
+
+    def test_supermix_card_tracks_real_playback_pause_resume_stop_and_rebuild(self):
+        session = {'mix_id': 'RDTMAK5uy_fixture', 'seen': set(), 'anchor': '',
+                   'waiting': False, 'failures': 0}
+        with patch.object(self.w, 'maybe_refill_supermix'), \
+             patch.object(self.w, 'prepare_next_track'), patch.object(m, 'SupermixWorker') as factory:
+            self.w._start_music_queue([self.local_track('mix-card')], 'youtube', 'Ready',
+                                      recommendations=True, supermix_session=session)
+            wait_for(lambda: self.w.current_track is not None and self.w.requested_track is None)
+            card = self.w.start_cards[1]
+            self.assertEqual(card.playback_state, 'playing')
+            self.assertTrue(card._equalizer_timer.isActive())
+            beats = QSignalSpy(card._equalizer_timer.timeout)
+            wait_for(lambda: len(beats) > 0)
+            card.click()
+            self.assertEqual(self.w.player.playbackState(), m.QMediaPlayer.PlaybackState.PausedState)
+            self.assertEqual(card.playback_state, 'paused')
+            self.assertFalse(card._equalizer_timer.isActive())
+            self.assertIn('паузе', card.accessibleName())
+            self.w.rebuild_start_cards()
+            app.processEvents()
+            card = self.w.start_cards[1]
+            self.assertEqual(card.playback_state, 'paused')
+            card.click()
+            self.assertEqual(card.playback_state, 'playing')
+            self.assertIs(self.w.supermix_session, session)
+            factory.assert_not_called()
+            self.w.toggle_playback()  # Bottom transport uses the same state updates.
+            self.assertEqual(card.playback_state, 'paused')
+            self.w.toggle_playback()
+            self.assertEqual(card.playback_state, 'playing')
+            self.w.stop_all()
+            self.assertEqual(card.playback_state, 'idle')
+            self.assertFalse(card._equalizer_timer.isActive())
+
+    def test_supermix_card_animation_sleeps_when_hidden_and_manual_music_clears_indicator(self):
+        session = {'mix_id': 'RDTMAK5uy_fixture', 'seen': set(), 'anchor': '',
+                   'waiting': False, 'failures': 0}
+        with patch.object(self.w, 'maybe_refill_supermix'), patch.object(self.w, 'prepare_next_track'):
+            self.w._start_music_queue([self.local_track('mix-visibility')], 'youtube', 'Ready',
+                                      recommendations=True, supermix_session=session)
+            wait_for(lambda: self.w.current_track is not None and self.w.requested_track is None)
+            card = self.w.start_cards[1]
+            card.hide()
+            self.assertFalse(card._equalizer_timer.isActive())
+            self.assertEqual(card.playback_state, 'playing')
+            card.show()
+            self.assertTrue(card._equalizer_timer.isActive())
+            self.start(self.local_track('manual-after-mix'))
+            self.assertIsNone(self.w.supermix_session)
+            self.assertEqual(card.playback_state, 'idle')
+            self.assertFalse(card._equalizer_timer.isActive())
+
+    def test_supermix_card_does_not_label_previous_audio_as_the_new_mix(self):
+        self.start(self.local_track('previous-audio'))
+        session = {'mix_id': 'RDTMAK5uy_fixture', 'seen': set(), 'anchor': '',
+                   'waiting': False, 'failures': 0}
+        with patch.object(self.w, 'play_track'), patch.object(self.w, 'prepare_next_track'):
+            self.w._start_music_queue([self.youtube_track('newmix00001')], 'youtube', 'Ready',
+                                      recommendations=True, supermix_session=session)
+            self.w.refresh_supermix_card()
+            self.assertNotEqual(self.w.start_cards[1].playback_state, 'playing')
+            self.w.requested_track = dict(self.w.queue_tracks[0])
+            self.w.requested_index = 0
+            self.w.refresh_supermix_card()
+            self.assertEqual(self.w.start_cards[1].playback_state, 'loading')
+            with patch.object(self.w, 'toggle_playback') as previous_audio:
+                self.w.start_cards[1].click()
+                previous_audio.assert_not_called()
+            self.w.cancel_pending_request()
+            session['waiting'] = True
+            with patch.object(self.w, 'maybe_refill_supermix') as refill, patch.object(self.w, 'play_supermix') as restart:
+                self.w.start_cards[1].click()
+                refill.assert_called_once()
+                restart.assert_not_called()
+
+    def test_likes_sync_button_dispatches_to_selected_service_and_hides_for_local(self):
+        self.w.youtube_auth_mode = 'browser'
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/fixture'
+        self.w.refresh_connection_badge()
+        with patch.object(self.w, 'sync_youtube_likes') as youtube, \
+             patch.object(self.w, 'load_soundcloud_account_content') as soundcloud:
+            self.w.sync_account_button.click()
+            youtube.assert_called_once()
+            soundcloud.assert_not_called()
+            self.w.likes_tabs.setCurrentIndex(1)
+            self.assertIn('SoundCloud', self.w.sync_account_button.text())
+            self.assertIn('SoundCloud', self.w.sync_account_button.toolTip())
+            self.assertIn('SoundCloud', self.w.connection_badge.toolTip())
+            self.assertNotIn('YouTube', self.w.sync_account_button.text())
+            self.w.sync_account_button.click()
+            soundcloud.assert_called_once_with(force=True)
+            youtube.assert_called_once()
+            self.w.likes_tabs.setCurrentIndex(2)
+            self.assertTrue(self.w.sync_account_button.isHidden())
+            self.assertIn('устройстве', self.w.connection_badge.text())
+            self.w.sync_selected_likes()
+            soundcloud.assert_called_once()
+            youtube.assert_called_once()
+
+    def test_likes_sync_enabled_state_is_independent_for_each_service(self):
+        self.w.youtube_auth_mode = 'browser'
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/fixture'
+        self.w.youtube_sync_worker = object()
+        self.w.refresh_connection_badge()
+        self.assertFalse(self.w.sync_account_button.isEnabled())
+        self.w.likes_tabs.setCurrentIndex(1)
+        self.assertTrue(self.w.sync_account_button.isEnabled())
+        self.w._soundcloud_likes_loading = True
+        self.w.soundcloud_profile_workers['likes'] = object()
+        self.w.refresh_connection_badge()
+        self.assertFalse(self.w.sync_account_button.isEnabled())
+        self.w.youtube_sync_worker = None
+        self.w.likes_tabs.setCurrentIndex(0)
+        self.assertTrue(self.w.sync_account_button.isEnabled())
+        self.w.soundcloud_profile_workers.clear()
+        self.w._soundcloud_likes_loading = False
+
+    def test_likes_sync_badge_does_not_use_other_services_connection(self):
+        self.w.youtube_auth_mode = 'browser'
+        self.w.refresh_connection_badge()
+        self.assertTrue(self.w.connection_badge.property('connected'))
+        self.w.likes_tabs.setCurrentIndex(1)
+        self.assertFalse(self.w.connection_badge.property('connected'))
+        self.assertFalse(self.w.sync_account_button.isEnabled())
+        self.assertIn('SoundCloud', self.w.connection_badge.toolTip())
+
+    def test_background_youtube_finish_does_not_relabel_or_enable_busy_soundcloud(self):
+        self.w.youtube_auth_mode = 'browser'
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/fixture'
+        youtube_worker = object()
+        soundcloud_worker = type('Worker', (), {'pagination_done': True})()
+        self.w.youtube_sync_worker = youtube_worker
+        self.w.soundcloud_profile_workers['likes'] = soundcloud_worker
+        self.w._soundcloud_likes_loading = True
+        self.w.likes_tabs.setCurrentIndex(1)
+        self.w.on_youtube_likes_finished(youtube_worker)
+        self.assertIn('SoundCloud', self.w.sync_account_button.text())
+        self.assertFalse(self.w.sync_account_button.isEnabled())
+        self.w.on_soundcloud_account_finished('likes', soundcloud_worker)
+        self.assertTrue(self.w.sync_account_button.isEnabled())
+        self.assertIn('SoundCloud', self.w.sync_account_button.text())
+
+    def test_old_soundcloud_finish_cannot_clear_new_sync_state(self):
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/fixture'
+        self.w.likes_tabs.setCurrentIndex(1)
+        current = object()
+        self.w.soundcloud_profile_workers['likes'] = current
+        self.w._soundcloud_likes_loading = True
+        self.w.refresh_connection_badge()
+        self.w.on_soundcloud_account_finished('likes', object())
+        self.assertIs(self.w.soundcloud_profile_workers['likes'], current)
+        self.assertTrue(self.w._soundcloud_likes_loading)
+        self.assertFalse(self.w.sync_account_button.isEnabled())
+        self.w.soundcloud_profile_workers.clear()
+        self.w._soundcloud_likes_loading = False
+
+    def test_soundcloud_sync_uses_existing_worker_and_lifecycle_updates_selected_button(self):
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/fixture'
+        self.w.likes_tabs.setCurrentIndex(1)
+        with patch.object(m, 'SearchWorker') as factory:
+            self.w.sync_account_button.click()
+            worker = factory.return_value
+            worker.start.assert_called_once()
+            self.assertEqual(factory.call_args.args[1], 'soundcloud')
+            self.assertEqual(factory.call_args.kwargs['direct_url'], 'https://soundcloud.com/fixture/likes')
+            self.assertTrue(factory.call_args.kwargs['paginate_all'])
+            self.assertFalse(self.w.sync_account_button.isEnabled())
+            self.w.sync_selected_likes()
+            factory.assert_called_once()
+            self.w.on_soundcloud_account_error('likes', worker, 'Temporary failure')
+            self.assertFalse(self.w.sync_account_button.isEnabled())
+            self.w.on_soundcloud_account_finished('likes', worker)
+            self.assertTrue(self.w.sync_account_button.isEnabled())
 
     def test_supermix_fetches_in_background_and_keeps_recommendations_unliked(self):
         self.w.youtube_auth_mode = "browser"
