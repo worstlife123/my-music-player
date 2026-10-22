@@ -335,38 +335,106 @@ class PlayerChanges(unittest.TestCase):
                 radio.assert_not_called()
             play.assert_not_called()
 
-    def test_supermix_alternates_artists_and_uses_unique_own_likes(self):
-        tracks = [dict(self.youtube_track(f'super{artist}{i:05}'), artist=artist)
-                  for artist in ('Alpha', 'Beta', 'Gamma') for i in range(40)]
-        self.w.youtube_liked_tracks = tracks + [dict(tracks[0])]
-        self.w.disliked_track_keys.add(self.w.radio_track_key(tracks[-1]))
-        self.w.current_source = 'youtube'
+    def test_supermix_fetches_in_background_and_keeps_recommendations_unliked(self):
+        liked = dict(self.youtube_track('likedseed001'), artist='Artist')
+        recommended = self.youtube_track('freshsong001')
+        self.w.youtube_liked_tracks = [liked]
+        self.w.queue_tracks = [liked]
         self.w.rebuild_start_cards()
-        with patch.object(self.w, 'play_track') as play, \
-             patch.object(self.w, 'start_search') as search:
+        with patch.object(m, 'SupermixWorker') as factory, \
+             patch.object(self.w, 'play_track') as play:
+            worker = factory.return_value
             self.w.start_cards[1].click()
-            queue = self.w.queue_tracks
-            self.assertEqual(len(queue), 75)
-            ids = [self.w.youtube_video_id(track) for track in queue]
-            self.assertEqual(len(set(ids)), 75)
-            self.assertNotIn(self.w.youtube_video_id(tracks[-1]), ids)
-            self.assertTrue(set(ids) <= {self.w.youtube_video_id(track) for track in tracks})
-            self.assertTrue(all(a['artist'] != b['artist'] for a, b in zip(queue, queue[1:])))
-            self.assertEqual(self.w.queue_mode, 'youtube_likes')
-            play.assert_called_once_with(queue[0], 0)
-            search.assert_not_called()
-        self.assertEqual(self.w.youtube_liked_tracks, tracks + [dict(tracks[0])])
+            factory.assert_called_once()
+            self.assertEqual(factory.call_args.args[0], [liked])
+            worker.start.assert_called_once()
+            self.assertEqual(self.w.queue_tracks, [liked])
+            self.assertFalse(self.w.start_cards[1].isEnabled())
+            play.assert_not_called()
+            self.w.on_supermix_ready(worker, [recommended], 'Recommendations ready')
+            self.assertEqual(self.w.queue_mode, 'supermix')
+            self.assertEqual(self.w.queue_tracks[0]['video_id'], 'freshsong001')
+            self.assertFalse(self.w.queue_tracks[0].get('youtube_music_like'))
+            self.assertFalse(self.w.is_youtube_music_liked(recommended))
+            self.assertEqual(self.w.youtube_liked_tracks, [liked])
+            play.assert_called_once_with(self.w.queue_tracks[0], 0)
+            self.assertTrue(self.w.start_cards[1].isEnabled())
 
-    def test_supermix_single_artist_and_duplicate_video_ids(self):
-        first = dict(self.youtube_track('samevideo01'), artist='Artist')
-        alternate_url = dict(first, url='https://youtu.be/samevideo01')
-        second = dict(self.youtube_track('samevideo02'), artist=' Artist ')
-        self.w.youtube_liked_tracks = [first, alternate_url, second]
-        with patch.object(self.w, 'play_track'):
+    def test_supermix_background_thread_delivers_recommendations_to_player(self):
+        seed = dict(self.youtube_track('likedseed001'), artist='Artist')
+        self.w.youtube_liked_tracks = [seed]
+        with patch('ytmusicapi.YTMusic') as client, patch.object(self.w, 'play_track') as play:
+            client.return_value.get_watch_playlist.return_value = {
+                'tracks': [{'videoId': 'freshsong001', 'title': 'Fresh recommendation',
+                            'artists': [{'name': 'New artist'}]}]
+            }
             self.w.play_supermix()
-        self.assertEqual(len(self.w.queue_tracks), 2)
-        self.assertEqual({self.w.youtube_video_id(t) for t in self.w.queue_tracks},
-                         {'samevideo01', 'samevideo02'})
+            finished = QSignalSpy(self.w.supermix_worker.finished)
+            wait_for(lambda: len(finished) == 1 and play.call_count == 1)
+            self.assertEqual(self.w.queue_mode, 'supermix')
+            self.assertEqual(self.w.queue_tracks[0]['video_id'], 'freshsong001')
+            self.assertIsNone(self.w.supermix_worker)
+            self.assertEqual(self.w.youtube_liked_tracks, [seed])
+
+    def test_stale_supermix_result_cannot_override_manual_playback(self):
+        seed = self.youtube_track('likedseed001')
+        self.w.youtube_liked_tracks = [seed]
+        with patch.object(m, 'SupermixWorker') as factory:
+            self.w.play_supermix()
+            worker = factory.return_value
+            self.w.stop_all()
+            worker.cancel.assert_called()
+            with patch.object(self.w, 'play_track') as play:
+                self.w.on_supermix_ready(worker, [self.youtube_track('freshsong001')], 'Late')
+                play.assert_not_called()
+                self.assertEqual(self.w.queue_tracks, [])
+
+    def test_supermix_rechecks_new_likes_and_dislikes_when_results_arrive(self):
+        seed = self.youtube_track('likedseed001')
+        fresh = self.youtube_track('freshsong001')
+        now_liked = self.youtube_track('nowliked0001')
+        now_disliked = self.youtube_track('nowhidden001')
+        self.w.youtube_liked_tracks = [seed]
+        with patch.object(m, 'SupermixWorker') as factory, patch.object(self.w, 'play_track'):
+            self.w.play_supermix()
+            self.w.youtube_liked_tracks.append(now_liked)
+            self.w.disliked_track_keys.add('youtube|https://youtu.be/nowhidden001')
+            self.w.on_supermix_ready(factory.return_value, [now_liked, now_disliked, fresh, fresh], 'Ready')
+        self.assertEqual([track['video_id'] for track in self.w.queue_tracks], ['freshsong001'])
+
+    def test_supermix_error_preserves_queue_and_does_not_shuffle_likes(self):
+        seed = self.youtube_track('likedseed001')
+        self.w.youtube_liked_tracks = [seed]
+        self.w.queue_tracks = [seed]
+        with patch.object(m, 'SupermixWorker') as factory, \
+             patch.object(self.w, 'show_toast') as toast, \
+             patch.object(self.w, 'play_track') as play:
+            self.w.play_supermix()
+            self.w.on_supermix_error(factory.return_value, 'Service unavailable')
+            self.w.on_supermix_finished(factory.return_value)
+            toast.assert_called_once()
+            self.assertEqual(self.w.queue_tracks, [seed])
+            self.assertIsNone(self.w.supermix_worker)
+            play.assert_not_called()
+
+    def test_recommendation_queue_does_not_switch_to_generic_search(self):
+        tracks = [self.youtube_track('freshsong001'), self.youtube_track('freshsong002')]
+        with patch.object(self.w, 'play_track') as play:
+            self.w._start_music_queue(tracks, 'youtube', 'Ready', recommendations=True)
+            self.w.current_track = self.w.queue_tracks[0]
+            self.w.current_queue_index = 0
+            self.w.source_results['youtube'] = [self.w.current_track, self.youtube_track('unrelated001')]
+            play.reset_mock()
+            self.w.play_next()
+            play.assert_called_once_with(self.w.queue_tracks[1], 1)
+            self.w.current_track = self.w.queue_tracks[1]
+            self.w.current_queue_index = 1
+            play.reset_mock()
+            with patch.object(self.w, 'maybe_refill_radio') as radio:
+                self.w.handle_track_finished()
+                self.w.ensure_following_track_prepared()
+                radio.assert_not_called()
+            play.assert_not_called()
 
     def test_supermix_without_likes_preserves_current_queue(self):
         existing = self.youtube_track('alreadyplay1')
@@ -627,6 +695,104 @@ class PlayerChanges(unittest.TestCase):
         finally:
             other._force_exit = True
             other.close()
+
+
+class SupermixRecommendations(unittest.TestCase):
+    @staticmethod
+    def liked(video_id, artist='Artist'):
+        return {'source': 'youtube', 'video_id': video_id, 'artist': artist,
+                'url': 'https://music.youtube.com/watch?v=' + video_id, 'title': video_id}
+
+    @staticmethod
+    def entry(video_id, **extra):
+        return dict(videoId=video_id, title='Recommended ' + video_id,
+                    artists=[{'name': 'Recommended artist'}], length='3:25',
+                    thumbnail=[{'url': 'https://i.ytimg.com/cover.jpg'}], **extra)
+
+    def collect(self, liked, responses, disliked=(), limit=75):
+        worker = m.SupermixWorker(liked, disliked, limit=limit)
+        ready, failed = QSignalSpy(worker.result_ready), QSignalSpy(worker.failed)
+        with patch('ytmusicapi.YTMusic') as factory, patch.object(m.random, 'shuffle'):
+            factory.return_value.get_watch_playlist.side_effect = responses
+            worker.run()
+            calls = factory.return_value.get_watch_playlist.call_args_list
+        return ready, failed, calls
+
+    def test_radio_is_based_on_seeds_and_excludes_likes_dislikes_duplicates(self):
+        liked = [self.liked('seed0000001', 'Alpha'), self.liked('seed0000002', 'Beta')]
+        responses = [
+            {'tracks': [self.entry('seed0000001'), self.entry('blocked0001'), self.entry('fresh000001'),
+                        self.entry('fresh000002'), self.entry('private0001', isAvailable=False)]},
+            {'tracks': [self.entry('fresh000001'), self.entry('fresh000003'),
+                        self.entry('serverhide1', likeStatus='DISLIKE'), self.entry('serverliked1', likeStatus='LIKE')]},
+        ]
+        ready, failed, calls = self.collect(liked, responses, {'blocked0001'})
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(failed), 0)
+        tracks = ready[0][0]
+        self.assertEqual([track['video_id'] for track in tracks], ['fresh000001', 'fresh000003', 'fresh000002'])
+        self.assertEqual(tracks[0]['duration'], 205)
+        self.assertTrue(all(not track.get('youtube_music_like') for track in tracks))
+        self.assertEqual({call.kwargs['videoId'] for call in calls}, {'seed0000001', 'seed0000002'})
+        self.assertTrue(all(call.kwargs['radio'] is True for call in calls))
+
+    def test_seeds_cover_different_artists_and_ignore_duplicate_video_ids(self):
+        worker = m.SupermixWorker([self.liked('a0000000001', 'Alpha'), self.liked('a0000000002', 'Alpha'),
+                                  self.liked('b0000000001', 'Beta'), self.liked('c0000000001', 'Gamma'),
+                                  self.liked('a0000000001', 'Alpha')])
+        with patch.object(m.random, 'shuffle'):
+            seeds = worker._select_seeds()
+        self.assertEqual({track['artist'] for track in seeds}, {'Alpha', 'Beta', 'Gamma'})
+        self.assertEqual(len(seeds), 3)
+
+    def test_partial_service_failure_still_returns_available_recommendations(self):
+        ready, failed, _ = self.collect([self.liked('seed0000001', 'Alpha'), self.liked('seed0000002', 'Beta')],
+                                        [RuntimeError('Timeout'), {'tracks': [self.entry('fresh000001')]}])
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(failed), 0)
+        self.assertIn('Часть рекомендаций', ready[0][1])
+
+    def test_service_failure_never_falls_back_to_liked_tracks(self):
+        ready, failed, _ = self.collect([self.liked('seed0000001')], [RuntimeError('HTTP 403')])
+        self.assertEqual(len(ready), 0)
+        self.assertEqual(len(failed), 1)
+        self.assertIn('403', failed[0][0])
+
+    def test_already_known_recommendations_return_no_fake_supermix(self):
+        ready, failed, _ = self.collect([self.liked('seed0000001')],
+                                        [{'tracks': [self.entry('seed0000001')]}])
+        self.assertEqual(len(ready), 0)
+        self.assertEqual(len(failed), 1)
+
+    def test_limit_and_cancellation(self):
+        ready, failed, _ = self.collect([self.liked('seed0000001')],
+                                        [{'tracks': [self.entry(f'new{i:08}') for i in range(20)]}], limit=7)
+        self.assertEqual(len(ready[0][0]), 7)
+        self.assertFalse(failed)
+        worker = m.SupermixWorker([self.liked('seed0000001')])
+        worker.cancel()
+        with patch('ytmusicapi.YTMusic') as factory:
+            worker.run()
+            factory.assert_not_called()
+
+    def test_network_calls_have_timeouts_and_keep_tls_verification(self):
+        import requests
+        worker = m.SupermixWorker([self.liked('seed0000001')])
+        ready = QSignalSpy(worker.result_ready)
+        with patch.object(requests, 'Session') as session_factory, patch('ytmusicapi.YTMusic') as client_factory:
+            session = session_factory.return_value.__enter__.return_value
+            original_request = session.request
+            def recommend(**kwargs):
+                session.request('POST', 'https://music.youtube.com/youtubei/v1/next')
+                return {'tracks': [self.entry('fresh000001')]}
+            client_factory.return_value.get_watch_playlist.side_effect = recommend
+            worker.run()
+            self.assertEqual(len(ready), 1)
+            timeout = original_request.call_args.kwargs['timeout']
+            self.assertGreater(timeout[0], 0)
+            self.assertLessEqual(timeout[0], 4)
+            self.assertLessEqual(timeout[1], 7)
+            self.assertNotIn('verify', original_request.call_args.kwargs)
 
 
 class HttpsVerification(unittest.TestCase):
