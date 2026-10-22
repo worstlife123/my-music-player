@@ -364,13 +364,45 @@ class PlayerChanges(unittest.TestCase):
             play.assert_called_once_with(self.w.queue_tracks[0], 0)
             self.assertTrue(self.w.start_cards[1].isEnabled())
 
+    def test_supermix_cover_loads_cached_artwork_into_card(self):
+        cover_url = 'https://i.ytimg.com/supermix-fixture.jpg'
+        cover = m.QPixmap(64, 64)
+        cover.fill(m.QColor('#237ABC'))
+        self.w.pixmap_cache[cover_url] = cover
+        self.w.supermix_cover_url = cover_url
+        self.w._update_supermix_cover()
+        card = self.w.start_cards[1]
+        self.assertEqual(card.property('requested_image'), cover_url)
+        self.assertIsNotNone(card._cover_pixmap)
+        self.assertEqual(card._cover_pixmap.toImage().pixelColor(32, 32), m.QColor('#237ABC'))
+
+    def test_supermix_cover_queues_uncached_image_and_keeps_generated_artwork(self):
+        cover_url = 'https://i.ytimg.com/new-supermix-fixture.jpg'
+        self.w.supermix_cover_url = cover_url
+        card = self.w.start_cards[1]
+        original_artwork = card._artwork.cacheKey()
+        with patch.object(self.w, 'pump_images') as pump:
+            self.w._update_supermix_cover()
+            pump.assert_called_once()
+        self.assertEqual(card.property('requested_image'), cover_url)
+        self.assertEqual(self.w.image_waiters[cover_url], [card])
+        self.assertIn(cover_url, self.w.image_backlog)
+        self.assertIsNone(card._cover_pixmap)
+        self.assertEqual(card._artwork.cacheKey(), original_artwork)
+
     def test_supermix_background_thread_delivers_recommendations_to_player(self):
         self.w.youtube_auth_mode = "browser"
         seed = dict(self.youtube_track('likedseed001'), artist='Artist')
         self.w.youtube_liked_tracks = [seed]
+        cover_url = 'https://i.ytimg.com/supermix-fixture.jpg'
+        cover = m.QPixmap(64, 64)
+        cover.fill(m.QColor('#237ABC'))
+        self.w.pixmap_cache[cover_url] = cover
         with patch('ytmusicapi.YTMusic') as client, patch.object(self.w, 'play_track') as play, \
              patch.object(m.SupermixWorker, '_auth_headers', return_value={}):
-            client.return_value.get_home.return_value = [{'contents': [{'playlistId': 'RDTMAK5uy_personal', 'title': 'My Supermix'}]}]
+            client.return_value.get_home.return_value = [{'contents': [{
+                'playlistId': 'RDTMAK5uy_personal', 'title': 'My Supermix',
+                'thumbnails': [{'url': cover_url}]}]}]
             client.return_value.get_watch_playlist.return_value = {
                 'tracks': [{'videoId': 'freshsong001', 'title': 'Fresh recommendation',
                             'artists': [{'name': 'Artist'}]}]
@@ -382,6 +414,8 @@ class PlayerChanges(unittest.TestCase):
             self.assertEqual([track['video_id'] for track in self.w.queue_tracks], ['freshsong001'])
             self.assertIsNone(self.w.supermix_worker)
             self.assertEqual(self.w.youtube_liked_tracks, [seed])
+            self.assertEqual(self.w.start_cards[1]._cover_pixmap.toImage().pixelColor(32, 32),
+                             m.QColor('#237ABC'))
 
     def test_stale_supermix_result_cannot_override_manual_playback(self):
         self.w.youtube_auth_mode = "browser"

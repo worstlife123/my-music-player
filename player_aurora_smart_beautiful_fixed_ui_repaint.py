@@ -5614,7 +5614,7 @@ class MusicPlayer(QMainWindow):
         if self.supermix_cover_url:
             for card in self.start_cards:
                 if card.title == "Супермикс":
-                    self.request_image(self.supermix_cover_url, card)
+                    self.request_card_cover(self.supermix_cover_url, card)
 
     def on_supermix_error(self, worker, message):
         if worker is not self.supermix_worker or self._force_exit:
