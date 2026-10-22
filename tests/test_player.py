@@ -257,6 +257,102 @@ class PlayerChanges(unittest.TestCase):
         return [self.w.youtube_video_id(widget.item(i).data(m.Qt.ItemDataRole.UserRole))
                 for i in range(widget.count())]
 
+    def test_soundcloud_home_only_opens_complete_likes_library(self):
+        tracks = [{'source': 'soundcloud', 'url': f'https://soundcloud.com/test/track-{i}',
+                   'title': f'SoundCloud {i}'} for i in range(3)]
+        self.w.soundcloud_liked_tracks = tracks
+        self.w.custom_playlists = [{'title': 'Saved playlist', 'url': 'https://soundcloud.com/test/sets/saved'}]
+        self.w.likes_search_input.setText('no matching song')
+        self.w.current_source = 'soundcloud'
+        self.w.rebuild_start_cards()
+        self.assertEqual([card.title for card in self.w.start_cards], ['Мои лайки'])
+        self.assertEqual(self.w.start_cards[0].action_icon, 'open')
+        self.assertEqual(self.w.start_cards_layout.count(), 3)
+        with patch.object(self.w, 'start_search') as search, \
+             patch.object(self.w, 'start_playlist_url') as playlist, \
+             patch.object(self.w, 'play_queue_index') as play:
+            self.w.start_cards[0].click()
+            self.assertEqual(self.w.current_source, 'likes')
+            self.assertIs(self.w.view_stack.currentWidget(), self.w.likes_page)
+            self.assertEqual(self.w.likes_tabs.currentIndex(), 1)
+            self.assertEqual(self.w.likes_search_input.text(), '')
+            self.assertEqual(self.w.soundcloud_likes_list.count(), 3)
+            search.assert_not_called()
+            playlist.assert_not_called()
+            play.assert_not_called()
+        self.assertEqual(self.w.custom_playlists[0]['title'], 'Saved playlist')
+
+    def test_youtube_home_has_likes_navigation_and_shuffle_only(self):
+        self.w.current_source = 'youtube'
+        self.w.rebuild_start_cards()
+        self.assertEqual([card.title for card in self.w.start_cards],
+                         ['Мои лайки', 'Перемешать мои лайки'])
+        self.w.likes_tabs.setCurrentIndex(1)
+        self.w.likes_search_input.setText('old filter')
+        with patch.object(self.w, 'start_search') as search, \
+             patch.object(self.w, 'play_queue_index') as play:
+            self.w.start_cards[0].click()
+            self.assertEqual(self.w.current_source, 'likes')
+            self.assertEqual(self.w.likes_tabs.currentIndex(), 0)
+            self.assertEqual(self.w.likes_search_input.text(), '')
+            search.assert_not_called()
+            play.assert_not_called()
+
+    def test_shuffle_card_uses_only_likes_and_next_stays_in_queue(self):
+        liked = [self.youtube_track(f'liked{i:06}') for i in range(60)]
+        self.w.youtube_liked_tracks = liked
+        self.w.disliked_track_keys.add(self.w.radio_track_key(liked[-1]))
+        self.w._finish_transition_pending = True
+        self.w._finish_guard_url = 'stale transition'
+        self.w.current_source = 'youtube'
+        self.w.rebuild_start_cards()
+        with patch.object(m.random, 'shuffle', side_effect=lambda tracks: tracks.reverse()), \
+             patch.object(self.w, 'play_track') as play, \
+             patch.object(self.w, 'start_search') as search:
+            self.w.start_cards[1].click()
+            self.assertEqual(len(self.w.queue_tracks), 50)
+            self.assertEqual(self.w.queue_tracks[0]['url'], liked[-2]['url'])
+            allowed = {track['url'] for track in liked[:-1]}
+            self.assertTrue(all(track['url'] in allowed for track in self.w.queue_tracks))
+            self.assertEqual(self.w.queue_mode, 'youtube_likes')
+            self.assertFalse(self.w._finish_transition_pending)
+            play.assert_called_once_with(self.w.queue_tracks[0], 0)
+            self.w.current_track = self.w.queue_tracks[0]
+            self.w.current_queue_index = 0
+            self.w.source_results['youtube'] = [self.w.current_track, self.youtube_track('foreign00001')]
+            play.reset_mock()
+            self.w.play_next()
+            play.assert_called_once_with(self.w.queue_tracks[1], 1)
+            search.assert_not_called()
+            self.w.current_track = self.w.queue_tracks[-1]
+            self.w.current_queue_index = 49
+            play.reset_mock()
+            with patch.object(self.w, 'maybe_refill_radio') as radio:
+                self.w.handle_track_finished()
+                self.w.ensure_following_track_prepared()
+                radio.assert_not_called()
+            play.assert_not_called()
+
+    def test_shuffle_without_likes_does_not_search_for_generic_music(self):
+        self.w.current_source = 'youtube'
+        with patch.object(m.QMessageBox, 'information') as message, \
+             patch.object(self.w, 'start_search') as search, \
+             patch.object(self.w, 'play_track') as play:
+            self.w.play_personal_mix('youtube')
+            message.assert_called_once()
+            search.assert_not_called()
+            play.assert_not_called()
+        self.assertEqual(self.w.queue_tracks, [])
+
+    def test_soundcloud_refresh_fetches_likes_without_playlist_links(self):
+        self.w.soundcloud_profile_url = 'https://soundcloud.com/example'
+        with patch.object(m, 'SearchWorker') as worker:
+            self.w.load_soundcloud_account_content(force=True)
+            worker.assert_called_once()
+            self.assertEqual(worker.call_args.kwargs['direct_url'], 'https://soundcloud.com/example/likes')
+            self.assertTrue(worker.call_args.kwargs['paginate_all'])
+            worker.return_value.start.assert_called_once()
+
     def test_new_youtube_like_appears_at_top_without_sync(self):
         self.w._likes_render_batch = 5
         self.w.youtube_liked_tracks = [self.youtube_track(f'existing{i:05}') for i in range(180)]

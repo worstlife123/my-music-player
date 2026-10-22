@@ -430,6 +430,12 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawPolygon(QPolygonF([QPointF(-6, -10), QPointF(-6, 10), QPointF(10, 0)]))
+    elif kind in ("arrow-right", "open"):
+        painter.setPen(QPen(color, 3, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawLine(QPointF(-10, 0), QPointF(10, 0))
+        painter.drawLine(QPointF(3, -7), QPointF(10, 0))
+        painter.drawLine(QPointF(3, 7), QPointF(10, 0))
     elif kind in ("cloud", "soundcloud"):
         path = QPainterPath()
         path.moveTo(-12, 7)
@@ -555,10 +561,11 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
 
 class SpotifyPlaylistCard(QPushButton):
     """Карточка быстрого старта с рисуемым градиентом и мягкой подсветкой."""
-    def __init__(self, title, subtitle, symbol, color_a, color_b, parent=None, cover_url=""):
+    def __init__(self, title, subtitle, symbol, color_a, color_b, parent=None, cover_url="", action_icon="play"):
         super().__init__(parent)
         self.title = title
         self.subtitle = subtitle
+        self.action_icon = action_icon
         self.symbol = symbol
         self.color_a = QColor(color_a)
         self.color_b = QColor(color_b)
@@ -708,7 +715,7 @@ class SpotifyPlaylistCard(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), play_alpha))
         painter.drawEllipse(play_rect)
-        draw_vector_icon(painter, "play", play_rect.adjusted(10, 10, -10, -10), "#102016")
+        draw_vector_icon(painter, self.action_icon, play_rect.adjusted(10, 10, -10, -10), "#102016")
         painter.end()
 
 # -------------------------------------------------------------
@@ -5203,7 +5210,7 @@ class MusicPlayer(QMainWindow):
         self.artist_header.hide()
         self.browser_search_button.hide()
         self.rebuild_start_cards()
-        self.set_status("Выбери подборку или введи название трека/исполнителя.", source)
+        self.set_status("Открой свои лайки или введи название трека/исполнителя.", source)
         self.update_browse_empty_state()
         self.fade_to_page(self.browse_page)
         if source == "soundcloud" and self.soundcloud_is_connected():
@@ -5225,9 +5232,9 @@ class MusicPlayer(QMainWindow):
         self.search_input.setText(query)
         self.start_search()
 
-    def play_personal_mix(self):
+    def play_personal_mix(self, source=None):
         """Создаёт персональный микс из уже импортированных лайков."""
-        source = self.current_source
+        source = source or self.current_source
         if source == "youtube":
             tracks = list(self.youtube_liked_tracks)
         elif source == "soundcloud":
@@ -5254,16 +5261,24 @@ class MusicPlayer(QMainWindow):
         self.current_queue_index = -1
         self.shuffle_future = None
         self.radio_mode_active = False
-        self.queue_mode = "manual"
+        # Кнопки Next и автопереход остаются внутри очереди лайков.
+        self.queue_mode = "youtube_likes" if source == "youtube" else "manual"
+        self._finish_transition_pending = False
+        self._finish_guard_url = ""
+        self._auto_failed_tracks.clear()
+        self._radio_waiting_for_tracks = False
+        self._shuffle_history.clear()
         self._soundcloud_queue_waiting = False
         for track in mix_tracks:
             queued_track = dict(track)
             queued_track["queue_id"] = uuid4().hex
+            if source == "youtube":
+                queued_track["youtube_music_like"] = True
             self.queue_tracks.append(queued_track)
 
         self.refresh_queue_list()
         self.toggle_queue_if_hidden()
-        self.set_status(f"Ваш персональный микс: {len(mix_tracks)} треков из ваших лайков.", source)
+        self.set_status(f"Перемешаны твои лайки: {len(mix_tracks)} треков.", source)
         self.play_queue_index(0)
 
     def start_playlist_url(self, title, url, source=None):
@@ -5569,7 +5584,7 @@ class MusicPlayer(QMainWindow):
             f"SoundCloud: обновляю лайки в фоне · сохранено {len(self.soundcloud_liked_tracks)} треков…"
         )
         auth = self.soundcloud_auth_kwargs()
-        for kind, url in (("playlists", base + "/sets"), ("likes", base + "/likes")):
+        for kind, url in (("likes", base + "/likes"),):
             worker = SearchWorker(
                 "", "soundcloud", "relevance", 100, self,
                 direct_url=url, cache_enabled=False,
@@ -5798,120 +5813,60 @@ class MusicPlayer(QMainWindow):
         add.clicked.connect(do_add)
         dialog.exec()
 
+    def open_likes_library(self, source):
+        """Открывает все сохранённые лайки сервиса без запуска музыки и поиска."""
+        self.likes_search_input.clear()
+        self.likes_tabs.setCurrentIndex(1 if source == "soundcloud" else 0)
+        self.set_source("likes")
+
+    def _add_likes_start_card(self, source):
+        service = "SoundCloud" if source == "soundcloud" else "YouTube Music"
+        tracks = self.soundcloud_liked_tracks if source == "soundcloud" else self._youtube_likes_for_display()
+        count = len(tracks)
+        subtitle = f"Все лайки {service} · треков: {count}" if count else f"Открыть мои лайки {service}"
+        accent = "#FF5500" if source == "soundcloud" else "#1DB954"
+        card = SpotifyPlaylistCard(
+            "Мои лайки", subtitle, "♥", accent, "#181818", self.start_cards_widget,
+            action_icon="open"
+        )
+        card.setMinimumHeight(190)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if source == "soundcloud":
+            cover_url = next((normalize_artwork_url(track.get("thumbnail"))
+                              for track in tracks if isinstance(track, dict) and track.get("thumbnail")), "")
+            if cover_url:
+                self.request_card_cover(cover_url, card)
+        card.clicked.connect(lambda checked=False, src=source: self.open_likes_library(src))
+        self.start_cards.append(card)
+        self.start_cards_layout.addWidget(card)
+
     def rebuild_start_cards(self):
-        """Рисует главный экран по источнику: градиентный герой и сетка карточек."""
+        """Показывает библиотеку сервиса и действия с настоящими лайками пользователя."""
         if not hasattr(self, "start_cards_layout"):
             return
         while self.start_cards_layout.count():
             item = self.start_cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
         self.start_cards = []
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
-
-        def heading(text):
-            label = QLabel(text)
-            label.setObjectName("startSectionTitle")
-            return label
+        heading = QLabel("ТВОЯ МУЗЫКА")
+        heading.setObjectName("startSectionTitle")
+        self.start_cards_layout.addWidget(heading)
+        self._add_likes_start_card(source)
 
         if source == "youtube":
-            hero = ("Твой Супермикс", "Подборка для твоего настроения", "YouTube Music Supermix playlist",
-                    "#1DB954", "#121212", "🪄", "personal_mix")
-            defaults = [
-                ("Daily Mix 1", "Любимые звучания рядом", "Daily Mix 1 music playlist", "#843B62", "#211722", "🎧", "personal_mix"),
-                ("Discover Weekly", "Открой новую музыку", "Discover Weekly music mix playlist", "#385C91", "#141B2A", "✨", "query"),
-                ("Chill Mood", "Спокойный темп и атмосфера", "Chill Mood music playlist", "#8A6A32", "#211E18", "☾", "query"),
-            ]
-        else:
-            if self.soundcloud_is_connected():
-                base = self.soundcloud_profile_base().rstrip("/")
-                hero = ("Мои лайки SoundCloud", "Треки, которые тебе понравились", "Мои лайки SoundCloud",
-                        "#FF5500", "#1A1A2E", "♥", base + "/likes")
-                defaults = [
-                    ("Мои плейлисты", "Подборки твоего профиля", "Мои плейлисты SoundCloud", "#FF5500", "#1A1A2E", "🎧", base + "/sets"),
-                    ("SoundCloud Top 50", "Глобальные чарты", "SoundCloud Top 50", "#FF5500", "#21172D", "🔥", "https://soundcloud.com/charts/top?genre=all-music"),
-                    ("New & Hot", "Свежие релизы", "SoundCloud New & Hot", "#E34A32", "#27182A", "✨", "https://soundcloud.com/charts/new?genre=all-music"),
-                ]
-                for entry in self.soundcloud_account_playlists:
-                    defaults.append((entry.get("title", "Личный плейлист"), entry.get("subtitle", "SoundCloud"),
-                                     entry.get("title", "Личный плейлист"), entry.get("color_a", "#FF5500"),
-                                     entry.get("color_b", "#1A1A2E"), entry.get("symbol", "🎧"), entry.get("url", "")))
-            else:
-                hero = ("SoundCloud Top 50", "Самые популярные треки сейчас", "SoundCloud Top 50",
-                        "#FF5500", "#1A1A2E", "🔥", "https://soundcloud.com/charts/top?genre=all-music")
-                defaults = [
-                    ("New & Hot", "Свежие релизы", "SoundCloud New & Hot", "#E34A32", "#27182A", "✨", "https://soundcloud.com/charts/new?genre=all-music"),
-                    ("Electronic", "Новые электронные находки", "electronic", "#9A43A0", "#20172D", "🎛", "query"),
-                    ("Chill Mood", "Музыка для спокойного вечера", "chill", "#7B3E75", "#1C192A", "☾", "query"),
-                ]
-
-        self.start_cards_layout.addWidget(heading("ТВОЙ СУПЕРМИКС" if source == "youtube" else "ТВОЯ МУЗЫКА"))
-        title, subtitle, query_or_name, color_a, color_b, symbol, action = hero
-        hero_card = SpotifyPlaylistCard(title, subtitle, symbol, color_a, color_b, self.start_cards_widget, cover_url="")
-        hero_card.setMinimumHeight(190)
-        if source == "soundcloud" and self.soundcloud_is_connected():
-            cover_url = next((normalize_artwork_url(t.get("thumbnail"))
-                              for t in self.soundcloud_liked_tracks
-                              if isinstance(t, dict) and t.get("thumbnail")), "")
-            if cover_url:
-                self.request_card_cover(cover_url, hero_card)
-        if action == "personal_mix":
-            hero_card.clicked.connect(lambda checked=False: self.play_personal_mix())
-        elif action == "query":
-            hero_card.clicked.connect(lambda checked=False, q=query_or_name: self.start_quick_start(q))
-        else:
-            hero_card.clicked.connect(lambda checked=False, n=query_or_name, u=action, src=source: self.start_playlist_url(n, u, src))
-        self.start_cards.append(hero_card)
-        self.start_cards_layout.addWidget(hero_card)
-        self.start_cards_layout.addWidget(heading("ТВОИ ПЛЕЙЛИСТЫ"))
-
-        grid_host = QWidget(self.start_cards_widget)
-        grid = QGridLayout(grid_host)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        card_specs = list(defaults)
-        for saved in self.custom_playlists:
-            card_specs.append((saved.get("title", "Мой плейлист"), saved.get("subtitle", "Твоя подборка"),
-                               saved.get("title", "Мой плейлист"), saved.get("color_a", "#315C91"),
-                               saved.get("color_b", "#171B32"), saved.get("symbol", "♫"), saved.get("url", "")))
-        for index, spec in enumerate(card_specs):
-            card_title, card_subtitle, query_or_name, ca, cb, icon, action = spec
-            card = SpotifyPlaylistCard(card_title, card_subtitle, icon, ca, cb, grid_host, cover_url="")
-            card.setMinimumHeight(150)
-            cover_url = ""
-            if source == "soundcloud":
-                for entry in self.soundcloud_account_playlists:
-                    if entry.get("url") == action:
-                        cover_url = entry.get("cover_url", "")
-                        break
-            if not cover_url:
-                for saved in self.custom_playlists:
-                    if saved.get("url") == action:
-                        cover_url = saved.get("cover_url", "")
-                        break
-            if cover_url:
-                self.request_card_cover(cover_url, card)
-            if action == "personal_mix":
-                card.clicked.connect(lambda checked=False: self.play_personal_mix())
-            elif action == "query":
-                card.clicked.connect(lambda checked=False, q=query_or_name: self.start_quick_start(q))
-            else:
-                card_source = "soundcloud" if "soundcloud.com" in str(action).lower() else "youtube"
-                card.clicked.connect(lambda checked=False, n=query_or_name, u=action, src=card_source: self.start_playlist_url(n, u, src))
-            self.start_cards.append(card)
-            grid.addWidget(card, index // 3, index % 3)
-        add_card = QPushButton("＋\nДобавить свой плейлист")
-        add_card.setObjectName("addPlaylistCard")
-        add_card.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_card.setMinimumHeight(150)
-        add_card.clicked.connect(self.add_custom_playlist_dialog)
-        add_index = len(card_specs)
-        grid.addWidget(add_card, add_index // 3, add_index % 3)
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-        self.start_cards_layout.addWidget(grid_host)
+            mix = SpotifyPlaylistCard(
+                "Перемешать мои лайки", "До 50 треков из твоих лайков в случайном порядке",
+                "🎧", "#315C62", "#171C22", self.start_cards_widget
+            )
+            mix.setMinimumHeight(150)
+            mix.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            mix.clicked.connect(lambda checked=False, src=source: self.play_personal_mix(src))
+            self.start_cards.append(mix)
+            self.start_cards_layout.addWidget(mix)
         self.start_cards_layout.addStretch(1)
 
     def start_search(self):
@@ -5921,7 +5876,7 @@ class MusicPlayer(QMainWindow):
             return
         query = self.search_input.text().strip()
         if not query:
-            self.set_status("Выбери подборку или введи название трека/исполнителя.")
+            self.set_status("Открой свои лайки или введи название трека/исполнителя.")
             self.update_browse_empty_state()
             return
         # Новый запрос не должен ждать завершения долгой догрузки предыдущего.
