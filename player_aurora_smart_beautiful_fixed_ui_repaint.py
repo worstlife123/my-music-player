@@ -40,7 +40,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
     QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
-from yt_dlp import YoutubeDL
+
+
+def YoutubeDL(*args, **kwargs):
+    """Load the extraction engine in its worker, without delaying the first window."""
+    from yt_dlp import YoutubeDL as Downloader
+    return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
 
@@ -4232,7 +4237,9 @@ class MusicPlayer(QMainWindow):
         self._likes_list_signatures = {}
         self._likes_loading_more = set()
         self._likes_live_rows = {"youtube": {}, "soundcloud": {}, "local": {}}
-        self._likes_updating_window = set()
+        self._row_windows_updating = set()
+        self._queue_live_rows = {}
+        self._queue_rebuilding = False
         self._likes_display_tracks = {}
         self._soundcloud_queue_waiting = False
         self._soundcloud_queue_anchor_url = ""
@@ -4985,6 +4992,8 @@ class MusicPlayer(QMainWindow):
         self.queue_list = QListWidget()
         self.queue_list.setObjectName("queueList")
         self.queue_list.setSpacing(2)
+        self.queue_list.setUniformItemSizes(True)
+        self.queue_list.viewport().installEventFilter(self)
         self.queue_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         layout.addWidget(self.queue_list, 1)
@@ -6579,6 +6588,7 @@ class MusicPlayer(QMainWindow):
         self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -7228,10 +7238,10 @@ class MusicPlayer(QMainWindow):
                 and watched is self.start_cards_scroll.viewport() and not self._force_exit):
             QTimer.singleShot(0, self.layout_home_tiles)
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Show) and not self._force_exit:
-            for name in ("youtube_likes_list", "soundcloud_likes_list", "likes_list"):
+            for name in ("youtube_likes_list", "soundcloud_likes_list", "likes_list", "queue_list"):
                 list_widget = getattr(self, name, None)
                 if list_widget is not None and watched is list_widget.viewport():
-                    QTimer.singleShot(0, lambda lw=list_widget: self._ensure_likes_row_window(lw))
+                    QTimer.singleShot(0, lambda lw=list_widget: self._ensure_row_window(lw))
                     self.schedule_visible_artwork(list_widget)
                     break
         return super().eventFilter(watched, event)
@@ -7674,6 +7684,7 @@ class MusicPlayer(QMainWindow):
         self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -7714,6 +7725,7 @@ class MusicPlayer(QMainWindow):
         self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -8053,22 +8065,30 @@ class MusicPlayer(QMainWindow):
         list_widget.addItem(item)
 
     def _ensure_likes_row_window(self, list_widget):
+        self._ensure_row_window(list_widget)
+
+    def _ensure_row_window(self, list_widget):
+        """Keep lightweight items for every track, but widgets only near the viewport."""
         if self._force_exit:
             return
-        kind = self._likes_kind_for_widget(list_widget)
-        if not kind or kind in self._likes_loading_more or kind in self._likes_updating_window:
+        queue = list_widget is self.queue_list
+        kind = "queue" if queue else self._likes_kind_for_widget(list_widget)
+        if (not kind or kind in self._row_windows_updating
+                or (queue and self._queue_rebuilding)
+                or (not queue and kind in self._likes_loading_more)):
             return
-        self._likes_updating_window.add(kind)
+        self._row_windows_updating.add(kind)
         try:
+            height = 64 if queue else 72
             count = list_widget.count()
             top = list_widget.indexAt(QPoint(10, 8)).row() if list_widget.isVisible() else 0
             if top < 0:
-                top = list_widget.verticalScrollBar().value() // (72 + 2 * list_widget.spacing())
-            visible = max(1, list_widget.viewport().height() // 72 + 2) if list_widget.isVisible() else 1
+                top = list_widget.verticalScrollBar().value() // (height + 2 * list_widget.spacing())
+            visible = max(1, list_widget.viewport().height() // height + 2) if list_widget.isVisible() else 1
             first = max(0, top - 8)
             end = min(count, max(first + 24, top + visible + 8))
             wanted = set(range(first, end))
-            live = self._likes_live_rows[kind]
+            live = self._queue_live_rows if queue else self._likes_live_rows[kind]
             focused = QApplication.focusWidget()
             for index, row in list(live.items()):
                 item = list_widget.item(index)
@@ -8084,10 +8104,13 @@ class MusicPlayer(QMainWindow):
             for index in range(first, end):
                 if index not in live:
                     item = list_widget.item(index)
-                    track = item.data(Qt.ItemDataRole.UserRole)
-                    live[index] = self._create_result_row(list_widget, item, track, index + 1)
+                    if queue:
+                        live[index] = self._create_queue_row(item, self.queue_tracks[index])
+                    else:
+                        track = item.data(Qt.ItemDataRole.UserRole)
+                        live[index] = self._create_result_row(list_widget, item, track, index + 1)
         finally:
-            self._likes_updating_window.discard(kind)
+            self._row_windows_updating.discard(kind)
 
     def maybe_load_more_likes(self, list_widget):
         if self._force_exit:
@@ -8117,7 +8140,7 @@ class MusicPlayer(QMainWindow):
         self.schedule_visible_artwork(list_widget)
         if list_widget in (self.youtube_likes_list, self.soundcloud_likes_list, self.likes_list):
             self.maybe_load_more_likes(list_widget)
-            self._ensure_likes_row_window(list_widget)
+        self._ensure_row_window(list_widget)
 
     def refresh_likes_list(self, append_soundcloud_tracks=None, force_rebuild=False):
         """Обновляет данные списков; TrackRow создаются только рядом с экраном."""
@@ -9191,6 +9214,7 @@ class MusicPlayer(QMainWindow):
         self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -9379,6 +9403,7 @@ class MusicPlayer(QMainWindow):
             return
         self.cancel_pending_request()
         self.queue_tracks = []
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -9668,7 +9693,7 @@ class MusicPlayer(QMainWindow):
     def load_visible_artwork(self, list_widget):
         if self._force_exit or list_widget is None or not list_widget.isVisible():
             return
-        self._ensure_likes_row_window(list_widget)
+        self._ensure_row_window(list_widget)
         viewport = list_widget.viewport()
         if viewport is None or viewport.width() <= 0 or viewport.height() <= 0:
             return
@@ -9998,6 +10023,11 @@ class MusicPlayer(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, index)
         item.setSizeHint(QSize(190, 64))
         self.queue_list.addItem(item)
+        if not self._queue_rebuilding:
+            self._ensure_row_window(self.queue_list)
+            self.schedule_visible_artwork(self.queue_list)
+
+    def _create_queue_row(self, item, queued):
         row = TrackRow(queued, compact=True)
         row.setCursor(Qt.CursorShape.PointingHandCursor)
         self.queue_list.setItemWidget(item, row)
@@ -10010,13 +10040,20 @@ class MusicPlayer(QMainWindow):
             lambda _track, u=uid: self.play_queue_index(self.index_for_uid(u))
         )
         self.set_pixmap_safe(row.thumbnail_label, self.fallback_cover)
-        self.schedule_visible_artwork(self.queue_list)
+        current_uid = (self.current_track or {}).get("queue_id")
+        row.set_playing(bool(uid and uid == current_uid))
+        return row
 
     def refresh_queue_list(self):
         """Перерисовываем после удаления или смены порядка."""
-        self.queue_list.clear()
-        for index, track in enumerate(self.queue_tracks):
-            self.append_queue_item(track, index)
+        self._queue_rebuilding = True
+        try:
+            self._queue_live_rows.clear()
+            self.queue_list.clear()
+            for index, track in enumerate(self.queue_tracks):
+                self.append_queue_item(track, index)
+        finally:
+            self._queue_rebuilding = False
         self.schedule_visible_artwork(self.queue_list)
         self.update_queue_count()
         if self.current_track is not None:
@@ -10027,6 +10064,7 @@ class MusicPlayer(QMainWindow):
             self.requested_index = self.index_for_uid(self.requested_track.get("queue_id"))
         if 0 <= self.current_queue_index < self.queue_list.count():
             self.queue_list.setCurrentRow(self.current_queue_index)
+        self._ensure_row_window(self.queue_list)
         self.shuffle_future = None
 
     def index_for_uid(self, uid):
@@ -10101,6 +10139,7 @@ class MusicPlayer(QMainWindow):
         self.cancel_pending_request()
         self.queue_tracks.clear()
         self._shuffle_history.clear()
+        self._queue_live_rows.clear()
         self.queue_list.clear()
         self.current_queue_index = -1
         self.shuffle_future = None
@@ -11063,8 +11102,14 @@ class MusicPlayer(QMainWindow):
             self.set_status("Новый трек ещё подготавливается…")
         elif 0 <= self.current_queue_index < len(self.queue_tracks):
             self.play_queue_index(self.current_queue_index)
+        elif self.queue_tracks:
+            self.play_queue_index(0)
         else:
-            QMessageBox.information(self, "Music Player", "Сначала выбери трек одним щелчком по строке или нажми ▶.")
+            message = "Выбери трек в лайках или найди его через поиск."
+            self.set_status(message)
+            self.show_toast(message)
+            if self.current_source != "likes":
+                self.search_input.setFocus()
 
     def stop_all(self):
         self._restored_playback = None

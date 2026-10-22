@@ -38,23 +38,24 @@ jobs:
       - name: Test frozen Qt, mini-player and audio decoding
         shell: pwsh
         run: |
-          $player = Start-Process -FilePath .\dist\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
+          $player = Start-Process -FilePath .\dist\AuroraMusicPlayer\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
           if (-not $player.WaitForExit(60000)) {
             Stop-Process -Id $player.Id -Force
             throw 'Frozen player smoke test timed out'
           }
           if ($player.ExitCode -ne 0) { throw "Frozen player smoke test failed: $($player.ExitCode)" }
-      - name: Calculate checksum
+      - name: Package portable folder and calculate checksum
         shell: pwsh
         run: |
-          $checksum = (Get-FileHash .\dist\AuroraMusicPlayer.exe -Algorithm SHA256).Hash.ToLower()
-          "$checksum  AuroraMusicPlayer.exe" | Set-Content .\dist\AuroraMusicPlayer.exe.sha256.txt -Encoding ascii
+          Compress-Archive -Path .\dist\AuroraMusicPlayer -DestinationPath .\dist\AuroraMusicPlayer-windows-x64.zip -Force
+          $checksum = (Get-FileHash .\dist\AuroraMusicPlayer-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$checksum  AuroraMusicPlayer-windows-x64.zip" | Set-Content .\dist\AuroraMusicPlayer-windows-x64.zip.sha256.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: AuroraMusicPlayer-windows-x64
           path: |
-            dist/AuroraMusicPlayer.exe
-            dist/AuroraMusicPlayer.exe.sha256.txt
+            dist/AuroraMusicPlayer-windows-x64.zip
+            dist/AuroraMusicPlayer-windows-x64.zip.sha256.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -69,14 +70,14 @@ jobs:
         with:
           name: AuroraMusicPlayer-windows-x64
           path: dist
-      - name: Publish tested Windows EXE
+      - name: Publish tested portable Windows player
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/AuroraMusicPlayer.exe dist/AuroraMusicPlayer.exe.sha256.txt --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/AuroraMusicPlayer-windows-x64.zip dist/AuroraMusicPlayer-windows-x64.zip.sha256.txt --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/AuroraMusicPlayer.exe dist/AuroraMusicPlayer.exe.sha256.txt --verify-tag --generate-notes --title "Aurora Music Player $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" dist/AuroraMusicPlayer-windows-x64.zip dist/AuroraMusicPlayer-windows-x64.zip.sha256.txt --verify-tag --generate-notes --title "Aurora Music Player $GITHUB_REF_NAME"
           fi

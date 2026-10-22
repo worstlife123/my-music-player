@@ -15,11 +15,21 @@ set "PLAYER_WINDOW_OPTION=--windowed"
 set "PLAYER_BUILD_PYTHON=.build-venv\Scripts\python.exe"
 set "PLAYER_PYTHON_COMMAND="
 set "PLAYER_FONT_OPTIONS="
+set "PLAYER_BUILD_MODE=--onedir"
 
+:options
+if "%~1"=="" goto source
 if /i "%~1"=="debug" (
     set "PLAYER_NAME=AuroraMusicPlayer-debug"
     set "PLAYER_WINDOW_OPTION=--console"
 )
+if /i "%~1"=="single" set "PLAYER_BUILD_MODE=--onefile"
+shift
+goto options
+
+:source
+set "PLAYER_OUTPUT=dist\%PLAYER_NAME%\%PLAYER_NAME%.exe"
+if "%PLAYER_BUILD_MODE%"=="--onefile" set "PLAYER_OUTPUT=dist\%PLAYER_NAME%.exe"
 
 if not exist "%PLAYER_SOURCE%" if exist "player.py" set "PLAYER_SOURCE=player.py"
 if not exist "%PLAYER_SOURCE%" goto missing_source
@@ -50,13 +60,14 @@ if exist "fonts\*.ttf" set "PLAYER_FONT_OPTIONS=--add-data=fonts/*.ttf:fonts"
 if exist "fonts\*.otf" set "PLAYER_FONT_OPTIONS=%PLAYER_FONT_OPTIONS% --add-data=fonts/*.otf:fonts"
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean --onefile %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
-if not exist "dist\%PLAYER_NAME%.exe" goto failed
+if not exist "%PLAYER_OUTPUT%" goto failed
 
 echo.
 echo BUILD SUCCEEDED
-echo Your EXE: "%CD%\dist\%PLAYER_NAME%.exe"
+echo Your EXE: "%CD%\%PLAYER_OUTPUT%"
+if "%PLAYER_BUILD_MODE%"=="--onedir" echo Keep the entire %PLAYER_NAME% folder, including _internal, together.
 echo You can now open that EXE. Python is not required to run the built application.
 goto success
 

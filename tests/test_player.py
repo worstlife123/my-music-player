@@ -86,6 +86,33 @@ class PlayerChanges(unittest.TestCase):
         self.w.play_track(track, -1)
         wait_for(lambda: self.w.requested_track is None and self.w.current_track is not None and self.w.current_track['url'] == track['url'])
 
+    def test_empty_play_shows_inline_guidance_without_a_modal(self):
+        w = self.w
+        with patch.object(m.QMessageBox, 'information') as dialog:
+            for source in ('youtube', 'likes'):
+                w.set_source(source)
+                w.play_button.click()
+                self.assertTrue(w.toast.isVisible())
+                self.assertIn('Выбери трек', w.toast.text())
+                self.assertTrue(all(player.source().isEmpty() for player in w.players))
+                self.assertIsNone(w.requested_track)
+            dialog.assert_not_called()
+        w.set_source('youtube')
+        w.play_button.click()
+        self.assertTrue(w.search_input.hasFocus())
+
+    def test_play_starts_first_queued_track_without_a_previous_selection(self):
+        w = self.w
+        track = self.local_track('first-play')
+        w.add_to_queue(track)
+        self.assertEqual(w.current_queue_index, -1)
+        with patch.object(w, 'prepare_next_track'), patch.object(w, 'ensure_following_track_prepared'):
+            w.play_button.click()
+            wait_for(lambda: w.current_track is not None and w.requested_track is None)
+        self.assertEqual(w.current_queue_index, 0)
+        self.assertEqual(w.current_track['url'], track['url'])
+        self.assertEqual(w.player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+
     def test_likes_are_updated_before_list_rebuild(self):
         w = self.w
         track = {'source': 'youtube', 'video_id': 'abcdefghijk',
@@ -1545,6 +1572,90 @@ class PlayerChanges(unittest.TestCase):
         w.player.pause()
         w.save_playback_session()
         return tracks
+
+    def test_large_saved_queue_restores_all_data_with_few_row_widgets(self):
+        w = self.w
+        tracks = [{**self.youtube_track(f'start{i:06}'), 'queue_id': f'q{i}'} for i in range(2500)]
+        w.queue_tracks = tracks
+        w.current_track = tracks[-1]
+        w.current_queue_index = len(tracks) - 1
+        w.refresh_queue_list()
+        w.save_playback_session()
+        with self.reopened_player() as restored:
+            self.assertEqual([t['queue_id'] for t in restored.queue_tracks],
+                             [t['queue_id'] for t in tracks])
+            self.assertEqual(restored.queue_list.count(), 2500)
+            self.assertLess(len(restored.queue_list.findChildren(m.TrackRow)), 45)
+            self.assertEqual(restored.current_queue_index, 2499)
+            self.assertTrue(all(player.source().isEmpty() for player in restored.players))
+            restored.toggle_queue_if_hidden()
+            wait_for(lambda: restored.queue_animation.state() == QAbstractAnimation.State.Stopped)
+            restored.queue_list.scrollToItem(restored.queue_list.item(2499))
+            self.settle_row_deletions()
+            row = restored.queue_list.itemWidget(restored.queue_list.item(2499))
+            self.assertTrue(row.property('playing'))
+            self.assertEqual(row.track['queue_id'], 'q2499')
+            self.assertLess(len(restored.queue_list.findChildren(m.TrackRow)), 45)
+
+    def test_queue_window_scroll_actions_and_duplicate_identity_survive_reordering(self):
+        w = self.w
+        tracks = [{**self.youtube_track(f'queue{i:06}'), 'queue_id': f'q{i}'} for i in range(600)]
+        tracks[400]['url'] = tracks[0]['url']
+        w.queue_tracks = tracks
+        w.current_track = tracks[400]
+        w.current_queue_index = 400
+        w.refresh_queue_list()
+        w.toggle_queue_if_hidden()
+        wait_for(lambda: w.queue_animation.state() == QAbstractAnimation.State.Stopped)
+        lw = w.queue_list
+        for index in (400, 100, 599, 0, 400):
+            lw.scrollToItem(lw.item(index), m.QListWidget.ScrollHint.PositionAtTop)
+            self.settle_row_deletions()
+            self.assertEqual(lw.count(), 600)
+            self.assertLess(len(lw.findChildren(m.TrackRow)), 45)
+            row = lw.itemWidget(lw.item(index))
+            self.assertEqual(row.track['queue_id'], f'q{index}')
+            self.assertEqual(bool(row.property('playing')), index == 400)
+            for y in range(8, lw.viewport().height() - 8, 68):
+                item = lw.itemAt(m.QPoint(10, y))
+                if item is not None:
+                    self.assertIsInstance(lw.itemWidget(item), m.TrackRow)
+            with patch.object(w, 'play_queue_index') as play:
+                row.play_requested.emit(row.track)
+                play.assert_called_once_with(index)
+        # A row created after scrolling must remove its own position, even with duplicates.
+        lw.scrollToItem(lw.item(100), m.QListWidget.ScrollHint.PositionAtTop)
+        self.settle_row_deletions()
+        with patch.object(w, 'prepare_next_track'):
+            lw.itemWidget(lw.item(100)).remove_button.click()
+            self.assertEqual(w.current_queue_index, 399)
+            w.move_queue_index(399, 1)
+            self.settle_row_deletions()
+        self.assertEqual(w.current_queue_index, 400)
+        self.assertNotIn('q100', [track['queue_id'] for track in w.queue_tracks])
+        lw.scrollToItem(lw.item(400), m.QListWidget.ScrollHint.PositionAtTop)
+        self.settle_row_deletions()
+        row = lw.itemWidget(lw.item(400))
+        self.assertEqual(row.track['queue_id'], 'q400')
+        self.assertTrue(row.property('playing'))
+        with patch.object(w, 'play_queue_index') as play:
+            row.play_requested.emit(row.track)
+            play.assert_called_once_with(400)
+
+    def test_queue_window_can_be_cleared_and_replaced(self):
+        w = self.w
+        w.add_to_queue(self.youtube_track('clear000001'))
+        w.clear_queue()
+        w.add_to_queue(self.youtube_track('clear000002'))
+        self.settle_row_deletions()
+        row = w.queue_list.itemWidget(w.queue_list.item(0))
+        self.assertEqual(row.track['video_id'], 'clear000002')
+        with patch.object(w, 'play_queue_index') as play:
+            row.play_requested.emit(row.track)
+            play.assert_called_once_with(0)
+        row.remove_button.click()
+        self.assertEqual(w.queue_tracks, [])
+        self.assertEqual(w._queue_live_rows, {})
 
     def test_session_restores_duplicate_queue_positions_without_starting_audio(self):
         tracks = self.saved_local_session()
