@@ -1,5 +1,7 @@
 import importlib.util
 import gc
+from contextlib import contextmanager
+import json
 import math
 import os
 from pathlib import Path
@@ -1511,6 +1513,266 @@ class PlayerChanges(unittest.TestCase):
         current = self.w.current_track
         self.w.on_pending_media_timeout()
         self.assertIs(self.w.current_track, current)
+
+    @contextmanager
+    def reopened_player(self):
+        reopened = m.MusicPlayer()
+        for player in reopened.players:
+            player.setAudioOutput(None)
+        reopened.show()
+        app.processEvents()
+        try:
+            yield reopened
+        finally:
+            reopened.stop_all()
+            reopened._force_exit = True
+            reopened.close()
+            reopened.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+
+    def saved_local_session(self):
+        w = self.w
+        tracks = [{**self.local_track(name), 'queue_id': name}
+                  for name in ('session-a', 'session-b', 'session-duplicate')]
+        tracks[2]['url'] = tracks[0]['url']
+        w.queue_tracks = tracks
+        w.refresh_queue_list()
+        with patch.object(w, 'prepare_next_track'), patch.object(w, 'ensure_following_track_prepared'):
+            w.play_track(tracks[1], 1)
+            wait_for(lambda: w.current_track is not None and w.current_queue_index == 1)
+        w.player.setPosition(2600)
+        w.player.pause()
+        w.save_playback_session()
+        return tracks
+
+    def test_session_restores_duplicate_queue_positions_without_starting_audio(self):
+        tracks = self.saved_local_session()
+        with self.reopened_player() as w:
+            self.assertEqual([t['queue_id'] for t in w.queue_tracks], [t['queue_id'] for t in tracks])
+            self.assertEqual(w.current_queue_index, 1)
+            self.assertEqual(w.current_track['url'], tracks[1]['url'])
+            self.assertEqual(w._restored_playback['position'], 2600)
+            self.assertEqual(w.position_label.text(), '00:02')
+            self.assertEqual(w.duration_label.text(), '00:10')
+            self.assertTrue(all(p.source().isEmpty() for p in w.players))
+            self.assertEqual(w.player.playbackState(), m.QMediaPlayer.PlaybackState.StoppedState)
+            self.assertIsNone(w.stream_worker)
+
+    def test_resume_saved_session_seeks_real_media_before_making_it_audible(self):
+        self.saved_local_session()
+        with self.reopened_player() as w, \
+             patch.object(w, 'prepare_next_track'), patch.object(w, 'ensure_following_track_prepared'):
+            w.toggle_playback()
+            wait_for(lambda: w.requested_track is None and w._restored_playback is None)
+            self.assertGreater(w.player.position(), 2600)
+            self.assertEqual(w.current_queue_index, 1)
+            self.assertEqual(w.current_track['queue_id'], 'session-b')
+            self.assertGreater(w.audio_output.volume(), 0)
+
+    def test_checkpoint_updates_position_without_rewriting_large_queue_file(self):
+        self.saved_local_session()
+        w = self.w
+        original = w.session_file.read_bytes()
+        w.player.setPosition(4000)
+        w.save_playback_checkpoint()
+        saved = json.loads(w.settings.value('playback_checkpoint_json'))
+        self.assertEqual(saved['position'], 4000)
+        self.assertEqual(w.session_file.read_bytes(), original)
+        with patch.object(w.settings, 'setValue') as set_value:
+            w.save_playback_checkpoint()
+            set_value.assert_not_called()
+
+    def test_queue_reorder_is_saved_after_debounce(self):
+        self.saved_local_session()
+        w = self.w
+        w.move_queue_index(0, 1)
+        self.assertTrue(w.session_save_timer.isActive())
+        wait_for(lambda: not w._session_queue_dirty)
+        queue = json.loads(w.session_file.read_text(encoding='utf-8'))['queue']
+        self.assertEqual([t['queue_id'] for t in queue], ['session-b', 'session-a', 'session-duplicate'])
+
+    def test_session_save_failure_preserves_previous_file_and_can_retry(self):
+        self.saved_local_session()
+        w = self.w
+        original = w.session_file.read_bytes()
+        w.queue_tracks.reverse()
+        w._session_queue_dirty = True
+        with patch.object(Path, 'replace', side_effect=OSError('Disk unavailable')):
+            w.save_playback_session()
+        self.assertEqual(w.session_file.read_bytes(), original)
+        self.assertTrue(w._session_queue_dirty)
+        w.save_playback_session()
+        self.assertFalse(w._session_queue_dirty)
+        self.assertNotEqual(w.session_file.read_bytes(), original)
+
+    def test_session_keeps_current_track_even_after_queue_is_cleared(self):
+        self.start(self.local_track('orphan-session'))
+        self.w.player.setPosition(2300)
+        self.w.player.pause()
+        self.w.clear_queue()
+        self.w.save_playback_session()
+        with self.reopened_player() as w:
+            self.assertEqual(w.queue_tracks, [])
+            self.assertEqual(w.current_track['title'], 'orphan-session')
+            self.assertEqual(w.current_queue_index, -1)
+            self.assertEqual(w._restored_playback['position'], 2300)
+
+    def test_session_allowlist_removes_stream_urls_and_credentials(self):
+        w = self.w
+        track = {**self.youtube_track('persist0001'), 'queue_id': 'q',
+                 'url': 'https://music.youtube.com/watch?v=persist0001&cookie=SECRET',
+                 'stream_url': 'https://server.invalid/SECRET', 'headers': {'Cookie': 'SECRET'},
+                 'cookie_file': '/SECRET/cookies.txt', 'authorization': 'SECRET'}
+        w.queue_tracks = [track]
+        w.current_track = track
+        w._session_queue_dirty = True
+        w.save_playback_session()
+        saved = w.session_file.read_text(encoding='utf-8') + w.settings.value('playback_checkpoint_json')
+        self.assertNotIn('SECRET', saved)
+        queue = json.loads(w.session_file.read_text(encoding='utf-8'))['queue']
+        self.assertEqual(queue[0]['url'], 'https://music.youtube.com/watch?v=persist0001')
+        self.assertNotIn('stream_url', queue[0])
+
+    def test_invalid_session_and_stale_checkpoint_do_not_resume_wrong_position(self):
+        tracks = self.saved_local_session()
+        w = self.w
+        valid = w.session_file.read_text(encoding='utf-8')
+        w.settings.setValue('playback_checkpoint_json', json.dumps({'revision': 'stale', 'position': 9000}))
+        with self.reopened_player() as restored:
+            self.assertEqual(restored.current_track['queue_id'], tracks[0]['queue_id'])
+            self.assertEqual(restored._restored_playback['position'], 0)
+        w.session_file.write_text('{broken JSON', encoding='utf-8')
+        with self.reopened_player() as restored:
+            self.assertEqual(restored.queue_tracks, [])
+            self.assertIsNone(restored.current_track)
+        w.session_file.write_text(valid, encoding='utf-8')
+        w.settings.setValue('playback_checkpoint_json', '{broken checkpoint')
+        with self.reopened_player() as restored:
+            self.assertEqual(len(restored.queue_tracks), len(tracks))
+            self.assertEqual(restored._restored_playback['position'], 0)
+
+    def test_manual_track_selection_cancels_saved_resume_offset(self):
+        self.saved_local_session()
+        with self.reopened_player() as w, \
+             patch.object(w, 'prepare_next_track'), patch.object(w, 'ensure_following_track_prepared'):
+            track = self.local_track('new-manual-session')
+            w.play_track(track, -1)
+            wait_for(lambda: w.requested_track is None and w.current_track['url'] == track['url'])
+            self.assertIsNone(w._restored_playback)
+            self.assertLess(w.player.position(), 1200)
+
+    def test_supermix_session_is_restored_only_when_user_resumes_with_auth(self):
+        w = self.w
+        track = {**self.youtube_track('persistmix1'), 'queue_id': 'native-position'}
+        w.queue_tracks = [track]
+        w.current_track = track
+        w.queue_mode = 'supermix'
+        w.supermix_session = {'mix_id': 'RDTMAK5uy_saved', 'anchor': 'anchor00001', 'seen': {'persistmix1'}}
+        w._restored_playback = {'position': 4200, 'mode': 'supermix', 'supermix': w.supermix_session}
+        w._session_queue_dirty = True
+        w.save_playback_session()
+        with self.reopened_player() as restored, \
+             patch.object(restored, 'youtube_auth_kwargs', return_value={'cookie_file': 'unused'}), \
+             patch.object(restored, 'start_stream_extraction') as extract:
+            self.assertIsNone(restored.supermix_session)
+            self.assertIsNone(restored.stream_worker)
+            restored.toggle_playback()
+            self.assertEqual(restored.supermix_session['mix_id'], 'RDTMAK5uy_saved')
+            self.assertEqual(restored.supermix_session['anchor'], 'anchor00001')
+            self.assertIn('persistmix1', restored.supermix_session['seen'])
+            self.assertEqual(restored._requested_start_position, 4200)
+            extract.assert_called_once()
+            restored.toggle_playback()
+            self.assertIsNone(restored.requested_track)
+            self.assertIsNotNone(restored._restored_playback)
+
+    def test_mini_player_reuses_audio_and_closing_it_restores_main_window(self):
+        self.start(self.local_track('mini-audio'))
+        w = self.w
+        active = w.player
+        w.show_mini_player()
+        mini = w.mini_player
+        app.processEvents()
+        self.assertTrue(mini.isVisible())
+        self.assertFalse(w.isVisible())
+        self.assertTrue(mini.windowFlags() & m.Qt.WindowType.WindowStaysOnTopHint)
+        self.assertEqual(len(w.findChildren(m.QMediaPlayer)), 2)
+        self.assertIs(w.player, active)
+        self.assertEqual(active.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+        mini.close()
+        app.processEvents()
+        self.assertTrue(w.isVisible())
+        self.assertFalse(mini.isVisible())
+        self.assertIs(w.player, active)
+        self.assertEqual(active.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+        self.assertIsNotNone(w.settings.value('mini_geometry'))
+
+    def test_mini_player_pause_resume_volume_seek_and_favorite_share_state(self):
+        self.start(self.local_track('mini-controls'))
+        w = self.w
+        w.show_mini_player()
+        mini = w.mini_player
+        mini.play_button.click()
+        self.assertEqual(w.player.playbackState(), m.QMediaPlayer.PlaybackState.PausedState)
+        self.assertEqual(mini.status.text(), 'На паузе')
+        mini.play_button.click()
+        self.assertEqual(w.player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+        self.assertEqual(mini.status.text(), 'Сейчас играет')
+        w.volume_slider.setValue(23)
+        self.assertEqual(mini.volume_slider.value(), 23)
+        mini.volume_slider.setValue(41)
+        self.assertEqual(w.volume_slider.value(), 41)
+        self.assertAlmostEqual(w.audio_output.volume(), .41, places=5)
+        mini.seek_slider.setValue(3500)
+        mini.seek_released()
+        self.assertGreaterEqual(w.player.position(), 3500)
+        mini.favorite_button.click()
+        self.assertTrue(w.is_favorite(w.current_track))
+        self.assertEqual(mini.favorite_button.icon().cacheKey(), w.bottom_favorite_button.icon().cacheKey())
+
+    def test_mini_player_next_previous_actions_and_themes(self):
+        w = self.w
+        with patch.object(w, 'play_next') as next_track, patch.object(w, 'play_previous') as previous:
+            w.show_mini_player()
+            w.mini_player.next_button.click()
+            w.mini_player.previous_button.click()
+            next_track.assert_called_once()
+            previous.assert_called_once()
+        for theme in ('dark', 'light'):
+            w.theme = theme
+            w.apply_styles()
+            self.assertEqual(w.mini_player.theme, theme)
+            image = w.mini_player.grab().toImage()
+            base = image.pixelColor(210, 195)
+            self.assertEqual(base.alpha(), 255)
+            self.assertTrue(base.lightness() < 100 if theme == 'dark' else base.lightness() > 180)
+
+    def test_saved_session_is_visible_in_mini_without_starting_playback(self):
+        self.saved_local_session()
+        with self.reopened_player() as w:
+            w.show_mini_player()
+            self.assertEqual(w.mini_player.status.text(), 'Продолжить прослушивание')
+            self.assertEqual(w.mini_player.position_label.text(), '00:02')
+            self.assertTrue(w.player.source().isEmpty())
+
+    def test_exit_with_mini_player_does_not_show_main_window_again(self):
+        w = self.w
+        w.show_mini_player()
+        with patch.object(m.QApplication, 'quit') as quit_app:
+            w.request_app_exit()
+        self.assertFalse(w.mini_player.isVisible())
+        self.assertFalse(w.isVisible())
+        self.assertFalse(w.checkpoint_timer.isActive())
+        quit_app.assert_called_once()
+
+    def test_empty_mini_play_opens_full_player_without_an_error_dialog(self):
+        self.w.show_mini_player()
+        with patch.object(m.QMessageBox, 'information') as message:
+            self.w.mini_player.play_button.click()
+        self.assertTrue(self.w.isVisible())
+        self.assertFalse(self.w.mini_player.isVisible())
+        message.assert_not_called()
 
     def remote_playback_fixture(self):
         # Decode/play real WAV files while supplying controlled network failures.

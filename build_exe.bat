@@ -5,7 +5,7 @@ title Aurora Music Player - EXE builder
 pushd "%~dp0"
 if errorlevel 1 (
     echo ERROR: Cannot open the folder containing this script.
-    pause
+    if not defined CI pause
     exit /b 1
 )
 
@@ -72,11 +72,11 @@ goto failed
 :failed
 echo.
 echo BUILD FAILED. See the error above. Keep or copy that error for troubleshooting.
-pause
+if not defined CI pause
 popd
 exit /b 1
 
 :success
-pause
+if not defined CI pause
 popd
 exit /b 0

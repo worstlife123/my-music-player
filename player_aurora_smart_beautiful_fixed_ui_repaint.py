@@ -25,6 +25,7 @@ from uuid import uuid4
 from collections import deque, OrderedDict
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice
 from PyQt6.QtGui import (
@@ -40,6 +41,8 @@ from PyQt6.QtWidgets import (
     QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 from yt_dlp import YoutubeDL
+
+_SMOKE_DIRECTORY = None
 
 
 def yt_dlp_tls_options():
@@ -117,6 +120,8 @@ def normalize_artwork_url(raw_url):
 
 def app_cache_directory():
     """Возвращает пользовательскую папку кэша, не зависящую от каталога приложения."""
+    if _SMOKE_DIRECTORY is not None:
+        return _SMOKE_DIRECTORY / "cache"
     if os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     else:
@@ -137,6 +142,8 @@ def app_cache_directory():
 
 
 def app_data_directory():
+    if _SMOKE_DIRECTORY is not None:
+        return _SMOKE_DIRECTORY / "data"
     base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
     path = Path(base) if base else Path.home() / ".local" / "share"
     if path.name.casefold() != "auroramusicplayer":
@@ -147,6 +154,8 @@ def app_data_directory():
 
 def migrate_legacy_data(filename):
     destination = app_data_directory() / filename
+    if _SMOKE_DIRECTORY is not None:
+        return destination
     legacy = Path(__file__).resolve().parent / filename
     marker = destination.with_suffix(destination.suffix + ".migrated")
     if marker.exists():
@@ -3803,6 +3812,213 @@ class PlayerBar(QFrame):
         painter.end()
 
 
+class MiniPlayer(PlayerBar):
+    """A second view of the existing players; it owns no audio or network workers."""
+    def __init__(self, player):
+        super().__init__(player)
+        self.owner = player
+        self.theme = player.theme
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setObjectName("miniPlayer")
+        self.setWindowTitle("Aurora · Мини-плеер")
+        self.setFixedSize(420, 200)
+        self._drag_offset = None
+        self._seeking = False
+        self._cover_url = None
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 9, 14, 12)
+        root.setSpacing(6)
+        header = QHBoxLayout()
+        self.status = QLabel("Мини-плеер")
+        self.status.setObjectName("miniStatus")
+        self.status.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header.addWidget(self.status, 1)
+        self.restore_button = QPushButton("↗")
+        self.restore_button.setToolTip("Открыть полный плеер")
+        self.close_button = QPushButton("×")
+        self.close_button.setToolTip("Закрыть мини-плеер и вернуться к полному окну")
+        for button in (self.restore_button, self.close_button):
+            button.setFixedSize(26, 24)
+            header.addWidget(button)
+        self.restore_button.clicked.connect(player.restore_from_tray)
+        self.close_button.clicked.connect(self.close)
+        root.addLayout(header)
+        info = QHBoxLayout()
+        info.setSpacing(12)
+        self.cover = QLabel()
+        self.cover.setFixedSize(56, 56)
+        info.addWidget(self.cover)
+        text = QVBoxLayout()
+        self.title_label = QLabel()
+        self.title_label.setObjectName("miniTitle")
+        self.artist_label = QLabel()
+        self.artist_label.setObjectName("miniArtist")
+        for label in (self.title_label, self.artist_label):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text.addWidget(label)
+        info.addLayout(text, 1)
+        self.favorite_button = QPushButton()
+        self.favorite_button.setFixedSize(32, 32)
+        self.favorite_button.clicked.connect(player.toggle_current_favorite)
+        info.addWidget(self.favorite_button)
+        root.addLayout(info)
+        transport = QHBoxLayout()
+        transport.setSpacing(8)
+        transport.addStretch(1)
+        self.previous_button, self.play_button, self.next_button = QPushButton(), QPushButton(), QPushButton()
+        for button in (self.previous_button, self.play_button, self.next_button):
+            button.setFixedSize(34, 34)
+            button.setIconSize(QSize(20, 20))
+            transport.addWidget(button)
+        self.play_button.setObjectName("miniPlay")
+        self.play_button.setFixedSize(40, 40)
+        self.previous_button.setToolTip("Предыдущий трек")
+        self.play_button.setToolTip("Воспроизведение / пауза")
+        self.next_button.setToolTip("Следующий трек")
+        self.previous_button.clicked.connect(player.play_previous)
+        self.play_button.clicked.connect(self.toggle_playback)
+        self.next_button.clicked.connect(player.play_next)
+        transport.addStretch(1)
+        self.volume_slider = ClickSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setFixedSize(76, 16)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setToolTip("Громкость")
+        self.volume_slider.valueChanged.connect(player.volume_slider.setValue)
+        transport.addWidget(self.volume_slider)
+        root.addLayout(transport)
+        timeline = QHBoxLayout()
+        self.position_label = QLabel("0:00")
+        self.duration_label = QLabel("0:00")
+        self.seek_slider = ClickSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setFixedHeight(16)
+        self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
+        self.seek_slider.sliderReleased.connect(self.seek_released)
+        timeline.addWidget(self.position_label)
+        timeline.addWidget(self.seek_slider, 1)
+        timeline.addWidget(self.duration_label)
+        root.addLayout(timeline)
+        for keys, callback in (("Space", self.toggle_playback), ("Ctrl+Right", player.play_next),
+                               ("Ctrl+Left", player.play_previous), ("Ctrl+L", player.like_current_shortcut),
+                               ("Ctrl+Q", player.request_app_exit),
+                               ("Ctrl+M", player.restore_from_tray),
+                               ("Escape", player.restore_from_tray)):
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.activated.connect(callback)
+        self.apply_theme()
+
+    def paintEvent(self, event):
+        # A translucent top-level window needs an explicit opaque base inside
+        # the rounded frame; relying on QFrame's stylesheet leaves stale pixels.
+        painter = QPainter(self)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bounds = QRectF(self.rect()).adjusted(.5, .5, -.5, -.5)
+        path = QPainterPath()
+        path.addRoundedRect(bounds, 14, 14)
+        light = self.theme == "light"
+        painter.fillPath(path, QColor("#FFFFFF" if light else "#171B21"))
+        gradient = QLinearGradient(0, 0, self.width(), self.height())
+        accent = QColor(self.accent)
+        accent.setAlpha(22 if light else 48)
+        gradient.setColorAt(0, accent)
+        accent.setAlpha(0)
+        gradient.setColorAt(1, accent)
+        painter.fillPath(path, gradient)
+        painter.setPen(QPen(QColor("#D8DFE8" if light else "#303946"), 1))
+        painter.drawPath(path)
+        painter.end()
+
+    def apply_theme(self):
+        self.theme = self.owner.theme
+        light = self.theme == "light"
+        background, foreground, muted = ("#FFFFFF", "#18202A", "#626C7B") if light else ("#171B21", "#F5F7FA", "#AAB4C3")
+        self.setStyleSheet(f"""
+            QFrame#miniPlayer {{ background: {background}; border: 1px solid {'#D8DFE8' if light else '#303946'}; border-radius: 14px; }}
+            QLabel {{ color: {foreground}; background: transparent; border: none; }}
+            QLabel#miniTitle {{ font-size: 14px; font-weight: 700; }}
+            QLabel#miniStatus, QLabel#miniArtist {{ color: {muted}; font-size: 11px; }}
+            QPushButton {{ background: transparent; color: {foreground}; border: none; border-radius: 8px; padding: 0; }}
+            QPushButton:hover {{ background: {'#E9F0EC' if light else '#2B3430'}; }}
+            QPushButton#miniPlay {{ background: #1DB954; border-radius: 20px; }}
+            QPushButton#miniPlay:hover {{ background: #1ED760; }}
+        """)
+        self.previous_button.setIcon(control_icon("previous", foreground))
+        self.next_button.setIcon(control_icon("next", foreground))
+        self.sync_from_player()
+
+    def sync_from_player(self):
+        w = self.owner
+        track = w.current_track or w.requested_track or {}
+        for label, full in ((self.title_label, track.get("title") or "Ничего не играет"),
+                            (self.artist_label, track.get("artist_display") or track.get("artist") or "Выбери трек в полном плеере")):
+            label.setText(label.fontMetrics().elidedText(full, Qt.TextElideMode.ElideRight, max(60, label.width())))
+            label.setToolTip(full)
+        playing = w.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.play_button.setIcon(control_icon("pause" if playing else "play", "#FFFFFF", 24))
+        status = ("Загрузка…" if w.requested_track is not None else "Продолжить прослушивание" if w._restored_playback else
+                  "Сейчас играет" if playing else "На паузе" if track else "Мини-плеер")
+        self.status.setText(status)
+        self.favorite_button.setEnabled(w.bottom_favorite_button.isEnabled())
+        self.favorite_button.setIcon(w.bottom_favorite_button.icon())
+        self.favorite_button.setIconSize(QSize(22, 22))
+        self.favorite_button.setToolTip(w.bottom_favorite_button.toolTip())
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(round(w.volume * 100))
+        self.volume_slider.blockSignals(False)
+        url = normalize_artwork_url(track.get("thumbnail", ""))
+        if url != self._cover_url:
+            self._cover_url = url
+            w.request_image(url, self.cover)
+            self.set_cover_accent(w.pixmap_cache.get(url))
+        self.sync_position()
+
+    def sync_position(self):
+        w = self.owner
+        position = w._restored_playback["position"] if w._restored_playback else w.player.position()
+        duration = w.player.duration() or int((w.current_track or {}).get("duration") or 0) * 1000
+        self.position_label.setText(w.format_position(position))
+        self.duration_label.setText(w.format_position(duration))
+        if not self._seeking:
+            self.seek_slider.setRange(0, max(0, duration))
+            self.seek_slider.setValue(position)
+        self.seek_slider.setEnabled(w.player.isSeekable() and w._restored_playback is None)
+
+    def seek_released(self):
+        if self.owner.player.isSeekable():
+            self.owner._last_progress_position = self.seek_slider.value()
+            self.owner._last_progress_at = time.monotonic()
+            self.owner.player.setPosition(self.seek_slider.value())
+        self._seeking = False
+
+    def toggle_playback(self):
+        if not (self.owner.current_track or self.owner.requested_track or self.owner.queue_tracks):
+            self.owner.restore_from_tray()
+            return
+        self.owner.toggle_playback()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+
+    def closeEvent(self, event):
+        self.owner.settings.setValue("mini_geometry", self.saveGeometry())
+        if not self.owner._force_exit:
+            self.owner.restore_from_tray()
+        event.accept()
+
+
 class MusicPlayer(QMainWindow):
     PENDING_MEDIA_TIMEOUT_MS = 20_000
     PLAYBACK_STALL_SECONDS = 8
@@ -3840,6 +4056,7 @@ class MusicPlayer(QMainWindow):
             self.search_input.selectAll()
         bind("Ctrl+F", focus_search)
         bind("Ctrl+L", self.like_current_shortcut)
+        bind("Ctrl+M", self.show_mini_player)
         bind("Ctrl+Q", self.request_app_exit)
         bind("Escape", self.escape_shortcut)
 
@@ -3959,10 +4176,10 @@ class MusicPlayer(QMainWindow):
         self.set_status("Трек скачан для офлайна")
         self.show_toast("Скачано: " + str(track.get("title") or "трек"))
 
-    def __init__(self):
+    def __init__(self, settings=None):
         super().__init__()
         # QSettings сохраняет предпочтения между запусками на Windows.
-        self.settings = QSettings("AuroraLocal", "MusicPlayer")
+        self.settings = settings if settings is not None else QSettings("AuroraLocal", "MusicPlayer")
         self.theme = str(self.settings.value("spotify_theme", "dark"))
         if self.theme not in ("dark", "light"):
             self.theme = "dark"
@@ -4066,6 +4283,20 @@ class MusicPlayer(QMainWindow):
         self.result_limit = max(25, min(100, int(self.settings.value("search_limit", 50))))
         self.sidebar_collapsed = False
         self.queue_open = False
+        self.mini_player = None
+        self._restored_playback = None
+        self._requested_start_position = 0
+        self._session_ready = False
+        self._session_queue_dirty = False
+        self._session_revision = ""
+        self._last_checkpoint_blob = ""
+        self.session_file = app_data_directory() / "playback_session.json"
+        self.session_save_timer = QTimer(self)
+        self.session_save_timer.setSingleShot(True)
+        self.session_save_timer.timeout.connect(self.save_playback_session)
+        self.checkpoint_timer = QTimer(self)
+        self.checkpoint_timer.setInterval(5000)
+        self.checkpoint_timer.timeout.connect(self.save_playback_checkpoint)
         self._download_workers = set()
         self._download_index_dirty = False
         self._download_index_flush_scheduled = False
@@ -4225,6 +4456,9 @@ class MusicPlayer(QMainWindow):
         self.refresh_repeat_button()
         self.shuffle_button.setChecked(self.shuffle_enabled)
         self.set_volume(int(round(self.volume * 100)))
+        self.restore_playback_session()
+        self._session_ready = True
+        self.checkpoint_timer.start()
 
     # ---------------------------------------------------------
     # Интерфейс. Две постоянные колонки + выдвижная очередь.
@@ -4261,13 +4495,43 @@ class MusicPlayer(QMainWindow):
             self.restore_from_tray()
 
     def restore_from_tray(self):
+        if self.mini_player is not None:
+            self.settings.setValue("mini_geometry", self.mini_player.saveGeometry())
+            self.mini_player.hide()
         self.showNormal()
         self.show()
         self.raise_()
         self.activateWindow()
 
+    def show_mini_player(self):
+        if self.mini_player is None:
+            self.mini_player = MiniPlayer(self)
+            geometry = self.settings.value("mini_geometry")
+            if geometry:
+                try:
+                    self.mini_player.restoreGeometry(geometry)
+                except TypeError:
+                    pass
+            else:
+                self.mini_player.move(self.frameGeometry().topLeft() + QPoint(30, 30))
+        mini = self.mini_player
+        if not any(screen.availableGeometry().intersects(mini.frameGeometry()) for screen in QApplication.screens()):
+            mini.move(self.screen().availableGeometry().topLeft() + QPoint(24, 24))
+        mini.apply_theme()
+        mini.show()
+        mini.sync_from_player()
+        mini.raise_()
+        self.hide()
+
+    def refresh_mini_player(self):
+        if self.mini_player is not None and self.mini_player.isVisible():
+            self.mini_player.sync_from_player()
+
     def request_app_exit(self):
         """Аккуратно завершает приложение после завершения/отмены фоновых потоков."""
+        self.save_playback_session()
+        self.checkpoint_timer.stop()
+        self.session_save_timer.stop()
         self._force_exit = True
         self._exit_attempts = 0
         for worker in self.findChildren(QThread):
@@ -4876,10 +5140,16 @@ class MusicPlayer(QMainWindow):
         self.dislike_action.setEnabled(False)
         self.dislike_action.triggered.connect(self.dislike_current_track)
         self.options_menu.addSeparator()
+        self.mini_player_action = self.options_menu.addAction("Мини-плеер поверх окон   Ctrl+M", self.show_mini_player)
         self.options_menu.addAction("Настройки…", self.open_settings)
         self.options_menu.addAction("О программе", self.show_about)
+        updates = self.options_menu.addMenu("Готовые версии на GitHub")
+        updates.addAction("Последние сборки", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/worstlife123/my-music-player/actions/workflows/windows-build.yml")))
+        updates.addAction("Релизы", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/worstlife123/my-music-player/releases")))
         self.options_menu.addSeparator()
-        self.options_menu.addAction("Выход", self.close)
+        self.options_menu.addAction("Выход", self.request_app_exit)
         self.menu_button.setMenu(self.options_menu)
         return bar
 
@@ -5157,6 +5427,8 @@ class MusicPlayer(QMainWindow):
             QSlider#seekSlider::handle:horizontal { background: #278454; }
         """
         self.setStyleSheet(dark_styles if self.theme == "dark" else dark_styles + light_styles)
+        if self.mini_player is not None:
+            self.mini_player.apply_theme()
         icon_color = "#D2DAE5" if self.theme == "dark" else "#526075"
         for button, name in ((self.previous_button, "previous"), (self.next_button, "next")):
             button.setIcon(control_icon(name, icon_color))
@@ -5307,6 +5579,8 @@ class MusicPlayer(QMainWindow):
         )
 
     def save_preferences(self):
+        if self.mini_player is not None:
+            self.settings.setValue("mini_geometry", self.mini_player.saveGeometry())
         self.settings.setValue("volume", int(round(self.volume * 100)))
         self.settings.setValue("search_limit", self.result_limit)
         self.settings.setValue("audio_quality", self.audio_quality)
@@ -5324,6 +5598,175 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("youtube_auth_mode", self.youtube_auth_mode)
         self.settings.setValue("youtube_auth_browser", self.youtube_auth_browser)
         self.settings.sync()
+        self.save_playback_session()
+
+    def _session_track(self, track):
+        """Persist catalog metadata and local paths, never resolved streams/auth."""
+        saved = self._recent_track_metadata(track)
+        if saved is None:
+            return None
+        if saved["source"] == "youtube":
+            video_id = self.youtube_video_id(saved)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", video_id or ""):
+                return None
+            saved["url"] = "https://music.youtube.com/watch?v=" + video_id
+            saved["video_id"] = video_id
+        elif saved["source"] == "soundcloud":
+            try:
+                parsed = urlsplit(saved["url"])
+            except ValueError:
+                return None
+            if parsed.hostname not in ("soundcloud.com", "www.soundcloud.com"):
+                return None
+            saved["url"] = urlunsplit(("https", "soundcloud.com", parsed.path, "", ""))
+        for key in ("title", "artist", "artist_display"):
+            if key in saved:
+                saved[key] = saved[key][:1024]
+        try:
+            saved["duration"] = max(0, min(7 * 86400, int(float(track.get("duration") or 0))))
+        except (TypeError, ValueError, OverflowError):
+            saved["duration"] = 0
+        if track.get("queue_id"):
+            saved["queue_id"] = str(track["queue_id"])[:128]
+        return saved
+
+    def schedule_session_save(self):
+        if self._session_ready and not self._force_exit:
+            self._session_queue_dirty = True
+            self.session_save_timer.start(750)
+
+    def save_playback_session(self):
+        if not self._session_ready:
+            return
+        if self._session_queue_dirty or not self._session_revision:
+            tracks = [saved for track in self.queue_tracks[:10000]
+                      if (saved := self._session_track(track)) is not None]
+            revision = uuid4().hex
+            try:
+                payload = json.dumps({"version": 1, "revision": revision, "queue": tracks}, ensure_ascii=False)
+                if len(payload.encode("utf-8")) > 12 * 1024 * 1024:
+                    raise ValueError("Слишком большой файл очереди")
+                temporary = self.session_file.with_suffix(".tmp")
+                temporary.write_text(payload, encoding="utf-8")
+                temporary.replace(self.session_file)
+            except (OSError, ValueError) as error:
+                logging.getLogger("aurora").warning("Не удалось сохранить очередь: %s", error)
+                return
+            self._session_revision = revision
+            self._session_queue_dirty = False
+        self.session_save_timer.stop()
+        self.save_playback_checkpoint()
+
+    def save_playback_checkpoint(self):
+        if not self._session_ready:
+            return
+        if self._session_queue_dirty or not self._session_revision:
+            if self.queue_tracks or self.current_track:
+                self.save_playback_session()
+            return
+        restored = self._restored_playback
+        mix = (restored or {}).get("supermix") or self.supermix_session
+        mix_state = ({"mix_id": mix.get("mix_id", ""), "anchor": mix.get("anchor", "")}
+                     if isinstance(mix, dict) else None)
+        position = (restored["position"] if restored is not None else
+                    self._last_progress_position if self._network_recovery is not None else self.player.position())
+        current = self._session_track(self.current_track)
+        if current is not None and self.player.duration() > 0:
+            current["duration"] = self.player.duration() // 1000
+        checkpoint = {"revision": self._session_revision, "current": current,
+                      "position": max(0, int(position)), "source": self.current_source,
+                      "mode": (restored or {}).get("mode", self.queue_mode), "supermix": mix_state,
+                      "repeat": self.repeat_mode, "shuffle": self.shuffle_enabled}
+        blob = json.dumps(checkpoint, ensure_ascii=False)
+        if blob != self._last_checkpoint_blob:
+            self.settings.setValue("playback_checkpoint_json", blob)
+            self.settings.sync()
+            self._last_checkpoint_blob = blob
+
+    def restore_playback_session(self):
+        try:
+            if not self.session_file.is_file():
+                return
+            if self.session_file.stat().st_size > 12 * 1024 * 1024:
+                raise ValueError("Слишком большой файл очереди")
+            data = json.loads(self.session_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("queue"), list):
+                return
+            revision = data.get("revision")
+            if not isinstance(revision, str) or not revision:
+                return
+            try:
+                checkpoint = json.loads(str(self.settings.value("playback_checkpoint_json", "{}") or "{}"))
+            except ValueError:
+                checkpoint = {}
+            if not isinstance(checkpoint, dict) or checkpoint.get("revision") != revision:
+                checkpoint = {}
+            tracks, seen = [], set()
+            for item in data["queue"][:10000]:
+                saved = self._session_track(item)
+                if saved is None:
+                    continue
+                uid = saved.get("queue_id")
+                if not uid or uid in seen:
+                    uid = uuid4().hex
+                saved["queue_id"] = uid
+                seen.add(uid)
+                tracks.append(saved)
+            current = self._session_track(checkpoint.get("current"))
+            if current is None and tracks:
+                current = tracks[0]
+            if current:
+                matched = next((t for t in tracks if t["queue_id"] == current.get("queue_id")), None)
+                if matched is not None:
+                    current = {**matched, **current}
+            position = max(0, min(7 * 86400 * 1000, int(checkpoint.get("position", 0))))
+            if current and current.get("duration"):
+                position = min(position, max(0, current["duration"] * 1000 - 1000))
+            self.queue_tracks = tracks
+            self.current_track = current
+            self.refresh_queue_list()
+            self._session_revision = revision
+            self.repeat_mode = checkpoint.get("repeat") if checkpoint.get("repeat") in ("off", "one", "all") else self.repeat_mode
+            self.refresh_repeat_button()
+            # Update the toggle without starting prefetch during restoration.
+            self.shuffle_enabled = bool(checkpoint.get("shuffle", self.shuffle_enabled))
+            self.shuffle_button.blockSignals(True)
+            self.shuffle_button.setChecked(self.shuffle_enabled)
+            self.shuffle_button.blockSignals(False)
+            self.apply_styles()
+            source = checkpoint.get("source")
+            if source in ("youtube", "soundcloud", "likes") and source != self.current_source:
+                self.set_source(source)
+            if current:
+                self._restored_playback = {"position": position, "mode": checkpoint.get("mode", "manual"),
+                                           "supermix": checkpoint.get("supermix")}
+                self.bottom_title.setText(current.get("title") or "Без названия")
+                self.bottom_artist.setText(current.get("artist") or "")
+                self.show_cover(current.get("thumbnail", ""))
+                self.position_label.setText(self.format_position(position))
+                self.duration_label.setText(self.format_position(current.get("duration", 0) * 1000))
+                self.update_bottom_track_actions()
+                self.set_status("Очередь восстановлена. Нажми ▶, чтобы продолжить с прежнего места.")
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            logging.getLogger("aurora").warning("Не удалось восстановить очередь: %s", error)
+
+    def resume_saved_session(self):
+        saved = self._restored_playback
+        if saved is None or self.current_track is None:
+            return
+        mix = saved.get("supermix")
+        if (isinstance(mix, dict) and str(mix.get("mix_id", "")).startswith("RDTMAK5uy_")
+                and self.youtube_auth_kwargs()):
+            self.queue_mode = "supermix"
+            self.supermix_session = {"mix_id": mix["mix_id"], "anchor": str(mix.get("anchor") or ""),
+                                    "seen": {self.youtube_video_id(t) for t in self.queue_tracks},
+                                    "waiting": False, "failures": 0}
+        else:
+            mode = saved.get("mode")
+            self.queue_mode = ("youtube_likes" if mode == "supermix" else
+                               mode if mode in ("youtube_likes", "soundcloud_likes") else "manual")
+        self.play_track(self.current_track, self.current_queue_index,
+                        start_position=saved["position"], restore_session=True)
 
     def on_shuffle_changed(self, enabled):
         self.shuffle_enabled = bool(enabled)
@@ -5798,6 +6241,7 @@ class MusicPlayer(QMainWindow):
             self.source_status.setToolTip(message)
         if source == "likes" and hasattr(self, "likes_account_status"):
             self.likes_account_status.setText(message)
+        self.refresh_mini_player()
 
     # ---------------------------------------------------------
     # Поиск выполняется в фоне: окно не зависает.
@@ -7609,6 +8053,8 @@ class MusicPlayer(QMainWindow):
         list_widget.addItem(item)
 
     def _ensure_likes_row_window(self, list_widget):
+        if self._force_exit:
+            return
         kind = self._likes_kind_for_widget(list_widget)
         if not kind or kind in self._likes_loading_more or kind in self._likes_updating_window:
             return
@@ -7644,6 +8090,8 @@ class MusicPlayer(QMainWindow):
             self._likes_updating_window.discard(kind)
 
     def maybe_load_more_likes(self, list_widget):
+        if self._force_exit:
+            return
         kind = self._likes_kind_for_widget(list_widget)
         if not kind or kind in self._likes_loading_more:
             return
@@ -8600,6 +9048,7 @@ class MusicPlayer(QMainWindow):
         )
         self.bottom_dislike_button.blockSignals(False)
         self.dislike_action.setEnabled(available and not disliked)
+        self.refresh_mini_player()
 
     def toggle_current_favorite(self):
         track = self.current_track
@@ -9202,7 +9651,7 @@ class MusicPlayer(QMainWindow):
 
     def schedule_visible_artwork(self, list_widget):
         """Небольшой debounce: загружаем обложки только у видимых строк списка."""
-        if list_widget is None:
+        if list_widget is None or self._force_exit:
             return
         key = id(list_widget)
         timer = self._visible_artwork_timers.get(key)
@@ -9217,7 +9666,7 @@ class MusicPlayer(QMainWindow):
         timer.start(70)
 
     def load_visible_artwork(self, list_widget):
-        if list_widget is None or not list_widget.isVisible():
+        if self._force_exit or list_widget is None or not list_widget.isVisible():
             return
         self._ensure_likes_row_window(list_widget)
         viewport = list_widget.viewport()
@@ -9504,6 +9953,8 @@ class MusicPlayer(QMainWindow):
                         self.player_bar.set_cover_accent(pixmap)
                     if label is getattr(self, "artist_avatar", None):
                         self._apply_artist_header_color(pixmap)
+                    if self.mini_player is not None and label is self.mini_player.cover:
+                        self.mini_player.set_cover_accent(pixmap)
         finally:
             reply.deleteLater()
             self.active_images = max(0, self.active_images - 1)
@@ -9639,6 +10090,7 @@ class MusicPlayer(QMainWindow):
     def update_queue_count(self):
         count = len(self.queue_tracks)
         self.queue_count.setText(f"{count} треков")
+        self.schedule_session_save()
 
     def clear_queue(self):
         self._stop_supermix_session()
@@ -9852,6 +10304,7 @@ class MusicPlayer(QMainWindow):
         if self.stream_worker is not None:
             self.stream_worker.cancel()
         self._network_recovery = None
+        self._requested_start_position = 0
         self.stop_fade()
         self.pending_media_timer.stop()
         if self.pending_slot is not None:
@@ -9993,7 +10446,7 @@ class MusicPlayer(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
-    def play_track(self, track, index):
+    def play_track(self, track, index, start_position=0, restore_session=False):
         """Запоминаем запрос и подготавливаем музыку на другом QMediaPlayer."""
         if self.supermix_session is not None and (self.queue_mode != "supermix" or index < 0):
             self._stop_supermix_session()
@@ -10001,6 +10454,9 @@ class MusicPlayer(QMainWindow):
         elif self.supermix_session is not None:
             self.supermix_session["waiting"] = False
         self.cancel_pending_request(cancel_supermix=self.supermix_session is None)
+        if not restore_session:
+            self._restored_playback = None
+        self._requested_start_position = max(0, int(start_position))
         self._network_recovery_attempts = 0
         self.requested_track = dict(track)
         self.requested_index = index
@@ -10227,10 +10683,16 @@ class MusicPlayer(QMainWindow):
 
     def _apply_recovery_seek(self, slot):
         recovery = self._network_recovery
-        if (recovery is None or slot != self.pending_slot or self._recovery_seek_applied
+        position = recovery["position"] if recovery is not None else self._requested_start_position
+        if ((recovery is None and position <= 0) or slot != self.pending_slot or self._recovery_seek_applied
                 or self.players[slot].source() != self.pending_media_url):
             return
-        position = recovery["position"]
+        duration = self.players[slot].duration()
+        if duration > 0:
+            position = min(position, max(0, duration - 1000))
+            if recovery is not None:
+                recovery["position"] = position
+            self._requested_start_position = position
         if position > 0 and not self.players[slot].isSeekable():
             return
         self._recovery_seek_applied = True
@@ -10240,9 +10702,10 @@ class MusicPlayer(QMainWindow):
     def on_slot_position(self, slot, position):
         """Отслеживает позицию обоих плееров и безопасно запускает автопереход."""
         if slot == self.pending_slot:
-            if self._network_recovery is not None:
+            if self._network_recovery is not None or self._requested_start_position > 0:
                 self._apply_recovery_seek(slot)
-                target = self._network_recovery["position"]
+                target = (self._network_recovery["position"] if self._network_recovery is not None else
+                          self._requested_start_position)
                 # setPosition emits positionChanged too. Wait for actual playback
                 # beyond that position before making the recovered slot audible.
                 if not self._recovery_seek_applied or position <= target:
@@ -10263,6 +10726,8 @@ class MusicPlayer(QMainWindow):
         if not self.is_seeking:
             self.seek_slider.setValue(position)
         self.position_label.setText(self.format_position(position))
+        if self.mini_player is not None and self.mini_player.isVisible():
+            self.mini_player.sync_position()
 
         # Проверка дешёвая: порог очереди и worker защищают от повторных запросов.
         if self.queue_mode == "supermix":
@@ -10361,6 +10826,8 @@ class MusicPlayer(QMainWindow):
             "pause" if state == QMediaPlayer.PlaybackState.PlayingState else "play", "#FFFFFF"
         ))
         self.update_playing_row_highlight()
+        self.refresh_mini_player()
+        self.save_playback_checkpoint()
 
     def commit_switch(self, elapsed, qt_elapsed):
         """Второй плеер уже начал проигрывать — можно переключать звук."""
@@ -10391,6 +10858,8 @@ class MusicPlayer(QMainWindow):
         self.last_switch_seconds = elapsed
         self.shuffle_future = None
         self._network_recovery = None
+        self._restored_playback = None
+        self._requested_start_position = 0
         self._playback_wanted = True
         self._last_progress_at = time.monotonic()
         self._last_progress_position = self.player.position()
@@ -10431,6 +10900,7 @@ class MusicPlayer(QMainWindow):
         QTimer.singleShot(0, self.ensure_following_track_prepared)
         QTimer.singleShot(0, self.prepare_next_track)
         self.set_status(f"Играет: {title}")
+        self.save_playback_checkpoint()
 
         # Делаем перекрытие заданной длительности только для играющего старого трека.
         # Для остановленного или пустого слота пропускаем этот переход.
@@ -10556,8 +11026,17 @@ class MusicPlayer(QMainWindow):
         else:
             self.audio_outputs[self.active_slot].setVolume(self.volume)
             self.audio_outputs[self.idle_slot()].setVolume(0.0)
+        self.refresh_mini_player()
 
     def toggle_playback(self):
+        if self._restored_playback is not None:
+            if self.requested_track is not None:
+                self.cancel_pending_request(cancel_supermix=False)
+                self._playback_wanted = False
+                self.set_status("Продолжение отменено. Нажми ▶, когда будешь готов.")
+            else:
+                self.resume_saved_session()
+            return
         if self._network_recovery is not None:
             self.cancel_pending_request(cancel_supermix=False)
             self._playback_wanted = False
@@ -10588,6 +11067,7 @@ class MusicPlayer(QMainWindow):
             QMessageBox.information(self, "Music Player", "Сначала выбери трек одним щелчком по строке или нажми ▶.")
 
     def stop_all(self):
+        self._restored_playback = None
         self._playback_wanted = False
         self.playback_watchdog.stop()
         self._stop_supermix_session()
@@ -10598,6 +11078,7 @@ class MusicPlayer(QMainWindow):
         self.audio_outputs[self.active_slot].setVolume(self.volume)
         self.play_button.setIcon(control_icon("play", "#FFFFFF"))
         self.set_status("Воспроизведение остановлено.")
+        self.save_playback_checkpoint()
 
     def seek_pressed(self):
         self.is_seeking = True
@@ -10661,6 +11142,10 @@ class MusicPlayer(QMainWindow):
         self.pending_media_timer.stop()
         self.playback_watchdog.stop()
         self.save_preferences()
+        self.checkpoint_timer.stop()
+        self.session_save_timer.stop()
+        if self.mini_player is not None:
+            self.mini_player.hide()
         for player in self.players:
             player.stop()
         if self.tray_icon is not None:
@@ -10668,7 +11153,58 @@ class MusicPlayer(QMainWindow):
         event.accept()
 
 
+def run_smoke_test():
+    """Exercise the actual frozen Qt/audio bundle with isolated, disposable data."""
+    global _SMOKE_DIRECTORY
+    import tempfile
+    import wave
+    with tempfile.TemporaryDirectory(prefix="aurora-smoke-") as directory:
+        root = Path(directory)
+        _SMOKE_DIRECTORY = root
+        for variable, folder in (("LOCALAPPDATA", "cache"), ("APPDATA", "data"),
+                                 ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+                                 ("XDG_CACHE_HOME", "cache"), ("XDG_RUNTIME_DIR", "runtime")):
+            path = root / folder
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.environ[variable] = str(path)
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        app = QApplication([sys.argv[0]])
+        app.setStyle("Fusion")
+        window = MusicPlayer(settings=QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat))
+        for player in window.players:
+            player.setAudioOutput(None)
+        window.show_mini_player()
+        path = root / "sample.wav"
+        with wave.open(str(path), "wb") as sound:
+            sound.setparams((1, 2, 44100, 0, "NONE", "not compressed"))
+            sound.writeframes(b"\x00\x00" * 44100 * 2)
+        result = [1]
+        def finish(code):
+            result[0] = code
+            timer.stop()
+            window._force_exit = True
+            window.stop_all()
+            for player in window.players:
+                player.setSource(QUrl())
+            window.close()
+            window.deleteLater()
+            app.exit(code)
+        timer = QTimer(window)
+        timer.setInterval(100)
+        timer.timeout.connect(lambda: finish(0) if window.current_track and window.player.position() > 0 else None)
+        QTimer.singleShot(15000, lambda: finish(1))
+        window.play_track({"source": "local", "url": str(path), "title": "Smoke test"}, -1)
+        timer.start()
+        app.exec()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+        _SMOKE_DIRECTORY = None
+        return result[0]
+
+
 def main():
+    if "--smoke-test" in sys.argv:
+        sys.exit(run_smoke_test())
     setup_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

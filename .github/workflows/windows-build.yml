@@ -1,0 +1,82 @@
+name: Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'player_aurora_smart_beautiful_fixed_ui_repaint.py'
+      - 'build_exe.bat'
+      - 'fonts/**'
+      - 'tests/**'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: build_exe.bat
+      - name: Build standalone player
+        shell: cmd
+        run: call build_exe.bat
+      - name: Test source on Windows
+        shell: pwsh
+        run: |
+          & .\.build-venv\Scripts\python.exe -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Source tests failed' }
+      - name: Test frozen Qt, mini-player and audio decoding
+        shell: pwsh
+        run: |
+          $player = Start-Process -FilePath .\dist\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $player.WaitForExit(60000)) {
+            Stop-Process -Id $player.Id -Force
+            throw 'Frozen player smoke test timed out'
+          }
+          if ($player.ExitCode -ne 0) { throw "Frozen player smoke test failed: $($player.ExitCode)" }
+      - name: Calculate checksum
+        shell: pwsh
+        run: |
+          $checksum = (Get-FileHash .\dist\AuroraMusicPlayer.exe -Algorithm SHA256).Hash.ToLower()
+          "$checksum  AuroraMusicPlayer.exe" | Set-Content .\dist\AuroraMusicPlayer.exe.sha256.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AuroraMusicPlayer-windows-x64
+          path: |
+            dist/AuroraMusicPlayer.exe
+            dist/AuroraMusicPlayer.exe.sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: AuroraMusicPlayer-windows-x64
+          path: dist
+      - name: Publish tested Windows EXE
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/AuroraMusicPlayer.exe dist/AuroraMusicPlayer.exe.sha256.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/AuroraMusicPlayer.exe dist/AuroraMusicPlayer.exe.sha256.txt --verify-tag --generate-notes --title "Aurora Music Player $GITHUB_REF_NAME"
+          fi
