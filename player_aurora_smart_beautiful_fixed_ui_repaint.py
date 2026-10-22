@@ -696,7 +696,16 @@ class SpotifyPlaylistCard(QPushButton):
         painter.drawPath(path)
         side = min(112.0, bounds.height() - 28)
         cover = QRectF(bounds.left() + 14, bounds.center().y() - side / 2, side, side)
-        painter.drawPixmap(cover, self._artwork, QRectF(self._artwork.rect()))
+        artwork = self._cover_pixmap if self._cover_pixmap is not None and not self._cover_pixmap.isNull() else self._artwork
+        cover_path = QPainterPath()
+        cover_path.addRoundedRect(cover, 8, 8)
+        painter.save()
+        painter.setClipPath(cover_path)
+        scaled = artwork.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                Qt.TransformationMode.SmoothTransformation)
+        crop = QRectF((scaled.width() - side) / 2, (scaled.height() - side) / 2, side, side)
+        painter.drawPixmap(cover, scaled, crop)
+        painter.restore()
         left = cover.right() + 22
         width = max(24.0, bounds.right() - left - 74)
         title_font = QFont(self.font().family(), 15, QFont.Weight.Bold)
@@ -1708,17 +1717,8 @@ class SearchWorker(QThread):
                 self.failed.emit(str(error))
 
 
-class YouTubeRatingWorker(QThread):
-    """Отправляет настоящий лайк/снятие лайка в YouTube Music в фоне."""
-    result_ready = pyqtSignal(object, bool, bool, str)
-
-    def __init__(self, track, liked, auth_mode, cookie_file="", browser_spec="", parent=None):
-        super().__init__(parent)
-        self.track = dict(track or {})
-        self.liked = bool(liked)
-        self.auth_mode = str(auth_mode or "file")
-        self.cookie_file = str(cookie_file or "").strip()
-        self.browser_spec = str(browser_spec or "").strip()
+class YouTubeMusicAuth:
+    """Общая авторизация каталога и лайков через существующее подключение."""
 
     @staticmethod
     def _cookie_header_from_pairs(pairs):
@@ -1832,6 +1832,39 @@ class YouTubeRatingWorker(QThread):
                 f"Подробности: {str(error)[:240]}"
             ) from error
 
+    def _auth_headers(self):
+        cookie_header = (self._cookies_from_browser() if self.auth_mode == "browser"
+                         else self._cookies_from_file())
+        if "__Secure-3PAPISID=" not in cookie_header:
+            raise RuntimeError(
+                "В cookies для music.youtube.com нет __Secure-3PAPISID. "
+                "Обнови cookies из браузера, где выполнен вход в YouTube Music."
+            )
+        from ytmusicapi.helpers import get_authorization, sapisid_from_cookie, initialize_headers
+        origin = "https://music.youtube.com"
+        sapisid = sapisid_from_cookie(cookie_header)
+        # Минимальный BROWSER auth; ytmusicapi обновляет SAPISIDHASH сама.
+        return {
+            "user-agent": initialize_headers().get("user-agent", "Mozilla/5.0"),
+            "accept": "*/*", "content-type": "application/json",
+            "origin": origin, "x-origin": origin, "referer": origin + "/",
+            "x-goog-authuser": "0", "cookie": cookie_header,
+            "authorization": get_authorization(f"{sapisid} {origin}"),
+        }
+
+
+class YouTubeRatingWorker(QThread, YouTubeMusicAuth):
+    """Отправляет настоящий лайк/снятие лайка в YouTube Music в фоне."""
+    result_ready = pyqtSignal(object, bool, bool, str)
+
+    def __init__(self, track, liked, auth_mode, cookie_file="", browser_spec="", parent=None):
+        super().__init__(parent)
+        self.track = dict(track or {})
+        self.liked = bool(liked)
+        self.auth_mode = str(auth_mode or "file")
+        self.cookie_file = str(cookie_file or "").strip()
+        self.browser_spec = str(browser_spec or "").strip()
+
     @staticmethod
     def _video_id(track):
         if not isinstance(track, dict):
@@ -1858,39 +1891,9 @@ class YouTubeRatingWorker(QThread):
             if not video_id:
                 raise RuntimeError("Не удалось определить YouTube video ID у выбранного трека.")
 
-            cookie_header = (self._cookies_from_browser() if self.auth_mode == "browser"
-                             else self._cookies_from_file())
-            if "__Secure-3PAPISID=" not in cookie_header:
-                raise RuntimeError(
-                    "В cookies для music.youtube.com нет __Secure-3PAPISID. "
-                    "Обнови cookies из браузера, где выполнен вход в YouTube Music."
-                )
-            cookie_size = len(cookie_header.encode("utf-8"))
-            if cookie_size > 4096:
-                raise RuntimeError(f"Слишком большой заголовок Cookie ({cookie_size} байт).")
-
+            headers = self._auth_headers()
             import requests
             from ytmusicapi import YTMusic, LikeStatus
-            from ytmusicapi.helpers import get_authorization, sapisid_from_cookie, initialize_headers
-
-            origin = "https://music.youtube.com"
-            sapisid = sapisid_from_cookie(cookie_header)
-            # ytmusicapi ожидает одновременно Cookie и начальный Authorization,
-            # чтобы распознать BROWSER auth; затем библиотека сама обновляет
-            # SAPISIDHASH при каждом обращении через client.rate_song().
-            headers = {
-                "user-agent": initialize_headers().get("user-agent", "Mozilla/5.0"),
-                "accept": "*/*",
-                "content-type": "application/json",
-                "origin": origin,
-                "x-origin": origin,
-                "referer": origin + "/",
-                "x-goog-authuser": "0",
-                "cookie": cookie_header,
-                "authorization": get_authorization(f"{sapisid} {origin}"),
-            }
-            # Не передаём вручную content-encoding, content-length,
-            # x-goog-visitor-id и другие заголовки браузера.
 
             with requests.Session() as session:
                 original_request = session.request
@@ -1934,80 +1937,49 @@ class YouTubeRatingWorker(QThread):
             )
 
 
-class SupermixWorker(QThread):
-    """Получает рекомендации YouTube Music по нескольким понравившимся песням."""
-    result_ready = pyqtSignal(list, str)
-    failed = pyqtSignal(str)
-    MAX_SEEDS = 3
-    REQUEST_BUDGET_SECONDS = 30
-    MAX_RADIO_DEPTH = 12
+class SupermixWorker(QThread, YouTubeMusicAuth):
+    """Загружает My Supermix подключённого аккаунта или продолжение того же микса.
 
-    def __init__(self, liked_tracks, disliked_ids=None, parent=None, limit=30):
+    API-последовательность соответствует cloudmus: get_home → playlistId,
+    затем get_watch_playlist с сохранённым playlistId и последним дослушанным videoId.
+    Историю аккаунта этот worker не изменяет.
+    """
+    result_ready = pyqtSignal(list, dict)
+    failed = pyqtSignal(str)
+    REQUEST_BUDGET_SECONDS = 30
+    MIX_ID_PREFIX = "RDTMAK5uy_"
+
+    def __init__(self, auth_mode, cookie_file="", browser_spec="", parent=None,
+                 mix_id="", anchor="", excluded_ids=None, limit=25):
         super().__init__(parent)
-        self.liked_tracks = [dict(track) for track in liked_tracks if isinstance(track, dict)]
-        self.disliked_ids = set(disliked_ids or ())
-        self.limit = max(2, min(30, int(limit)))
+        self.auth_mode = str(auth_mode or "file")
+        self.cookie_file = str(cookie_file or "").strip()
+        self.browser_spec = str(browser_spec or "").strip()
+        self.mix_id = str(mix_id or "")
+        self.anchor = str(anchor or "")
+        self.excluded_ids = set(excluded_ids or ())
+        self.limit = max(1, min(50, int(limit)))
         self._cancelled = threading.Event()
 
     def cancel(self):
         self._cancelled.set()
 
-    @staticmethod
-    def _artist_keys(track):
-        names = track.get("artist_metadata") or []
-        if isinstance(names, str):
-            names = [names]
-        names = [item.get("name", "") if isinstance(item, dict) else str(item) for item in names]
-        names.append(str(track.get("artist") or ""))
-        keys = set()
-        for name in names:
-            name = unicodedata.normalize("NFKC", name).casefold().strip()
-            name = re.sub(r"\s*[-–—]?\s*topic$", "", name)
-            key = re.sub(r"[^\w]", "", name)
-            if key and key not in ("исполнительнеизвестен", "unknownartist", "variousartists"):
-                keys.add(key)
-        return keys
-
-    def _artist_profile(self):
-        profile, seen = {}, set()
-        for track in self.liked_tracks:
-            video_id = YouTubeRatingWorker._video_id(track)
-            if not video_id or video_id in seen or video_id in self.disliked_ids:
+    @classmethod
+    def _find_supermix(cls, shelves):
+        for shelf in shelves or []:
+            if not isinstance(shelf, dict):
                 continue
-            seen.add(video_id)
-            for artist in self._artist_keys(track):
-                profile[artist] = profile.get(artist, 0) + 1
-        return profile
-
-    def _select_seeds(self):
-        candidates, seen = [], set()
-        for track in self.liked_tracks:
-            video_id = YouTubeRatingWorker._video_id(track)
-            if video_id and video_id not in seen and video_id not in self.disliked_ids:
-                candidates.append(track)
-                seen.add(video_id)
-        random.shuffle(candidates)
-        profile = self._artist_profile()
-        candidates.sort(key=lambda track: max((profile.get(key, 0) for key in self._artist_keys(track)),
-                                               default=0), reverse=True)
-        selected, artists = [], set()
-        for track in candidates:
-            artist = max(sorted(self._artist_keys(track)), key=lambda key: profile.get(key, 0), default="")
-            if artist not in artists:
-                selected.append(track)
-                artists.add(artist)
-            if len(selected) == self.MAX_SEEDS:
-                return selected
-        for track in candidates:
-            if track not in selected:
-                selected.append(track)
-            if len(selected) == self.MAX_SEEDS:
-                break
-        return selected
+            for item in shelf.get("contents") or []:
+                if (isinstance(item, dict)
+                        and str(item.get("playlistId") or "").startswith(cls.MIX_ID_PREFIX)
+                        and str(item.get("title") or "").strip().casefold() == "my supermix"):
+                    return item
+        return None
 
     @staticmethod
     def _normalize_track(entry):
-        if not isinstance(entry, dict) or entry.get("isAvailable") is False or entry.get("isPlayable") is False or entry.get("likeStatus") in ("DISLIKE", "LIKE"):
+        if (not isinstance(entry, dict) or entry.get("isAvailable") is False
+                or entry.get("isPlayable") is False or entry.get("likeStatus") == "DISLIKE"):
             return None
         video_id = str(entry.get("videoId") or "").strip()
         title = str(entry.get("title") or "").strip()
@@ -2020,73 +1992,18 @@ class SupermixWorker(QThread):
         thumbnail = normalize_artwork_url(thumbnails[-1]["url"]) if thumbnails else ""
         duration = 0
         try:
-            parts = str(entry.get("length") or "").split(":")
-            for part in parts:
+            for part in str(entry.get("length") or "").split(":"):
                 duration = duration * 60 + int(part)
         except (ValueError, TypeError):
             duration = 0
-        return {"source": "youtube", "video_id": video_id,
-                "url": f"https://music.youtube.com/watch?v={video_id}",
-                "title": title, "artist": ", ".join(filter(None, names)) or "Исполнитель неизвестен",
-                "artist_metadata": list(filter(None, names)),
-                "thumbnail": thumbnail, "duration": duration}
-
-    def _rank_recommendations(self, groups):
-        """Сначала знакомые исполнители; новые — только при согласии нескольких радио."""
-        profile = self._artist_profile()
-        candidates, artist_support = {}, {}
-        for group_index, group in enumerate(groups):
-            for track, position in group:
-                video_id = track["video_id"]
-                evidence = candidates.setdefault(video_id, {"track": track, "position": position, "sources": set()})
-                evidence["position"] = min(evidence["position"], position)
-                evidence["sources"].add(group_index)
-                for artist in self._artist_keys(track):
-                    artist_support.setdefault(artist, set()).add(group_index)
-        familiar, discovery = [], []
-        for evidence in candidates.values():
-            keys = self._artist_keys(evidence["track"])
-            weight = max((profile.get(key, 0) for key in keys), default=0)
-            evidence["weight"] = weight
-            if weight:
-                familiar.append(evidence)
-            elif evidence["position"] < 5 and any(len(artist_support[key]) >= 2 for key in keys):
-                discovery.append(evidence)
-        familiar.sort(key=lambda item: (-len(item["sources"]), -item["weight"], item["position"]))
-        discovery.sort(key=lambda item: (-len(item["sources"]), item["position"]))
-        # Не заполняем очередь случайными артистами, если близких песен мало.
-        new_count = min(3, self.limit // 5, len(familiar) // 4, len(discovery))
-        familiar = familiar[:self.limit - new_count]
-        discovery = deque(discovery[:new_count])
-        result = []
-        for index, evidence in enumerate(familiar):
-            result.append(evidence["track"])
-            if (index + 1) % 4 == 0 and discovery:
-                result.append(discovery.popleft()["track"])
-        return result
-
-    def _blend_with_favorites(self, recommendations):
-        """Смешивает любимые песни с небольшой порцией близких рекомендаций."""
-        favorites, seen = [], set()
-        for track in self.liked_tracks:
-            video_id = YouTubeRatingWorker._video_id(track)
-            if video_id and video_id not in seen and video_id not in self.disliked_ids:
-                favorites.append(dict(track, supermix_favorite=True))
-                seen.add(video_id)
-        random.shuffle(favorites)
-        new_count = min(len(recommendations), max(1, self.limit * 3 // 10),
-                        max(1, len(favorites) * 3 // 7))
-        favorites = deque(favorites[:self.limit - new_count])
-        discoveries = deque(recommendations[:new_count])
-        result, inserted = [], 0
-        favorite_count, discovery_count = len(favorites), len(discoveries)
-        for index, track in enumerate(favorites):
-            result.append(track)
-            expected = (index + 1) * discovery_count // favorite_count
-            while inserted < expected and discoveries:
-                result.append(discoveries.popleft())
-                inserted += 1
-        return result
+        track = {"source": "youtube", "video_id": video_id,
+                 "url": f"https://music.youtube.com/watch?v={video_id}",
+                 "title": title, "artist": ", ".join(filter(None, names)) or "Исполнитель неизвестен",
+                 "artist_metadata": list(filter(None, names)),
+                 "thumbnail": thumbnail, "duration": duration}
+        if entry.get("likeStatus") == "LIKE":
+            track["youtube_music_like"] = True
+        return track
 
     def run(self):
         if self._cancelled.is_set():
@@ -2094,72 +2011,75 @@ class SupermixWorker(QThread):
         try:
             import requests
             from ytmusicapi import YTMusic
-            seeds = self._select_seeds()
-            if not seeds:
-                raise RuntimeError("В лайках нет доступных треков YouTube Music для рекомендаций.")
-            excluded = self.disliked_ids | {YouTubeRatingWorker._video_id(track) for track in self.liked_tracks}
+            headers = self._auth_headers()
+            if self._cancelled.is_set():
+                return
+            metadata = {"mix_id": self.mix_id}
             deadline = time.monotonic() + self.REQUEST_BUDGET_SECONDS
-            groups, errors = [], []
             with requests.Session() as session:
                 original_request = session.request
 
                 def bounded_request(method, url, *args, **kwargs):
                     remaining = deadline - time.monotonic()
                     if self._cancelled.is_set() or remaining <= 0:
-                        raise TimeoutError("Истекло время ожидания рекомендаций.")
-                    kwargs["timeout"] = (min(4, remaining), min(7, remaining))
-                    # requests сохраняет проверку TLS и учитывает REQUESTS_CA_BUNDLE.
+                        raise TimeoutError("Супермикс: время ожидания истекло.")
+                    kwargs["timeout"] = (min(3, remaining), min(5, remaining))
+                    # Сохраняем TLS verification и REQUESTS_CA_BUNDLE.
                     return original_request(method, url, *args, **kwargs)
 
                 session.request = bounded_request
-                client = YTMusic(requests_session=session)
-                for seed in seeds:
+                client = YTMusic(headers, requests_session=session, language="en")
+                if not self.mix_id:
+                    item = self._find_supermix(client.get_home(limit=20))
                     if self._cancelled.is_set():
                         return
-                    if time.monotonic() >= deadline:
-                        break
-                    try:
-                        playlist = client.get_watch_playlist(
-                            videoId=YouTubeRatingWorker._video_id(seed), radio=True, limit=25
+                    if item is None:
+                        self.failed.emit(
+                            "В аккаунте не найден My Supermix. Открой YouTube Music, проверь выбранный "
+                            "аккаунт и наличие супермикса, затем обнови cookies при необходимости."
                         )
-                        group = []
-                        for position, entry in enumerate((playlist or {}).get("tracks", [])):
-                            if position >= self.MAX_RADIO_DEPTH:
-                                break
-                            track = self._normalize_track(entry)
-                            if track and track["video_id"] not in excluded:
-                                group.append((track, position))
-                        groups.append(group)
-                    except Exception as error:
-                        errors.append(str(error).replace("\n", " ")[:180])
+                        return
+                    metadata["mix_id"] = item["playlistId"]
+                    thumbnails = item.get("thumbnails") or []
+                    metadata["cover_url"] = normalize_artwork_url(thumbnails[-1].get("url", "")) if thumbnails else ""
+                    playlist = client.get_watch_playlist(playlistId=metadata["mix_id"], limit=self.limit)
+                else:
+                    options = {"playlistId": self.mix_id, "radio": True, "limit": self.limit}
+                    if self.anchor:
+                        options["videoId"] = self.anchor
+                    playlist = client.get_watch_playlist(**options)
             if self._cancelled.is_set():
                 return
-            result = self._rank_recommendations(groups)
-            if not result:
-                if errors:
-                    detail = errors[0].casefold()
-                    if "403" in detail:
-                        message = "Доступ к рекомендациям YouTube Music отклонён (403). Проверь доступ к сервису и повтори."
-                    elif "certificate" in detail:
-                        message = "Не удалось проверить HTTPS-сертификат YouTube Music. Проверь доверенные сертификаты системы."
-                    elif "timeout" in detail or "timed out" in detail:
-                        message = "YouTube Music не ответил вовремя. Попробуй собрать Супермикс позже."
-                    else:
-                        message = "Не удалось получить рекомендации YouTube Music. Проверь соединение и повтори."
-                    raise RuntimeError(message)
-                raise RuntimeError("Не нашлось достаточно близких новых песен. Попробуй собрать Супермикс позже или добавь больше любимых исполнителей.")
-            result = self._blend_with_favorites(result)
-            new_count = sum(not track.get("supermix_favorite") for track in result)
-            note = f"Супермикс: {len(result)} треков · новых: {new_count}."
-            if errors:
-                note += " Часть рекомендаций временно недоступна."
-            self.result_ready.emit(result, note)
+            result, seen = [], set(self.excluded_ids)
+            for entry in (playlist or {}).get("tracks") or []:
+                track = self._normalize_track(entry)
+                if track and track["video_id"] not in seen:
+                    result.append(track)
+                    seen.add(track["video_id"])
+                    if len(result) >= self.limit:
+                        break
+            # Пустое продолжение — повод повторить позднее, а не вернуть старые песни.
+            if not result and not self.mix_id:
+                self.failed.emit("My Supermix не вернул доступных треков. Попробуй открыть его позже.")
+                return
+            self.result_ready.emit(result, metadata)
         except ImportError:
             if not self._cancelled.is_set():
-                self.failed.emit("Для рекомендаций нужна ytmusicapi: python -m pip install -U ytmusicapi")
+                self.failed.emit("Для My Supermix нужна ytmusicapi: python -m pip install -U ytmusicapi")
         except Exception as error:
-            if not self._cancelled.is_set():
-                self.failed.emit(str(error).replace("\n", " ")[:500])
+            if self._cancelled.is_set():
+                return
+            # Не выводим ответ сервера/заголовки: в исключении могут оказаться cookies.
+            detail = str(error).lower()
+            if "403" in detail or "401" in detail:
+                message = "YouTube Music отклонил доступ к My Supermix (HTTP 401/403). Проверь аккаунт и обнови cookies."
+            elif "cookie" in detail or "sapisid" in detail:
+                message = "Не удалось прочитать авторизацию My Supermix. Проверь профиль браузера или обнови cookies.txt."
+            elif "certificate" in detail or "ssl" in detail:
+                message = "Не удалось проверить HTTPS-сертификат YouTube Music. Проверь настройки доверенных сертификатов."
+            else:
+                message = "My Supermix временно недоступен. Проверь сеть и попробуй ещё раз."
+            self.failed.emit(message)
 
 
 class StreamWorker(QThread):
@@ -3931,6 +3851,12 @@ class MusicPlayer(QMainWindow):
         self.radio_candidates = []
         self.radio_note = ""
         self.supermix_worker = None
+        self.supermix_refill_worker = None
+        self.supermix_session = None
+        self.supermix_cover_url = ""
+        self.supermix_retry_timer = QTimer(self)
+        self.supermix_retry_timer.setSingleShot(True)
+        self.supermix_retry_timer.timeout.connect(self.maybe_refill_supermix)
         self.radio_mode_active = False
         self.radio_refill_worker = None
         self.radio_refill_attempt_key = ""
@@ -5126,7 +5052,7 @@ class MusicPlayer(QMainWindow):
 
     def _is_youtube_likes_playback(self):
         """Определяет воспроизведение лайков, даже если общий обработчик сменил queue_mode."""
-        if self.radio_mode_active or self.queue_mode == "radio":
+        if self.radio_mode_active or self.queue_mode in ("radio", "supermix"):
             return False
         if self.queue_mode == "youtube_likes":
             return True
@@ -5144,6 +5070,8 @@ class MusicPlayer(QMainWindow):
         if self.radio_mode_active:
             self.maybe_refill_radio()
             return
+        if self.queue_mode == "supermix":
+            self.maybe_refill_supermix()
 
         next_index = self.peek_next_index()
         if next_index is not None:
@@ -5220,16 +5148,25 @@ class MusicPlayer(QMainWindow):
             self.player.play()
             return
 
-        if self.queue_mode == "supermix" or self._is_youtube_likes_playback():
+        if self.queue_mode == "supermix":
+            if self.supermix_session is not None:
+                self.supermix_session["anchor"] = self.youtube_video_id(self.current_track or {})
+            self.maybe_refill_supermix()
+            next_index = self.peek_next_index()
+            if next_index is not None:
+                self.play_queue_index(next_index)
+            else:
+                self._wait_for_supermix()
+            return
+
+        if self._is_youtube_likes_playback():
             next_index = self.peek_next_index()
             if next_index is not None:
                 self.play_queue_index(next_index)
                 return
-            # Не переключаемся на похожие результаты поиска после последнего лайка.
             self._finish_transition_pending = False
             self._finish_guard_url = str((self.current_track or {}).get("url") or "")
-            self.set_status("Супермикс закончился — собери новый по своим лайкам."
-                            if self.queue_mode == "supermix" else "Лайки YouTube Music закончились.", "youtube")
+            self.set_status("Лайки YouTube Music закончились.", "youtube")
             return
 
         if self.queue_mode == "soundcloud_likes":
@@ -5601,8 +5538,8 @@ class MusicPlayer(QMainWindow):
         for card in self.start_cards:
             if card.title == "Супермикс":
                 card.setEnabled(not busy)
-                card.subtitle = ("Ищу новые треки по твоим лайкам…" if busy
-                                 else "Твои любимые треки · немного близкой новой музыки")
+                card.subtitle = ("Открываю My Supermix из твоего аккаунта…" if busy
+                                 else "My Supermix из твоего YouTube Music")
                 card.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.PointingHandCursor)
                 card.update()
 
@@ -5616,44 +5553,68 @@ class MusicPlayer(QMainWindow):
         return {self.youtube_video_id({"url": key.split("|", 1)[1]})
                 for key in self.disliked_track_keys if key.startswith("youtube|")}
 
+    def _stop_supermix_session(self):
+        """Старый ответ не должен дополнять вручную выбранную музыку."""
+        self._cancel_supermix()
+        self.supermix_retry_timer.stop()
+        self.supermix_session = None
+        if self.supermix_refill_worker is not None:
+            self.supermix_refill_worker.cancel()
+            self.supermix_refill_worker = None
+
+    def _make_supermix_worker(self, **kwargs):
+        auth = self.youtube_auth_kwargs()
+        return SupermixWorker(
+            self.youtube_auth_mode, cookie_file=auth.get("cookie_file", ""),
+            browser_spec=auth.get("cookies_from_browser", ""), parent=self, **kwargs
+        )
+
     def play_supermix(self):
-        """Запрашивает новые песни по лайкам, сохраняя текущую музыку до результата."""
-        tracks = self._eligible_mix_tracks("youtube")
-        if not tracks:
-            QMessageBox.information(self, "Супермикс",
-                                    "Сначала добавь треки в «Мои лайки» YouTube Music.")
+        """Открывает настоящий My Supermix; до ответа сохраняет текущую очередь."""
+        if not self.youtube_auth_kwargs():
+            self.connect_youtube_account()
             return
         self._cancel_supermix()
-        worker = SupermixWorker(tracks, self._youtube_disliked_video_ids(), self)
+        worker = self._make_supermix_worker(excluded_ids=self._youtube_disliked_video_ids())
         self.supermix_worker = worker
-        worker.result_ready.connect(lambda result, note, w=worker: self.on_supermix_ready(w, result, note))
+        worker.result_ready.connect(lambda result, meta, w=worker: self.on_supermix_ready(w, result, meta))
         worker.failed.connect(lambda message, w=worker: self.on_supermix_error(w, message))
         worker.finished.connect(lambda w=worker: self.on_supermix_finished(w))
         worker.finished.connect(worker.deleteLater)
         self._set_supermix_busy(True)
-        self.set_status("Супермикс: подбираю новые треки по твоим лайкам…", "youtube")
+        self.set_status("Открываю My Supermix подключённого аккаунта YouTube Music…", "youtube")
         worker.start()
 
-    def on_supermix_ready(self, worker, tracks, note):
-        if worker is not self.supermix_worker or self._force_exit:
-            return
-        excluded = self._youtube_disliked_video_ids()
-        result, seen = [], set(excluded)
+    def _fresh_supermix_tracks(self, tracks, seen=()):
+        excluded = set(seen) | self._youtube_disliked_video_ids()
+        result = []
         for track in tracks:
             video_id = self.youtube_video_id(track)
-            if track.get("supermix_favorite") and not self.is_youtube_music_liked(track):
-                continue
-            if video_id and video_id not in seen and not self.is_disliked(track):
+            if video_id and video_id not in excluded and not self.is_disliked(track):
                 result.append(dict(track))
-                seen.add(video_id)
-        if not result:
-            self.on_supermix_error(worker, "Найденные песни больше недоступны в твоём миксе. Попробуй собрать Супермикс ещё раз.")
+                excluded.add(video_id)
+        return result
+
+    def on_supermix_ready(self, worker, tracks, metadata):
+        if worker is not self.supermix_worker or self._force_exit:
             return
-        new_count = sum(not self.is_youtube_music_liked(track) for track in result)
-        message = f"Супермикс: {len(result)} треков · новых: {new_count}."
-        if "Часть рекомендаций" in note:
-            message += " Часть рекомендаций временно недоступна."
-        self._start_music_queue(result, "youtube", message, recommendations=True)
+        result = self._fresh_supermix_tracks(tracks)
+        mix_id = str(metadata.get("mix_id") or "")
+        if not result or not mix_id:
+            self.on_supermix_error(worker, "My Supermix не вернул доступных песен. Попробуй ещё раз позже.")
+            return
+        session = {"mix_id": mix_id, "seen": {self.youtube_video_id(t) for t in result},
+                   "anchor": "", "waiting": False, "failures": 0}
+        self.supermix_cover_url = metadata.get("cover_url") or ""
+        self._start_music_queue(result, "youtube", f"My Supermix · {len(result)} треков · продолжение загружается автоматически.",
+                                recommendations=True, supermix_session=session)
+        self._update_supermix_cover()
+
+    def _update_supermix_cover(self):
+        if self.supermix_cover_url:
+            for card in self.start_cards:
+                if card.title == "Супермикс":
+                    self.request_image(self.supermix_cover_url, card)
 
     def on_supermix_error(self, worker, message):
         if worker is not self.supermix_worker or self._force_exit:
@@ -5667,7 +5628,83 @@ class MusicPlayer(QMainWindow):
             self.supermix_worker = None
             self._set_supermix_busy(False)
 
-    def _start_music_queue(self, tracks, source, message, recommendations=False):
+    def maybe_refill_supermix(self):
+        session = self.supermix_session
+        if (session is None or self.queue_mode != "supermix" or self._force_exit
+                or self.supermix_refill_worker is not None or self.supermix_retry_timer.isActive()):
+            return
+        index = self.requested_index if self.requested_track is not None else self.current_queue_index
+        remaining = len(self.queue_tracks) - max(-1, index) - 1
+        if remaining > 5 and not session["waiting"]:
+            return
+        worker = self._make_supermix_worker(
+            mix_id=session["mix_id"], anchor=session["anchor"],
+            excluded_ids=session["seen"] | self._youtube_disliked_video_ids()
+        )
+        self.supermix_refill_worker = worker
+        worker.result_ready.connect(
+            lambda tracks, meta, w=worker, ss=session: self.on_supermix_refill_ready(w, ss, tracks))
+        worker.failed.connect(
+            lambda message, w=worker, ss=session: self.on_supermix_refill_error(w, ss, message))
+        worker.finished.connect(lambda w=worker, ss=session: self.on_supermix_refill_finished(w, ss))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _is_current_supermix_refill(self, worker, session):
+        return (session is self.supermix_session and worker is self.supermix_refill_worker
+                and self.queue_mode == "supermix" and not self._force_exit)
+
+    def on_supermix_refill_ready(self, worker, session, tracks):
+        if not self._is_current_supermix_refill(worker, session):
+            return
+        fresh = self._fresh_supermix_tracks(tracks, session["seen"])
+        if not fresh:
+            self.on_supermix_refill_error(worker, session, "My Supermix пока не вернул новых песен.")
+            return
+        session["failures"] = 0
+        self.supermix_retry_timer.stop()
+        for track in fresh:
+            track["queue_id"] = uuid4().hex
+            self.queue_tracks.append(track)
+            session["seen"].add(self.youtube_video_id(track))
+            self.append_queue_item(track, len(self.queue_tracks) - 1)
+        self.update_queue_count()
+        self.shuffle_future = None
+        if session["waiting"] and self.requested_track is None and self.pending_slot is None:
+            session["waiting"] = False
+            index = self.peek_next_index()
+            if index is not None:
+                self._finish_transition_pending = True
+                self._finish_guard_url = str((self.current_track or {}).get("url") or "")
+                self.play_queue_index(index)
+        else:
+            QTimer.singleShot(0, self.prepare_next_track)
+
+    def on_supermix_refill_error(self, worker, session, message):
+        if not self._is_current_supermix_refill(worker, session):
+            return
+        session["failures"] += 1
+        # Пустые ответы и сбои не вызывают цикл запросов; новая попытка — с задержкой.
+        delay = (5, 15, 30, 60)[min(session["failures"] - 1, 3)]
+        self.supermix_retry_timer.start(delay * 1000)
+        self.set_status(message + f" Повторю через {delay} с.", "youtube")
+
+    def on_supermix_refill_finished(self, worker, session):
+        if self._is_current_supermix_refill(worker, session):
+            self.supermix_refill_worker = None
+            if not self.supermix_retry_timer.isActive():
+                # Небольшая порция может оставить очередь ниже порога.
+                QTimer.singleShot(0, self.maybe_refill_supermix)
+
+    def _wait_for_supermix(self):
+        self._finish_transition_pending = False
+        if self.supermix_session is not None:
+            self.supermix_session["waiting"] = True
+            self.set_status("My Supermix: жду продолжение очереди…", "youtube")
+            self.maybe_refill_supermix()
+
+    def _start_music_queue(self, tracks, source, message, recommendations=False, supermix_session=None):
+        self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
         self.queue_list.clear()
@@ -5676,6 +5713,7 @@ class MusicPlayer(QMainWindow):
         self.radio_mode_active = False
         # Кнопки Next и автопереход остаются внутри очереди лайков.
         self.queue_mode = "supermix" if recommendations else ("youtube_likes" if source == "youtube" else "manual")
+        self.supermix_session = supermix_session
         self._finish_transition_pending = False
         self._finish_guard_url = ""
         self._auto_failed_tracks.clear()
@@ -5687,8 +5725,6 @@ class MusicPlayer(QMainWindow):
             queued_track["queue_id"] = uuid4().hex
             if source == "youtube" and not recommendations:
                 queued_track["youtube_music_like"] = True
-            elif recommendations:
-                queued_track.pop("youtube_music_like", None)
             self.queue_tracks.append(queued_track)
 
         self.refresh_queue_list()
@@ -6266,7 +6302,7 @@ class MusicPlayer(QMainWindow):
 
         if source == "youtube":
             supermix = SpotifyPlaylistCard(
-                "Супермикс", "Твои любимые треки · немного близкой новой музыки",
+                "Супермикс", "My Supermix из твоего YouTube Music",
                 "🪄", "#EC412B", "#F5AF45", self.start_cards_widget, artwork_style="supermix"
             )
             supermix.setFixedHeight(148)
@@ -6274,6 +6310,7 @@ class MusicPlayer(QMainWindow):
             self.start_cards.append(supermix)
             self.start_cards_layout.addWidget(supermix)
             self._set_supermix_busy(self.supermix_worker is not None)
+            self._update_supermix_cover()
             mix = SpotifyPlaylistCard(
                 "Перемешать мои лайки", "До 50 треков из твоих лайков в случайном порядке",
                 "🎧", "#315C62", "#171C22", self.start_cards_widget, artwork_style="shuffle"
@@ -6591,6 +6628,7 @@ class MusicPlayer(QMainWindow):
         # старого трека, иначе устаревший EndOfMedia может выбрать соседний поиск.
         self._finish_transition_pending = False
         self._finish_guard_url = ""
+        self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
         self.queue_list.clear()
@@ -6630,6 +6668,7 @@ class MusicPlayer(QMainWindow):
         start_index = next((i for i, item in enumerate(all_tracks)
                             if str(item.get("url") or "") == url), 0)
         selected_tracks = all_tracks[start_index:]
+        self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
         self.queue_list.clear()
@@ -7363,6 +7402,8 @@ class MusicPlayer(QMainWindow):
                         "В файле не найдено доменов youtube.com/google.com. Экспортируй свежий cookies.txt из сессии, где открыт YouTube Music."
                     )
                     return
+                self._stop_supermix_session()
+                self.supermix_cover_url = ""
                 self.youtube_auth_mode = "file"
                 self.youtube_cookie_file = str(cookie_path.resolve())
                 self.youtube_auth_profile = ""
@@ -7371,6 +7412,8 @@ class MusicPlayer(QMainWindow):
                 self.settings.setValue("youtube_auth_browser", browser_combo.currentData())
                 self.settings.setValue("youtube_auth_profile", "")
             else:
+                self._stop_supermix_session()
+                self.supermix_cover_url = ""
                 self.youtube_auth_mode = "browser"
                 self.youtube_auth_browser = str(browser_combo.currentData() or "chrome")
                 self.youtube_auth_profile = profile_input.text().strip()
@@ -7456,6 +7499,8 @@ class MusicPlayer(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._stop_supermix_session()
+        self.supermix_cover_url = ""
         self.youtube_cookie_file = ""
         self.youtube_auth_mode = "file"
         self.youtube_auth_browser = "chrome"
@@ -8017,6 +8062,7 @@ class MusicPlayer(QMainWindow):
             self.set_status("Сначала дождись загрузки треков исполнителя.", source)
             return
         random.shuffle(tracks)
+        self._stop_supermix_session()
         self.cancel_pending_request()
         self.queue_tracks = []
         self.queue_list.clear()
@@ -8111,7 +8157,7 @@ class MusicPlayer(QMainWindow):
 
     def start_radio(self, track, artist_context=None):
         """Запускает радио; для профиля артиста сохраняет контекст для будущих пополнений."""
-        self._cancel_supermix()
+        self._stop_supermix_session()
         if track.get("source") not in ("youtube", "soundcloud"):
             QMessageBox.information(self, "Радио", "Радио доступно для треков YouTube и SoundCloud.")
             return
@@ -8739,6 +8785,7 @@ class MusicPlayer(QMainWindow):
     # ---------------------------------------------------------
 
     def add_to_queue(self, track, play_now=False):
+        self._stop_supermix_session()
         self.queue_mode = "manual"
         self._soundcloud_queue_waiting = False
         self._soundcloud_queue_anchor_url = ""
@@ -8854,6 +8901,7 @@ class MusicPlayer(QMainWindow):
         self.queue_count.setText(f"{count} треков")
 
     def clear_queue(self):
+        self._stop_supermix_session()
         # Сохраняем уже воспроизводимый трек; новая очередь будет пустой.
         self.queue_mode = "manual"
         self._soundcloud_queue_waiting = False
@@ -8963,6 +9011,8 @@ class MusicPlayer(QMainWindow):
             if self.queue_mode == "soundcloud_likes" and self._soundcloud_likes_loading:
                 self._soundcloud_queue_waiting = True
                 self.set_status("SoundCloud: загружаю следующую страницу лайков…", "soundcloud")
+            elif self.queue_mode == "supermix":
+                self._wait_for_supermix()
             elif self.radio_mode_active:
                 self._radio_waiting_for_tracks = True
                 self.maybe_refill_radio(force=True)
@@ -9051,9 +9101,10 @@ class MusicPlayer(QMainWindow):
                 if isinstance(row, TrackRow) and getattr(row, "_loading", False):
                     row.set_loading(False)
 
-    def cancel_pending_request(self):
+    def cancel_pending_request(self, cancel_supermix=True):
         """Отменяем запуск неактуального трека, оставляя текущий звук."""
-        self._cancel_supermix()
+        if cancel_supermix:
+            self._cancel_supermix()
         self.request_id += 1
         self.requested_track = None
         self.requested_index = -1
@@ -9078,7 +9129,7 @@ class MusicPlayer(QMainWindow):
         затем неактивный QMediaPlayer открывает источник БЕЗ воспроизведения.
         На Windows реальная буферизация может начаться только при play().
         """
-        if self.requested_track is not None or self.pending_slot is not None:
+        if self._force_exit or self.requested_track is not None or self.pending_slot is not None:
             return
         if self.fade_timer.isActive():
             return
@@ -9194,7 +9245,12 @@ class MusicPlayer(QMainWindow):
 
     def play_track(self, track, index):
         """Запоминаем запрос и подготавливаем музыку на другом QMediaPlayer."""
-        self.cancel_pending_request()
+        if self.supermix_session is not None and (self.queue_mode != "supermix" or index < 0):
+            self._stop_supermix_session()
+            self.queue_mode = "manual"
+        elif self.supermix_session is not None:
+            self.supermix_session["waiting"] = False
+        self.cancel_pending_request(cancel_supermix=self.supermix_session is None)
         self.requested_track = dict(track)
         self.requested_index = index
         self.request_started = time.perf_counter()
@@ -9365,6 +9421,9 @@ class MusicPlayer(QMainWindow):
             self.seek_slider.setValue(position)
         self.position_label.setText(self.format_position(position))
 
+        # Проверка дешёвая: порог очереди и worker защищают от повторных запросов.
+        if self.queue_mode == "supermix":
+            self.maybe_refill_supermix()
         # Пополняем радио заранее, пока текущая композиция ещё звучит.
         if self.radio_mode_active:
             now = time.monotonic()
@@ -9392,7 +9451,9 @@ class MusicPlayer(QMainWindow):
             return self.current_track is not None or bool(self.queue_tracks)
         if self.queue_mode == "soundcloud_likes" and self._soundcloud_likes_loading:
             return True
-        if self.queue_mode == "supermix" or self._is_youtube_likes_playback():
+        if self.queue_mode == "supermix":
+            return self.supermix_session is not None or self.peek_next_index() is not None
+        if self._is_youtube_likes_playback():
             return self.peek_next_index() is not None
         if self.radio_mode_active:
             return self.peek_next_index() is not None or bool(self.current_track)
@@ -9436,6 +9497,7 @@ class MusicPlayer(QMainWindow):
                         and not self._finish_transition_pending
                         and (radio_ready or likes_waiting or youtube_likes_ready
                              or self._is_youtube_likes_playback()
+                             or self.supermix_session is not None
                              or current_url != self._finish_guard_url)
                         and (self.queue_tracks or self.current_track is not None)):
                     self._finish_transition_pending = True
@@ -9640,6 +9702,7 @@ class MusicPlayer(QMainWindow):
             QMessageBox.information(self, "Music Player", "Сначала выбери трек одним щелчком по строке или нажми ▶.")
 
     def stop_all(self):
+        self._stop_supermix_session()
         self.cancel_pending_request()
         for player, output in zip(self.players, self.audio_outputs):
             player.stop()
