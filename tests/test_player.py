@@ -252,6 +252,80 @@ class PlayerChanges(unittest.TestCase):
         self.assertFalse(self.w._youtube_rating_pending)
         self.assertFalse(self.w._youtube_rating_targets)
 
+    def visible_youtube_ids(self):
+        widget = self.w.youtube_likes_list
+        return [self.w.youtube_video_id(widget.item(i).data(m.Qt.ItemDataRole.UserRole))
+                for i in range(widget.count())]
+
+    def test_new_youtube_like_appears_at_top_without_sync(self):
+        self.w._likes_render_batch = 5
+        self.w.youtube_liked_tracks = [self.youtube_track(f'existing{i:05}') for i in range(180)]
+        self.w.refresh_likes_list(force_rebuild=True)
+        self.assertFalse(self.w.youtube_likes_list.isVisible())
+        new = self.youtube_track('justliked01')
+        self.request_like(new, True)
+        self.w.on_youtube_music_like_result(new, True, True, 'OK')
+        with patch.object(self.w, 'sync_youtube_likes') as sync:
+            self.w.set_source('likes')
+            app.processEvents()
+            self.assertEqual(self.visible_youtube_ids()[0], 'justliked01')
+            self.assertLess(self.w.youtube_likes_list.count(), len(self.w.youtube_liked_tracks))
+            sync.assert_not_called()
+        self.assertIn('justliked01', self.saved_ids())
+
+    def test_pending_like_appears_in_library_and_failure_removes_it(self):
+        self.w._likes_render_batch = 5
+        self.w.youtube_liked_tracks = [self.youtube_track(f'existing{i:05}') for i in range(12)]
+        self.w.refresh_likes_list(force_rebuild=True)
+        new = self.youtube_track('pendingview1')
+        self.request_like(new, True)
+        self.w.set_source('likes')
+        self.assertEqual(self.visible_youtube_ids()[0], 'pendingview1')
+        row = self.w.youtube_likes_list.itemWidget(self.w.youtube_likes_list.item(0))
+        self.assertTrue(row.favorite_button.isChecked())
+        self.assertFalse(row.favorite_button.isEnabled())
+        self.w.save_youtube_likes()
+        self.assertNotIn('pendingview1', self.saved_ids())
+        with patch.object(m.QMessageBox, 'warning'):
+            self.w.on_youtube_music_like_result(new, True, False, 'Rejected')
+        self.assertNotIn('pendingview1', self.visible_youtube_ids())
+        self.assertEqual(self.visible_youtube_ids()[0], 'existing00000')
+
+    def test_pending_unlike_hides_library_row_and_failure_restores_it(self):
+        track = self.youtube_track('restoredrow1')
+        self.w.youtube_liked_tracks = [track, self.youtube_track('secondrow001')]
+        self.w.refresh_likes_list(force_rebuild=True)
+        self.request_like(track, False)
+        self.w.set_source('likes')
+        self.assertNotIn('restoredrow1', self.visible_youtube_ids())
+        with patch.object(m.QMessageBox, 'warning'):
+            self.w.on_youtube_music_like_result(track, False, False, 'Rejected')
+        self.assertEqual(self.visible_youtube_ids()[0], 'restoredrow1')
+        row = self.w.youtube_likes_list.itemWidget(self.w.youtube_likes_list.item(0))
+        self.assertTrue(row.favorite_button.isChecked())
+        self.assertTrue(row.favorite_button.isEnabled())
+
+    def test_library_refresh_replaces_changed_middle_row(self):
+        original = [self.youtube_track(f'original{i:05}') for i in range(3)]
+        self.w.youtube_liked_tracks = original
+        self.w.refresh_likes_list(force_rebuild=True)
+        self.w.youtube_liked_tracks = [original[0], self.youtube_track('replacement1'), original[2]]
+        self.w.refresh_likes_list()
+        self.assertEqual(self.visible_youtube_ids(), ['original00000', 'replacement1', 'original00002'])
+
+    def test_library_tail_pagination_preserves_existing_rows(self):
+        original = [self.youtube_track(f'original{i:05}') for i in range(3)]
+        self.w.youtube_liked_tracks = list(original)
+        self.w.refresh_likes_list(force_rebuild=True)
+        first = self.w.youtube_likes_list.itemWidget(self.w.youtube_likes_list.item(0))
+        self.w.youtube_liked_tracks.extend(self.youtube_track(f'added{i:05}') for i in range(2))
+        self.w.refresh_likes_list()
+        self.w.set_source('likes')
+        app.processEvents()
+        self.w.maybe_load_more_likes(self.w.youtube_likes_list)
+        self.assertIs(first, self.w.youtube_likes_list.itemWidget(self.w.youtube_likes_list.item(0)))
+        self.assertEqual(len(self.visible_youtube_ids()), 5)
+
     def test_sync_pages_preserve_new_likes_and_unlikes(self):
         a, b, c = [self.youtube_track(key) for key in ('newlike0001', 'removed0001', 'remote00001')]
         self.w.youtube_liked_tracks = [b]
@@ -263,6 +337,7 @@ class PlayerChanges(unittest.TestCase):
             self.w.on_youtube_likes_results(worker, tracks, '__SC_LIKES_PAGE__:1')
             self.assertIn('newlike0001', self.confirmed_ids())
             self.assertNotIn('removed0001', self.confirmed_ids())
+            self.assertEqual(self.visible_youtube_ids()[0], 'newlike0001')
         self.w.on_youtube_likes_results(worker, [], '__SC_LIKES_DONE__:2')
         self.w.on_youtube_likes_finished(worker)
         self.assertEqual(self.confirmed_ids(), {'newlike0001', 'remote00001'})

@@ -3490,6 +3490,7 @@ class MusicPlayer(QMainWindow):
         self._youtube_rating_pending = set()
         # Оптимистическое состояние кнопок не попадает в подтверждённый кэш.
         self._youtube_rating_targets = {}
+        self._youtube_rating_tracks = {}
         self._youtube_sync_rating_changes = {}
         # SoundCloud: сессия браузера для личных данных либо публичный URL профиля.
         self.soundcloud_auth_mode = str(self.settings.value("soundcloud_auth_mode", "profile") or "profile")
@@ -6369,6 +6370,9 @@ class MusicPlayer(QMainWindow):
                 "Снять лайк в YouTube Music" if self.is_youtube_music_liked(track)
                 else "Поставить настоящий лайк в аккаунте YouTube Music"
             )
+            if self.youtube_video_id(track) in self._youtube_rating_pending:
+                row.favorite_button.setEnabled(False)
+                row.favorite_button.setToolTip("Отправляю изменение в YouTube Music…")
         else:
             row.favorite_button.clicked.connect(
                 lambda checked=False, t=dict(track), b=row.favorite_button: self.toggle_favorite(t, b)
@@ -6427,10 +6431,27 @@ class MusicPlayer(QMainWindow):
         except OSError as error:
             logging.getLogger("aurora").info(f"[Music Player] Не удалось сохранить кэш лайков YouTube: {error}")
 
+    def _youtube_likes_for_display(self):
+        """Показывает ожидающие лайки сразу, сохраняя подтверждённый кэш отдельно."""
+        pending = [track for video_id, track in reversed(self._youtube_rating_tracks.items())
+                   if self._youtube_rating_targets.get(video_id)]
+        tracks, seen = [], set()
+        for track in (*pending, *self.youtube_liked_tracks):
+            if not isinstance(track, dict) or not track.get("url"):
+                continue
+            video_id = self.youtube_video_id(track)
+            if self._youtube_rating_targets.get(video_id) is False:
+                continue
+            key = video_id or self.favorite_key(track)
+            if key not in seen:
+                tracks.append(track)
+                seen.add(key)
+        return tracks
+
     def get_combined_likes(self):
         combined = []
         seen = set()
-        for track in list(self.youtube_liked_tracks) + list(self.soundcloud_liked_tracks) + list(self.favorites.values()):
+        for track in self._youtube_likes_for_display() + list(self.soundcloud_liked_tracks) + list(self.favorites.values()):
             if not isinstance(track, dict) or not track.get("url"):
                 continue
             key = self.favorite_key(track)
@@ -6451,7 +6472,7 @@ class MusicPlayer(QMainWindow):
 
     def _likes_tracks_for_kind(self, kind):
         if kind == "youtube":
-            tracks = self.youtube_liked_tracks
+            tracks = self._youtube_likes_for_display()
         elif kind == "soundcloud":
             tracks = self.soundcloud_liked_tracks
         elif kind == "local":
@@ -6500,6 +6521,15 @@ class MusicPlayer(QMainWindow):
         if not tracks:
             return (0, "", "")
         return (len(tracks), str(tracks[0].get("url") or ""), str(tracks[-1].get("url") or ""))
+
+    @staticmethod
+    def _likes_widget_matches_prefix(list_widget, tracks):
+        """Новые страницы дописываются, а вставки и замены обновляют готовые строки."""
+        count = list_widget.count()
+        return count <= len(tracks) and all(
+            list_widget.item(index).data(Qt.ItemDataRole.UserRole) == tracks[index]
+            for index in range(count)
+        )
 
     def _rebuild_likes_widget(self, list_widget, tracks, kind):
         self._likes_loading_more.add(kind)
@@ -6565,7 +6595,7 @@ class MusicPlayer(QMainWindow):
         """Обновляет счётчики и создаёт строки лайков порциями по 150 штук."""
         if not hasattr(self, "likes_list"):
             return
-        youtube_tracks = [track for track in self.youtube_liked_tracks if isinstance(track, dict) and track.get("url")]
+        youtube_tracks = self._youtube_likes_for_display()
         soundcloud_tracks = [track for track in self.soundcloud_liked_tracks if isinstance(track, dict) and track.get("url")]
         local_tracks = [track for track in self.favorites.values() if isinstance(track, dict) and track.get("url")]
         # Порции SoundCloud обновляют объединение инкрементально, без повторного
@@ -6615,6 +6645,8 @@ class MusicPlayer(QMainWindow):
                 elif len(tracks) < previous_length:
                     # Если источник стал короче, убираем устаревшие строки.
                     self._rebuild_likes_widget(list_widget, tracks, kind)
+                elif not self._likes_widget_matches_prefix(list_widget, tracks):
+                    self._rebuild_likes_widget(list_widget, tracks, kind)
                 elif len(tracks) > self._likes_rendered_counts.get(kind, 0):
                     # Новые страницы пока остаются в модели данных. Виджеты создаём
                     # только когда пользователь прокрутил список ближе к середине/концу.
@@ -6656,6 +6688,9 @@ class MusicPlayer(QMainWindow):
             elif len(soundcloud_display_tracks) < previous_length:
                 self._rebuild_likes_widget(
                     self.soundcloud_likes_list, soundcloud_display_tracks, "soundcloud")
+            elif not self._likes_widget_matches_prefix(self.soundcloud_likes_list, soundcloud_display_tracks):
+                self._rebuild_likes_widget(
+                    self.soundcloud_likes_list, soundcloud_display_tracks, "soundcloud")
             elif len(soundcloud_display_tracks) > self._likes_rendered_counts.get("soundcloud", 0):
                 self._append_likes_rows(self.soundcloud_likes_list)
             else:
@@ -6677,7 +6712,10 @@ class MusicPlayer(QMainWindow):
         has_auth = bool(self.youtube_auth_kwargs())
         sync_running = bool(self.youtube_sync_worker is not None and self.youtube_sync_worker.isRunning())
         self.connect_account_button.setText("Настроить подключение" if has_auth else "Подключить аккаунт YouTube Music")
-        if self.youtube_liked_tracks and has_auth:
+        if self._youtube_rating_pending:
+            self.likes_account_title.setText("YouTube Music")
+            self.likes_account_status.setText("Сохраняю изменения лайков в YouTube Music…")
+        elif self.youtube_liked_tracks and has_auth:
             self.likes_account_title.setText("YouTube Music · аккаунт подключён")
             self.likes_account_status.setText(
                 f"Синхронизировано с YouTube Music: {len(youtube_tracks)} треков · "
@@ -7088,15 +7126,9 @@ class MusicPlayer(QMainWindow):
     def _merge_youtube_sync_rating_changes(self, tracks):
         """Свежие подтверждённые клики имеют приоритет над снимком плейлиста LM."""
         changes = self._youtube_sync_rating_changes
-        merged = [dict(track) for track in tracks if isinstance(track, dict)
-                  and (self.youtube_video_id(track) not in changes
-                       or changes[self.youtube_video_id(track)][1])]
-        seen = {self.youtube_video_id(track) for track in merged}
-        for video_id, (track, liked) in changes.items():
-            if liked and video_id not in seen:
-                merged.append(dict(track))
-                seen.add(video_id)
-        return merged
+        recent = [dict(track) for track, liked in reversed(changes.values()) if liked]
+        return recent + [dict(track) for track in tracks if isinstance(track, dict)
+                         and self.youtube_video_id(track) not in changes]
 
     def on_youtube_likes_results(self, worker, tracks, note):
         if worker is not self.youtube_sync_worker:
@@ -7364,7 +7396,11 @@ class MusicPlayer(QMainWindow):
 
         self._youtube_rating_pending.add(video_id)
         self._youtube_rating_targets[video_id] = liked
+        self._youtube_rating_tracks[video_id] = dict(
+            track, source="youtube", video_id=video_id, youtube_music_like=True
+        )
         self._refresh_youtube_like_buttons(video_id)
+        self.refresh_likes_list()
         browser_spec = ""
         if self.youtube_auth_mode == "browser":
             browser_spec = self.youtube_auth_browser
@@ -7386,15 +7422,18 @@ class MusicPlayer(QMainWindow):
         video_id = self.youtube_video_id(track)
         self._youtube_rating_pending.discard(video_id)
         self._youtube_rating_targets.pop(video_id, None)
+        self._youtube_rating_tracks.pop(video_id, None)
         if success:
             if liked:
                 saved = dict(track)
                 saved["source"] = "youtube"
                 saved["video_id"] = video_id
                 saved["youtube_music_like"] = True
-                if not any(self.youtube_video_id(item) == video_id for item in self.youtube_liked_tracks
-                           if isinstance(item, dict)):
-                    self.youtube_liked_tracks.append(saved)
+                # Последний поставленный лайк сразу виден в начале библиотеки.
+                self.youtube_liked_tracks = [saved] + [
+                    item for item in self.youtube_liked_tracks
+                    if not isinstance(item, dict) or self.youtube_video_id(item) != video_id
+                ]
             else:
                 self.youtube_liked_tracks = [
                     item for item in self.youtube_liked_tracks
@@ -7402,6 +7441,7 @@ class MusicPlayer(QMainWindow):
                 ]
             if self.youtube_sync_worker is not None:
                 saved_change = dict(track, source="youtube", video_id=video_id, youtube_music_like=True)
+                self._youtube_sync_rating_changes.pop(video_id, None)
                 self._youtube_sync_rating_changes[video_id] = (saved_change, bool(liked))
             self._youtube_last_sync_at = time.time()
             self.settings.setValue("youtube_last_sync_at", self._youtube_last_sync_at)
@@ -7419,6 +7459,7 @@ class MusicPlayer(QMainWindow):
             # Запрос завершился ошибкой: возвращаем видимым кнопкам
             # фактическое состояние лайка из кэша.
             self._refresh_youtube_like_buttons(video_id)
+            self.refresh_likes_list()
             self.set_status(message, "youtube")
             QMessageBox.warning(self, "Не удалось изменить лайк YouTube Music", message)
 
