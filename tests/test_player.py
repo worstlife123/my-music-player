@@ -366,13 +366,13 @@ class PlayerChanges(unittest.TestCase):
         with patch('ytmusicapi.YTMusic') as client, patch.object(self.w, 'play_track') as play:
             client.return_value.get_watch_playlist.return_value = {
                 'tracks': [{'videoId': 'freshsong001', 'title': 'Fresh recommendation',
-                            'artists': [{'name': 'New artist'}]}]
+                            'artists': [{'name': 'Artist'}]}]
             }
             self.w.play_supermix()
             finished = QSignalSpy(self.w.supermix_worker.finished)
             wait_for(lambda: len(finished) == 1 and play.call_count == 1)
             self.assertEqual(self.w.queue_mode, 'supermix')
-            self.assertEqual(self.w.queue_tracks[0]['video_id'], 'freshsong001')
+            self.assertEqual([track['video_id'] for track in self.w.queue_tracks], ['likedseed001', 'freshsong001'])
             self.assertIsNone(self.w.supermix_worker)
             self.assertEqual(self.w.youtube_liked_tracks, [seed])
 
@@ -400,7 +400,7 @@ class PlayerChanges(unittest.TestCase):
             self.w.youtube_liked_tracks.append(now_liked)
             self.w.disliked_track_keys.add('youtube|https://youtu.be/nowhidden001')
             self.w.on_supermix_ready(factory.return_value, [now_liked, now_disliked, fresh, fresh], 'Ready')
-        self.assertEqual([track['video_id'] for track in self.w.queue_tracks], ['freshsong001'])
+        self.assertEqual([track['video_id'] for track in self.w.queue_tracks], ['nowliked0001', 'freshsong001'])
 
     def test_supermix_error_preserves_queue_and_does_not_shuffle_likes(self):
         seed = self.youtube_track('likedseed001')
@@ -704,12 +704,12 @@ class SupermixRecommendations(unittest.TestCase):
                 'url': 'https://music.youtube.com/watch?v=' + video_id, 'title': video_id}
 
     @staticmethod
-    def entry(video_id, **extra):
+    def entry(video_id, artist='Artist', **extra):
         return dict(videoId=video_id, title='Recommended ' + video_id,
-                    artists=[{'name': 'Recommended artist'}], length='3:25',
+                    artists=[{'name': artist}], length='3:25',
                     thumbnail=[{'url': 'https://i.ytimg.com/cover.jpg'}], **extra)
 
-    def collect(self, liked, responses, disliked=(), limit=75):
+    def collect(self, liked, responses, disliked=(), limit=30):
         worker = m.SupermixWorker(liked, disliked, limit=limit)
         ready, failed = QSignalSpy(worker.result_ready), QSignalSpy(worker.failed)
         with patch('ytmusicapi.YTMusic') as factory, patch.object(m.random, 'shuffle'):
@@ -718,8 +718,8 @@ class SupermixRecommendations(unittest.TestCase):
             calls = factory.return_value.get_watch_playlist.call_args_list
         return ready, failed, calls
 
-    def test_radio_is_based_on_seeds_and_excludes_likes_dislikes_duplicates(self):
-        liked = [self.liked('seed0000001', 'Alpha'), self.liked('seed0000002', 'Beta')]
+    def test_new_recommendations_exclude_known_and_blocked_tracks(self):
+        liked = [self.liked('seed0000001', 'Artist'), self.liked('seed0000002', 'Beta')]
         responses = [
             {'tracks': [self.entry('seed0000001'), self.entry('blocked0001'), self.entry('fresh000001'),
                         self.entry('fresh000002'), self.entry('private0001', isAvailable=False)]},
@@ -730,8 +730,8 @@ class SupermixRecommendations(unittest.TestCase):
         self.assertEqual(len(ready), 1)
         self.assertEqual(len(failed), 0)
         tracks = ready[0][0]
-        self.assertEqual([track['video_id'] for track in tracks], ['fresh000001', 'fresh000003', 'fresh000002'])
-        self.assertEqual(tracks[0]['duration'], 205)
+        self.assertEqual([track['video_id'] for track in tracks if not track.get('supermix_favorite')], ['fresh000001'])
+        self.assertEqual(next(track['duration'] for track in tracks if not track.get('supermix_favorite')), 205)
         self.assertTrue(all(not track.get('youtube_music_like') for track in tracks))
         self.assertEqual({call.kwargs['videoId'] for call in calls}, {'seed0000001', 'seed0000002'})
         self.assertTrue(all(call.kwargs['radio'] is True for call in calls))
@@ -745,9 +745,69 @@ class SupermixRecommendations(unittest.TestCase):
         self.assertEqual({track['artist'] for track in seeds}, {'Alpha', 'Beta', 'Gamma'})
         self.assertEqual(len(seeds), 3)
 
+    def test_mix_is_mostly_favorites_with_a_small_discovery_share(self):
+        liked = [self.liked(f'favorite{i:04}') for i in range(40)]
+        radio = {'tracks': [self.entry(f'discovery{i:03}') for i in range(20)]}
+        ready, failed, _ = self.collect(liked, [radio, radio, radio])
+        self.assertFalse(failed)
+        tracks = ready[0][0]
+        self.assertEqual(len(tracks), 30)
+        self.assertEqual(sum(bool(track.get('supermix_favorite')) for track in tracks), 21)
+        self.assertTrue(tracks[0].get('supermix_favorite'))
+        self.assertEqual(len({track['video_id'] for track in tracks}), 30)
+        self.assertFalse(any(not a.get('supermix_favorite') and not b.get('supermix_favorite')
+                             for a, b in zip(tracks, tracks[1:])))
+
+    def test_scarce_good_recommendations_are_replaced_with_more_favorites(self):
+        liked = [self.liked(f'favorite{i:04}') for i in range(40)]
+        radio = {'tracks': [self.entry('onlynew0001')]}
+        ready, failed, _ = self.collect(liked, [radio, radio, radio])
+        self.assertFalse(failed)
+        tracks = ready[0][0]
+        self.assertEqual(len(tracks), 30)
+        self.assertEqual(sum(bool(track.get('supermix_favorite')) for track in tracks), 29)
+
+    def test_unfamiliar_artist_from_one_radio_is_not_used_as_filler(self):
+        liked = [self.liked(f'favorite{i:04}') for i in range(40)]
+        first = {'tracks': [self.entry('unrelated01', artist='Unrelated pop artist')]
+                           + [self.entry(f'nearby{i:05}') for i in range(11)]}
+        other = {'tracks': [self.entry(f'nearby{i:05}') for i in range(11)]}
+        ready, failed, _ = self.collect(liked, [first, other, other])
+        self.assertFalse(failed)
+        self.assertNotIn('unrelated01', {track['video_id'] for track in ready[0][0]})
+
+    def test_discovery_artists_need_multiple_radios_and_stay_a_small_minority(self):
+        liked = [self.liked(f'favorite{i:04}') for i in range(40)]
+        first = {'tracks': [self.entry(f'close{i:05}') for i in range(4)]
+                           + [self.entry('newartist01', artist='Related new artist')]
+                           + [self.entry(f'close{i:05}') for i in range(4, 11)]}
+        second = {'tracks': [self.entry('newartist02', artist='Related new artist')]
+                            + [self.entry(f'close{i:05}') for i in range(11)]}
+        ready, failed, _ = self.collect(liked, [first, second, second])
+        self.assertFalse(failed)
+        tracks = ready[0][0]
+        strangers = [track for track in tracks if track['artist'] == 'Related new artist']
+        self.assertLessEqual(len(strangers), 3)
+        self.assertGreater(len(strangers), 0)
+        self.assertGreaterEqual(sum(bool(t.get('supermix_favorite')) for t in tracks), 21)
+
+    def test_seed_selection_favors_established_taste_over_a_single_outlier(self):
+        liked = [self.liked(f'{artist}{i:06}', artist) for artist, count in
+                 [('Alpha', 10), ('Beta', 8), ('Gamma', 6), ('Outlier', 1)] for i in range(count)]
+        worker = m.SupermixWorker(liked)
+        with patch.object(m.random, 'shuffle'):
+            seeds = worker._select_seeds()
+        self.assertEqual({track['artist'] for track in seeds}, {'Alpha', 'Beta', 'Gamma'})
+
+    def test_topic_suffix_and_artist_spacing_do_not_hide_familiar_music(self):
+        liked = [self.liked('favorite001', 'MF DOOM - Topic')]
+        ready, failed, _ = self.collect(liked, [{'tracks': [self.entry('newdoom0001', artist='MFDOOM')]}])
+        self.assertFalse(failed)
+        self.assertIn('newdoom0001', {track['video_id'] for track in ready[0][0]})
+
     def test_partial_service_failure_still_returns_available_recommendations(self):
         ready, failed, _ = self.collect([self.liked('seed0000001', 'Alpha'), self.liked('seed0000002', 'Beta')],
-                                        [RuntimeError('Timeout'), {'tracks': [self.entry('fresh000001')]}])
+                                        [RuntimeError('Timeout'), {'tracks': [self.entry('fresh000001', artist='Beta')]}])
         self.assertEqual(len(ready), 1)
         self.assertEqual(len(failed), 0)
         self.assertIn('Часть рекомендаций', ready[0][1])
@@ -767,7 +827,8 @@ class SupermixRecommendations(unittest.TestCase):
     def test_limit_and_cancellation(self):
         ready, failed, _ = self.collect([self.liked('seed0000001')],
                                         [{'tracks': [self.entry(f'new{i:08}') for i in range(20)]}], limit=7)
-        self.assertEqual(len(ready[0][0]), 7)
+        self.assertLessEqual(len(ready[0][0]), 7)
+        self.assertEqual(sum(bool(track.get('supermix_favorite')) for track in ready[0][0]), 1)
         self.assertFalse(failed)
         worker = m.SupermixWorker([self.liked('seed0000001')])
         worker.cancel()

@@ -1940,16 +1940,44 @@ class SupermixWorker(QThread):
     failed = pyqtSignal(str)
     MAX_SEEDS = 3
     REQUEST_BUDGET_SECONDS = 30
+    MAX_RADIO_DEPTH = 12
 
-    def __init__(self, liked_tracks, disliked_ids=None, parent=None, limit=75):
+    def __init__(self, liked_tracks, disliked_ids=None, parent=None, limit=30):
         super().__init__(parent)
         self.liked_tracks = [dict(track) for track in liked_tracks if isinstance(track, dict)]
         self.disliked_ids = set(disliked_ids or ())
-        self.limit = max(1, min(75, int(limit)))
+        self.limit = max(2, min(30, int(limit)))
         self._cancelled = threading.Event()
 
     def cancel(self):
         self._cancelled.set()
+
+    @staticmethod
+    def _artist_keys(track):
+        names = track.get("artist_metadata") or []
+        if isinstance(names, str):
+            names = [names]
+        names = [item.get("name", "") if isinstance(item, dict) else str(item) for item in names]
+        names.append(str(track.get("artist") or ""))
+        keys = set()
+        for name in names:
+            name = unicodedata.normalize("NFKC", name).casefold().strip()
+            name = re.sub(r"\s*[-–—]?\s*topic$", "", name)
+            key = re.sub(r"[^\w]", "", name)
+            if key and key not in ("исполнительнеизвестен", "unknownartist", "variousartists"):
+                keys.add(key)
+        return keys
+
+    def _artist_profile(self):
+        profile, seen = {}, set()
+        for track in self.liked_tracks:
+            video_id = YouTubeRatingWorker._video_id(track)
+            if not video_id or video_id in seen or video_id in self.disliked_ids:
+                continue
+            seen.add(video_id)
+            for artist in self._artist_keys(track):
+                profile[artist] = profile.get(artist, 0) + 1
+        return profile
 
     def _select_seeds(self):
         candidates, seen = [], set()
@@ -1959,9 +1987,12 @@ class SupermixWorker(QThread):
                 candidates.append(track)
                 seen.add(video_id)
         random.shuffle(candidates)
+        profile = self._artist_profile()
+        candidates.sort(key=lambda track: max((profile.get(key, 0) for key in self._artist_keys(track)),
+                                               default=0), reverse=True)
         selected, artists = [], set()
         for track in candidates:
-            artist = str(track.get("artist") or "").strip().casefold()
+            artist = max(sorted(self._artist_keys(track)), key=lambda key: profile.get(key, 0), default="")
             if artist not in artists:
                 selected.append(track)
                 artists.add(artist)
@@ -1997,7 +2028,65 @@ class SupermixWorker(QThread):
         return {"source": "youtube", "video_id": video_id,
                 "url": f"https://music.youtube.com/watch?v={video_id}",
                 "title": title, "artist": ", ".join(filter(None, names)) or "Исполнитель неизвестен",
+                "artist_metadata": list(filter(None, names)),
                 "thumbnail": thumbnail, "duration": duration}
+
+    def _rank_recommendations(self, groups):
+        """Сначала знакомые исполнители; новые — только при согласии нескольких радио."""
+        profile = self._artist_profile()
+        candidates, artist_support = {}, {}
+        for group_index, group in enumerate(groups):
+            for track, position in group:
+                video_id = track["video_id"]
+                evidence = candidates.setdefault(video_id, {"track": track, "position": position, "sources": set()})
+                evidence["position"] = min(evidence["position"], position)
+                evidence["sources"].add(group_index)
+                for artist in self._artist_keys(track):
+                    artist_support.setdefault(artist, set()).add(group_index)
+        familiar, discovery = [], []
+        for evidence in candidates.values():
+            keys = self._artist_keys(evidence["track"])
+            weight = max((profile.get(key, 0) for key in keys), default=0)
+            evidence["weight"] = weight
+            if weight:
+                familiar.append(evidence)
+            elif evidence["position"] < 5 and any(len(artist_support[key]) >= 2 for key in keys):
+                discovery.append(evidence)
+        familiar.sort(key=lambda item: (-len(item["sources"]), -item["weight"], item["position"]))
+        discovery.sort(key=lambda item: (-len(item["sources"]), item["position"]))
+        # Не заполняем очередь случайными артистами, если близких песен мало.
+        new_count = min(3, self.limit // 5, len(familiar) // 4, len(discovery))
+        familiar = familiar[:self.limit - new_count]
+        discovery = deque(discovery[:new_count])
+        result = []
+        for index, evidence in enumerate(familiar):
+            result.append(evidence["track"])
+            if (index + 1) % 4 == 0 and discovery:
+                result.append(discovery.popleft()["track"])
+        return result
+
+    def _blend_with_favorites(self, recommendations):
+        """Смешивает любимые песни с небольшой порцией близких рекомендаций."""
+        favorites, seen = [], set()
+        for track in self.liked_tracks:
+            video_id = YouTubeRatingWorker._video_id(track)
+            if video_id and video_id not in seen and video_id not in self.disliked_ids:
+                favorites.append(dict(track, supermix_favorite=True))
+                seen.add(video_id)
+        random.shuffle(favorites)
+        new_count = min(len(recommendations), max(1, self.limit * 3 // 10),
+                        max(1, len(favorites) * 3 // 7))
+        favorites = deque(favorites[:self.limit - new_count])
+        discoveries = deque(recommendations[:new_count])
+        result, inserted = [], 0
+        favorite_count, discovery_count = len(favorites), len(discoveries)
+        for index, track in enumerate(favorites):
+            result.append(track)
+            expected = (index + 1) * discovery_count // favorite_count
+            while inserted < expected and discoveries:
+                result.append(discoveries.popleft())
+                inserted += 1
+        return result
 
     def run(self):
         if self._cancelled.is_set():
@@ -2034,27 +2123,18 @@ class SupermixWorker(QThread):
                             videoId=YouTubeRatingWorker._video_id(seed), radio=True, limit=25
                         )
                         group = []
-                        for entry in (playlist or {}).get("tracks", []):
+                        for position, entry in enumerate((playlist or {}).get("tracks", [])):
+                            if position >= self.MAX_RADIO_DEPTH:
+                                break
                             track = self._normalize_track(entry)
                             if track and track["video_id"] not in excluded:
-                                group.append(track)
-                        groups.append(deque(group))
+                                group.append((track, position))
+                        groups.append(group)
                     except Exception as error:
                         errors.append(str(error).replace("\n", " ")[:180])
             if self._cancelled.is_set():
                 return
-            result, seen = [], set(excluded)
-            # Чередуем рекомендации разных исходных песен, сохраняя ранжирование сервиса.
-            while any(groups) and len(result) < self.limit:
-                for group in groups:
-                    while group:
-                        track = group.popleft()
-                        if track["video_id"] not in seen:
-                            seen.add(track["video_id"])
-                            result.append(track)
-                            break
-                    if len(result) >= self.limit:
-                        break
+            result = self._rank_recommendations(groups)
             if not result:
                 if errors:
                     detail = errors[0].casefold()
@@ -2067,8 +2147,10 @@ class SupermixWorker(QThread):
                     else:
                         message = "Не удалось получить рекомендации YouTube Music. Проверь соединение и повтори."
                     raise RuntimeError(message)
-                raise RuntimeError("YouTube Music пока не предложил новых треков: остались только лайки или скрытые песни.")
-            note = f"Супермикс: {len(result)} новых треков по твоим лайкам."
+                raise RuntimeError("Не нашлось достаточно близких новых песен. Попробуй собрать Супермикс позже или добавь больше любимых исполнителей.")
+            result = self._blend_with_favorites(result)
+            new_count = sum(not track.get("supermix_favorite") for track in result)
+            note = f"Супермикс: {len(result)} треков · новых: {new_count}."
             if errors:
                 note += " Часть рекомендаций временно недоступна."
             self.result_ready.emit(result, note)
@@ -5520,7 +5602,7 @@ class MusicPlayer(QMainWindow):
             if card.title == "Супермикс":
                 card.setEnabled(not busy)
                 card.subtitle = ("Ищу новые треки по твоим лайкам…" if busy
-                                 else "Новые треки по твоим лайкам · рекомендации YouTube Music")
+                                 else "Твои любимые треки · немного близкой новой музыки")
                 card.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.PointingHandCursor)
                 card.update()
 
@@ -5555,19 +5637,20 @@ class MusicPlayer(QMainWindow):
     def on_supermix_ready(self, worker, tracks, note):
         if worker is not self.supermix_worker or self._force_exit:
             return
-        excluded = self._youtube_disliked_video_ids() | {
-            self.youtube_video_id(track) for track in self.youtube_liked_tracks if isinstance(track, dict)
-        } | {video_id for video_id, liked in self._youtube_rating_targets.items() if liked}
+        excluded = self._youtube_disliked_video_ids()
         result, seen = [], set(excluded)
         for track in tracks:
             video_id = self.youtube_video_id(track)
+            if track.get("supermix_favorite") and not self.is_youtube_music_liked(track):
+                continue
             if video_id and video_id not in seen and not self.is_disliked(track):
                 result.append(dict(track))
                 seen.add(video_id)
         if not result:
-            self.on_supermix_error(worker, "Все найденные песни уже лайкнуты или скрыты. Попробуй собрать Супермикс ещё раз.")
+            self.on_supermix_error(worker, "Найденные песни больше недоступны в твоём миксе. Попробуй собрать Супермикс ещё раз.")
             return
-        message = f"Супермикс: {len(result)} новых треков по твоим лайкам."
+        new_count = sum(not self.is_youtube_music_liked(track) for track in result)
+        message = f"Супермикс: {len(result)} треков · новых: {new_count}."
         if "Часть рекомендаций" in note:
             message += " Часть рекомендаций временно недоступна."
         self._start_music_queue(result, "youtube", message, recommendations=True)
@@ -6183,7 +6266,7 @@ class MusicPlayer(QMainWindow):
 
         if source == "youtube":
             supermix = SpotifyPlaylistCard(
-                "Супермикс", "Новые треки по твоим лайкам · рекомендации YouTube Music",
+                "Супермикс", "Твои любимые треки · немного близкой новой музыки",
                 "🪄", "#EC412B", "#F5AF45", self.start_cards_widget, artwork_style="supermix"
             )
             supermix.setFixedHeight(148)
