@@ -271,7 +271,7 @@ class PlayerChanges(unittest.TestCase):
         self.assertEqual(self.w.start_cards[0].action_icon, 'open')
         self.assertFalse(any(isinstance(self.w.start_cards_layout.itemAt(i).widget(), m.QLabel)
                              for i in range(self.w.start_cards_layout.count())))
-        self.assertEqual(self.w.start_cards_layout.count(), 2)
+        self.assertEqual(self.w.home_tiles_layout.count(), 1)
         with patch.object(self.w, 'start_search') as search, \
              patch.object(self.w, 'start_playlist_url') as playlist, \
              patch.object(self.w, 'play_queue_index') as play:
@@ -290,7 +290,7 @@ class PlayerChanges(unittest.TestCase):
         self.w.current_source = 'youtube'
         self.w.rebuild_start_cards()
         self.assertEqual([card.title for card in self.w.start_cards],
-                         ['Мои лайки', 'Супермикс', 'Перемешать мои лайки'])
+                         ['Мои лайки', 'Супермикс', 'Перемешать лайки'])
         self.w.likes_tabs.setCurrentIndex(1)
         self.w.likes_search_input.setText('old filter')
         with patch.object(self.w, 'start_search') as search, \
@@ -336,6 +336,124 @@ class PlayerChanges(unittest.TestCase):
                 self.w.ensure_following_track_prepared()
                 radio.assert_not_called()
             play.assert_not_called()
+
+    def test_recent_history_records_only_started_tracks_and_survives_reload(self):
+        queued = self.youtube_track('queued00001')
+        with patch.object(self.w, 'play_queue_index'):
+            self.w.add_to_queue(queued)
+        self.assertEqual(self.w.recent_tracks, [])
+        self.w.clear_queue()
+        self.start(self.local_track('actually-started'))
+        self.assertEqual(self.w.recent_tracks[0]['title'], 'actually-started')
+        self.assertEqual(self.w.load_recent_tracks(), self.w.recent_tracks)
+
+    def test_recent_history_is_bounded_deduplicated_and_contains_only_metadata(self):
+        with patch.object(self.w, 'refresh_recent_tracks'):
+            for i in range(45):
+                self.w.record_recent_track(dict(self.youtube_track(f'history{i:04}'),
+                                               cookie='secret', stream_url='ephemeral', queue_id='old'))
+            repeated = dict(self.w.recent_tracks[-1], title='Updated title')
+            self.w.record_recent_track(repeated)
+        self.assertEqual(len(self.w.recent_tracks), 40)
+        self.assertEqual(self.w.recent_tracks[0]['title'], 'Updated title')
+        self.assertEqual(len({self.w.favorite_key(t) for t in self.w.recent_tracks}), 40)
+        self.assertEqual(self.w.load_recent_tracks(), self.w.recent_tracks)
+        saved = str(self.w.settings.value('recent_tracks_json'))
+        self.assertNotIn('secret', saved)
+        self.assertNotIn('ephemeral', saved)
+        self.assertNotIn('queue_id', saved)
+        self.w.settings.setValue('recent_tracks_json', '{invalid')
+        self.assertEqual(self.w.load_recent_tracks(), [])
+
+    def test_home_recent_tracks_are_scoped_to_service_and_play_the_selected_track(self):
+        youtube = self.youtube_track('history0001')
+        soundcloud = dict(youtube, source='soundcloud', url='https://soundcloud.com/test/recent')
+        self.w.recent_tracks = [youtube, soundcloud]
+        self.w.current_source = 'soundcloud'
+        self.w.rebuild_start_cards()
+        self.assertEqual(self.w.recent_heading.text(), 'Недавно слушал')
+        self.assertEqual([row.track['source'] for row in self.w.recent_rows], ['soundcloud'])
+        with patch.object(self.w, 'add_to_queue') as play:
+            self.w.recent_rows[0].play_requested.emit(dict(soundcloud))
+            play.assert_called_once_with(soundcloud, True)
+        self.w.current_source = 'youtube'
+        self.w.rebuild_start_cards()
+        self.assertEqual([row.track['url'] for row in self.w.recent_rows], [youtube['url']])
+
+    def test_home_without_history_uses_real_likes_and_excludes_dislikes(self):
+        liked = [self.youtube_track('liked000001'), self.youtube_track('liked000002')]
+        self.w.youtube_liked_tracks = liked
+        self.w.disliked_track_keys.add(self.w.radio_track_key(liked[1]))
+        self.w.rebuild_start_cards()
+        self.assertEqual(self.w.recent_heading.text(), 'Из твоих лайков')
+        self.assertEqual([row.track['video_id'] for row in self.w.recent_rows], ['liked000001'])
+        self.assertFalse(self.w.recent_rows[0].remove_button.isVisible())
+
+    def test_home_tiles_reflow_at_narrow_width_without_horizontal_scroll(self):
+        self.w.resize(1380, 860)
+        app.processEvents()
+        self.w.rebuild_start_cards()
+        app.processEvents()
+        self.w.layout_home_tiles()
+        cards = self.w.start_cards
+        self.assertEqual(cards[0].y(), cards[2].y())
+        self.assertGreater(cards[2].x(), cards[1].x())
+        self.w.resize(1000, 650)
+        if not self.w.queue_open:
+            self.w.toggle_queue()
+        wait_for(lambda: self.w.queue_animation.state() != m.QPropertyAnimation.State.Running)
+        app.processEvents()
+        self.w.layout_home_tiles()
+        self.assertGreater(cards[2].y(), cards[0].y())
+        self.assertLessEqual(cards[1].geometry().right(), self.w.start_cards_scroll.viewport().width())
+        self.assertEqual(self.w.start_cards_scroll.horizontalScrollBar().maximum(), 0)
+        self.w.resize(1380, 860)
+        app.processEvents()
+        self.w.layout_home_tiles()
+        wait_for(lambda: cards[0].y() == cards[2].y())
+
+    def test_likes_connections_live_in_settings_popover(self):
+        self.w.set_source('likes')
+        self.assertTrue(self.w.sync_account_button.isVisible())
+        self.assertFalse(self.w.connect_account_button.isVisible())
+        self.w.likes_settings_menu.popup(self.w.likes_settings_button.mapToGlobal(m.QPoint(0, 38)))
+        app.processEvents()
+        self.assertTrue(self.w.connect_account_button.isVisible())
+        self.assertTrue(self.w.connect_soundcloud_button.isVisible())
+        self.w.likes_settings_menu.hide()
+        self.assertFalse(self.w.connect_account_button.isVisible())
+
+    def test_queue_highlight_uses_position_identity_and_remove_is_available_on_hover(self):
+        track = self.youtube_track('same0000001')
+        with patch.object(self.w, 'prepare_next_track'):
+            self.w.add_to_queue(track)
+            self.w.add_to_queue(track)
+        self.w.current_track = self.w.queue_tracks[1]
+        self.w.current_queue_index = 1
+        self.w.update_playing_row_highlight()
+        first = self.w.queue_list.itemWidget(self.w.queue_list.item(0))
+        second = self.w.queue_list.itemWidget(self.w.queue_list.item(1))
+        self.assertFalse(first.property('playing'))
+        self.assertTrue(second.property('playing'))
+        self.assertFalse(second.now_playing.isHidden())
+        second._reveal_queue_action(True)
+        self.assertTrue(second.remove_button.property('revealed'))
+        second._reveal_queue_action(False)
+        self.assertFalse(second.remove_button.property('revealed'))
+        with patch.object(self.w, 'prepare_next_track'):
+            second.remove_button.click()
+        self.assertEqual(len(self.w.queue_tracks), 1)
+
+    def test_player_menu_keeps_stop_and_dislike_actions_working(self):
+        self.start(self.local_track('menu-actions'))
+        hidden_track = dict(self.w.current_track)
+        self.w.dislike_action.trigger()
+        self.assertTrue(self.w.is_disliked(hidden_track))
+        self.assertIsNone(self.w.current_track)
+        self.assertFalse(self.w.dislike_action.isEnabled())
+        self.start(self.local_track('menu-stop'))
+        self.w.stop_action.trigger()
+        self.assertEqual(self.w.player.playbackState(), m.QMediaPlayer.PlaybackState.StoppedState)
 
     def test_supermix_fetches_in_background_and_keeps_recommendations_unliked(self):
         self.w.youtube_auth_mode = "browser"
