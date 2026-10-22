@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -21,7 +22,8 @@ spec = importlib.util.spec_from_file_location('aurora', ROOT / FILENAME)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 from PyQt6.QtTest import QSignalSpy
-from PyQt6.QtCore import QCoreApplication, QEvent, QEventLoop, QSettings
+from PyQt6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QEventLoop, QSettings
+from PyQt6.QtGui import QEnterEvent
 app = m.QApplication([])
 app.setStyle('Fusion')
 app.setQuitOnLastWindowClosed(False)
@@ -1189,6 +1191,279 @@ class PlayerChanges(unittest.TestCase):
         current = self.w.current_track
         self.w.on_pending_media_timeout()
         self.assertIs(self.w.current_track, current)
+
+    def remote_playback_fixture(self):
+        # Decode/play real WAV files while supplying controlled network failures.
+        # No external account or network is used by these recovery tests.
+        w = self.w
+        for method in ('prepare_next_track', 'ensure_following_track_prepared',
+                       'maybe_refill_supermix'):
+            fixture = patch.object(w, method)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        self.start(self.local_track('remote-original'))
+        fixture = patch.object(w, '_remote_playback', return_value=True)
+        fixture.start()
+        self.addCleanup(fixture.stop)
+        track = {**self.youtube_track('recover0001'), 'queue_id': 'stable-position'}
+        w.current_track = track
+        w.queue_tracks = [track]
+        w.current_queue_index = 0
+        w.queue_mode = 'supermix'
+        w.supermix_session = {'anchor': 'previous-song', 'waiting': False}
+        w.player.setPosition(2600)
+        w._last_progress_position = 2600
+        w._last_duration = 10000
+        w._playback_wanted = True
+        return track
+
+    def test_network_recovery_resumes_real_media_without_restarting_supermix(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        session = w.supermix_session
+        history = list(w.recent_tracks)
+        w.save_stream(track['url'], 'https://example.invalid/expired', 'Old')
+        with patch.object(w, 'start_stream_extraction') as extract, \
+             patch.object(w, 'record_recent_track') as record:
+            self.assertTrue(w.recover_current_stream('test disconnect'))
+            extract.assert_called_once_with(track)
+            self.assertIsNone(w.get_cached_stream(track['url']))
+            self.assertEqual(w.requested_index, 0)
+            fresh = self.local_track('remote-refreshed')
+            w.stream_ready(track['url'], m.QUrl.fromLocalFile(fresh['url']).toString(), 'Fresh', .1)
+            wait_for(lambda: w.requested_track is None)
+            self.assertGreater(w.player.position(), 2600)
+            self.assertEqual(w.current_track, track)
+            self.assertEqual(w.current_queue_index, 0)
+            self.assertIs(w.supermix_session, session)
+            self.assertEqual(session['anchor'], 'previous-song')
+            self.assertEqual(w.queue_tracks, [track])
+            self.assertEqual(w.recent_tracks, history)
+            record.assert_not_called()
+            self.assertIsNone(w._network_recovery)
+            self.assertEqual(w._network_recovery_attempts, 1)
+
+    def test_network_recovery_seek_event_alone_cannot_commit_playback(self):
+        w = self.w
+        self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction'), \
+             patch.object(w, 'commit_switch') as commit:
+            w.recover_current_stream('test')
+            slot = w.idle_slot()
+            url = m.QUrl.fromLocalFile(self.local_track('seek-gate')['url'])
+            w.players[slot].setSource(url)
+            w.pending_slot = slot
+            w.pending_media_url = url
+            w.pending_position_seen = False
+            w._recovery_seek_applied = True
+            for position in (0, 100, 2600):
+                w.on_slot_position(slot, position)
+            commit.assert_not_called()
+            w.on_slot_position(slot, 2700)
+            commit.assert_called_once()
+
+    def test_stalled_network_watchdog_ignores_pause_selection_and_healthy_progress(self):
+        w = self.w
+        self.remote_playback_fixture()
+        with patch.object(w, 'recover_current_stream') as recover:
+            w._last_progress_at = time.monotonic() - 20
+            w._playback_wanted = False
+            w.check_playback_health()
+            w._playback_wanted = True
+            w.requested_track = self.youtube_track('another0001')
+            w.check_playback_health()
+            w.requested_track = None
+            w.player.pause()
+            w.check_playback_health()
+            w.player.play()
+            w.on_slot_position(w.active_slot, 2700)
+            w.check_playback_health()
+            recover.assert_not_called()
+            w._last_progress_at = time.monotonic() - 20
+            w.check_playback_health()
+            recover.assert_called_once()
+            # A freeze a couple of seconds before the end still needs recovery.
+            recover.reset_mock()
+            w._last_progress_position = 8000
+            w.check_playback_health()
+            recover.assert_called_once()
+
+    def test_early_network_end_recovers_instead_of_marking_mix_song_completed(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction') as extract, \
+             patch.object(w, 'handle_track_finished') as advance:
+            w.on_slot_status(w.active_slot, m.QMediaPlayer.MediaStatus.EndOfMedia)
+            extract.assert_called_once_with(track)
+            advance.assert_not_called()
+            self.assertEqual(w.supermix_session['anchor'], 'previous-song')
+            self.assertFalse(w._finish_transition_pending)
+
+    def test_normal_end_still_advances_and_local_playback_never_recovers(self):
+        self.start(self.local_track('normal-end'))
+        w = self.w
+        w._last_duration = 10000
+        w._last_progress_position = 5000
+        with patch.object(w, 'start_stream_extraction') as extract:
+            self.assertFalse(w.recover_current_stream('local file'))
+            extract.assert_not_called()
+        w._last_progress_position = 10000
+        with patch.object(w, 'handle_track_finished') as advance, \
+             patch.object(w, 'recover_current_stream') as recover:
+            w.on_slot_status(w.active_slot, m.QMediaPlayer.MediaStatus.EndOfMedia)
+            wait_for(lambda: advance.call_count == 1)
+            recover.assert_not_called()
+
+    def test_active_network_error_and_retry_budget_do_not_skip_the_song(self):
+        w = self.w
+        self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction') as extract, \
+             patch.object(w, 'handle_track_finished') as advance:
+            for attempt in range(w.MAX_STREAM_RECOVERIES):
+                w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.NetworkError, 'disconnected')
+                self.assertEqual(w._network_recovery_attempts, attempt + 1)
+                w.requested_track = None
+                w._network_recovery = None
+            w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.NetworkError, 'disconnected again')
+            self.assertEqual(extract.call_count, w.MAX_STREAM_RECOVERIES)
+            self.assertFalse(w._playback_wanted)
+            self.assertFalse(w.playback_watchdog.isActive())
+            advance.assert_not_called()
+
+    def test_stop_pause_or_manual_selection_cancels_network_recovery(self):
+        w = self.w
+        self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction'):
+            w.recover_current_stream('first')
+            w.toggle_playback()
+            self.assertIsNone(w.requested_track)
+            self.assertIsNone(w._network_recovery)
+            self.assertFalse(w._playback_wanted)
+            w._playback_wanted = True
+            w.recover_current_stream('second')
+            w.stop_all()
+            self.assertIsNone(w.requested_track)
+            self.assertIsNone(w._network_recovery)
+            self.assertFalse(w.playback_watchdog.isActive())
+        self.start(self.local_track('manual-after-recovery'))
+        self.assertEqual(w._network_recovery_attempts, 0)
+        self.assertIsNone(w.supermix_session)
+
+    def test_failed_recovery_does_not_retry_forever_or_skip_track(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction') as extract:
+            w.recover_current_stream('test')
+            w.stream_error(track['url'], 'test network failure')
+            w.check_playback_health()
+            self.assertIsNone(w.requested_track)
+            self.assertIsNone(w._network_recovery)
+            self.assertFalse(w._playback_wanted)
+            extract.assert_called_once()
+
+    def test_new_track_selection_discards_pending_recovery_position(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        slot = w.idle_slot()
+        with patch.object(w, 'start_stream_extraction'), \
+             patch.object(w.players[slot], 'play'):
+            w.recover_current_stream('disconnect')
+            fresh = m.QUrl.fromLocalFile(self.local_track('pending-recovery')['url'])
+            w.stream_ready(track['url'], fresh.toString(), 'Fresh', .1)
+            self.assertIsNotNone(w._network_recovery)
+            self.assertEqual(w.pending_slot, slot)
+        manual = self.local_track('manual-selection')
+        self.start(manual)
+        self.assertIsNone(w._network_recovery)
+        self.assertIsNone(w.supermix_session)
+        self.assertEqual(w.current_track, manual)
+        self.assertLess(w.player.position(), 1500)
+
+    def test_recovery_timeout_does_not_loop_or_restart_at_beginning(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        w.PENDING_MEDIA_TIMEOUT_MS = 25
+        slot = w.idle_slot()
+        with patch.object(w, 'start_stream_extraction') as extract, \
+             patch.object(w.players[slot], 'play'):
+            w.recover_current_stream('disconnect')
+            fresh = m.QUrl.fromLocalFile(self.local_track('recovery-never-starts')['url'])
+            w.stream_ready(track['url'], fresh.toString(), 'Fresh', .1)
+            wait_for(lambda: w.requested_track is None)
+            self.assertIsNone(w._network_recovery)
+            self.assertFalse(w._playback_wanted)
+            self.assertFalse(w.pending_media_timer.isActive())
+            extract.assert_called_once()
+
+    def test_latest_search_selection_starts_before_cancelled_extraction_finishes(self):
+        w = self.w
+        tracks = [self.youtube_track('select0000' + str(i)) for i in range(3)]
+        started = {track['url']: threading.Event() for track in tracks}
+        release = {track['url']: threading.Event() for track in tracks}
+        opened = []
+        workers = []
+        def controlled_extract(worker, options):
+            started[worker.track['url']].set()
+            release[worker.track['url']].wait(5)
+            return {'url': 'https://example.invalid/' + worker.track['video_id'], 'title': 'Test'}
+        def opened_media(url, origin):
+            opened.append(url.toString())
+            w.pending_slot = w.idle_slot()
+        with patch.object(m.StreamWorker, '_extract', controlled_extract), \
+             patch.object(w, 'start_pending_media', side_effect=opened_media):
+            try:
+                w.play_track(tracks[0], -1)
+                wait_for(started[tracks[0]['url']].is_set)
+                workers.append(w.stream_worker)
+                w.play_track(tracks[1], -1)
+                wait_for(started[tracks[1]['url']].is_set)
+                workers.append(w.stream_worker)
+                w.play_track(tracks[2], -1)
+                self.assertEqual(len(w._stream_workers), 2)
+                self.assertFalse(started[tracks[2]['url']].is_set())
+                release[tracks[0]['url']].set()
+                wait_for(started[tracks[2]['url']].is_set)
+                workers.append(w.stream_worker)
+                # Simulate a queued success from a superseded request.
+                workers[1].stream_ready.emit('https://example.invalid/stale', 'Stale', 1)
+                app.processEvents()
+                self.assertEqual(opened, [])
+                release[tracks[2]['url']].set()
+                wait_for(lambda: len(opened) == 1)
+                self.assertTrue(opened[0].endswith(tracks[2]['video_id']))
+                release[tracks[1]['url']].set()
+                wait_for(lambda: not w._stream_workers)
+                self.assertEqual(len(opened), 1)
+            finally:
+                w.cancel_pending_request()
+                for event in release.values():
+                    event.set()
+                for worker in workers:
+                    try:
+                        worker.wait(6000)
+                    except RuntimeError:
+                        pass  # Already deleted after finished.
+                app.processEvents()
+
+    def test_card_hover_has_no_animation_tail_and_reuses_scaled_cover(self):
+        card = self.w.start_cards[1]
+        self.w.resize(1380, 900)
+        app.processEvents()
+        card.grab()
+        initial = card._scaled_cover[1].cacheKey()
+        card.enterEvent(QEnterEvent(m.QPointF(10, 10), m.QPointF(10, 10), m.QPointF(10, 10)))
+        self.assertEqual(card._hover, 1)
+        self.assertFalse(card._hover_animation.state() == QAbstractAnimation.State.Running)
+        card.grab()
+        self.assertEqual(card._scaled_cover[1].cacheKey(), initial)
+        card.leaveEvent(QEvent(QEvent.Type.Leave))
+        self.assertEqual(card._hover, 0)
+        self.assertFalse(card._hover_animation.state() == QAbstractAnimation.State.Running)
+        replacement = m.QPixmap(1024, 1024)
+        replacement.fill(m.QColor('red'))
+        card.set_cover(replacement)
+        card.grab()
+        self.assertNotEqual(card._scaled_cover[1].cacheKey(), initial)
 
     def test_fade_uses_elapsed_time_and_volume_changes_keep_balance(self):
         self.start(self.local_track('old-fade'))

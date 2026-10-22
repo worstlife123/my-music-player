@@ -654,7 +654,21 @@ class SpotifyPlaylistCard(QPushButton):
 
     def set_cover(self, pixmap):
         self._cover_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else None
+        self._scaled_cover = None
         self.update()
+
+    def _cover_for_size(self, artwork, side):
+        # Keep only the current display size. Hover/equalizer repaints must not
+        # repeatedly resample a large network image on the GUI thread.
+        key = (artwork.cacheKey(), int(side), self.devicePixelRatioF())
+        cached = getattr(self, "_scaled_cover", None)
+        if cached is None or cached[0] != key:
+            pixels = max(1, round(side * key[2]))
+            scaled = artwork.scaled(pixels, pixels, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                    Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(key[2])
+            self._scaled_cover = (key, scaled)
+        return self._scaled_cover[1]
 
     def _set_hover(self, value):
         self._hover = float(value)
@@ -662,6 +676,10 @@ class SpotifyPlaylistCard(QPushButton):
 
     def enterEvent(self, event):
         self._hover_animation.stop()
+        if self.tile_mode or self._artwork is not None:
+            self._set_hover(1.0)
+            super().enterEvent(event)
+            return
         self._hover_animation.setStartValue(self._hover)
         self._hover_animation.setEndValue(1.0)
         self._hover_animation.start()
@@ -669,6 +687,10 @@ class SpotifyPlaylistCard(QPushButton):
 
     def leaveEvent(self, event):
         self._hover_animation.stop()
+        if self.tile_mode or self._artwork is not None:
+            self._set_hover(0.0)
+            super().leaveEvent(event)
+            return
         self._hover_animation.setStartValue(self._hover)
         self._hover_animation.setEndValue(0.0)
         self._hover_animation.start()
@@ -769,9 +791,9 @@ class SpotifyPlaylistCard(QPushButton):
         cover_path.addRoundedRect(cover, 8, 8)
         painter.save()
         painter.setClipPath(cover_path)
-        scaled = artwork.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                Qt.TransformationMode.SmoothTransformation)
-        crop = QRectF((scaled.width() - side) / 2, (scaled.height() - side) / 2, side, side)
+        scaled = self._cover_for_size(artwork, side)
+        pixels = side * scaled.devicePixelRatioF()
+        crop = QRectF((scaled.width() - pixels) / 2, (scaled.height() - pixels) / 2, pixels, pixels)
         painter.drawPixmap(cover, scaled, crop)
         painter.restore()
         left = cover.right() + 22
@@ -818,9 +840,9 @@ class SpotifyPlaylistCard(QPushButton):
             path.addRoundedRect(cover, 10, 10)
             painter.save()
             painter.setClipPath(path)
-            scaled = artwork.scaled(int(side), int(side), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                    Qt.TransformationMode.SmoothTransformation)
-            crop = QRectF((scaled.width() - side) / 2, (scaled.height() - side) / 2, side, side)
+            scaled = self._cover_for_size(artwork, side)
+            pixels = side * scaled.devicePixelRatioF()
+            crop = QRectF((scaled.width() - pixels) / 2, (scaled.height() - pixels) / 2, pixels, pixels)
             painter.drawPixmap(cover, scaled, crop)
             painter.restore()
         self._paint_playback_badge(painter, cover)
@@ -3783,6 +3805,8 @@ class PlayerBar(QFrame):
 
 class MusicPlayer(QMainWindow):
     PENDING_MEDIA_TIMEOUT_MS = 20_000
+    PLAYBACK_STALL_SECONDS = 8
+    MAX_STREAM_RECOVERIES = 2
 
     def install_shortcuts(self):
         self._shortcuts = []
@@ -4089,6 +4113,7 @@ class MusicPlayer(QMainWindow):
         # Прямые ссылки временные и могут истекать; сохраняем их на 8 минут.
         self.stream_cache = {}
         self.stream_cache_ttl = 8 * 60
+        self._stream_workers = set()
         self.prefetch_worker = None
         self.prefetch_target = None
         self.prefetch_failed_until = {}     # Не повторяем сбой каждую секунду.
@@ -4125,6 +4150,16 @@ class MusicPlayer(QMainWindow):
         self.pending_position_seen = False
         self.pending_ever_loaded = False
         self.pending_refreshed = False
+        self._network_recovery = None
+        self._network_recovery_attempts = 0
+        self._playback_wanted = False
+        self._last_progress_at = time.monotonic()
+        self._last_progress_position = 0
+        self._last_duration = 0
+        self._recovery_seek_applied = False
+        self.playback_watchdog = QTimer(self)
+        self.playback_watchdog.setInterval(1000)
+        self.playback_watchdog.timeout.connect(self.check_playback_health)
         self.standby_key = None               # URL трека, предварительно загруженного Qt.
         self.standby_ready = False
         self.standby_started = None
@@ -5229,6 +5264,7 @@ class MusicPlayer(QMainWindow):
             player.errorOccurred.connect(
                 lambda error, message, i=index: self.on_slot_error(i, error, message)
             )
+            player.seekableChanged.connect(lambda seekable, i=index: self._apply_recovery_seek(i))
 
     # ---------------------------------------------------------
     # Меню и настройки. Все элементы сохраняются через QSettings.
@@ -9637,6 +9673,9 @@ class MusicPlayer(QMainWindow):
         self.requested_track = None
         self.requested_index = -1
         self.stream_pending_track = None
+        if self.stream_worker is not None:
+            self.stream_worker.cancel()
+        self._network_recovery = None
         self.stop_fade()
         self.pending_media_timer.stop()
         if self.pending_slot is not None:
@@ -9748,26 +9787,33 @@ class MusicPlayer(QMainWindow):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
         key = self._key(track)
         if self.stream_worker is not None:
-            if self.stream_target == key:
+            if self.stream_target == key and not self.stream_worker._cancel_requested:
                 self.set_status("Аудиоссылка для выбранного трека уже запрашивается…")
                 return
-            # Сохраняем последнюю выбранную песню. Текущий сетевой запрос нельзя
-            # жёстко прервать внутри yt-dlp, но его результат уже будет отброшен.
-            self.stream_pending_track = dict(track)
             self.stream_worker.cancel()
-            self.set_status("Отменяю устаревший запрос и готовлю выбранный трек…")
+        # One cancelled request may finish in the background while the latest
+        # selection starts immediately. Rapid clicks cannot spawn unlimited threads.
+        if len(self._stream_workers) >= 2:
+            self.stream_pending_track = dict(track)
+            self.set_status("Готовлю последний выбранный трек…")
             return
+        self.stream_pending_track = None
         self.stream_target = key
         self.set_status("Получаю ссылку на новый трек, предыдущий пока играет…")
         worker = StreamWorker(track, self, audio_quality=self.audio_quality,
                               **(self.youtube_auth_kwargs() if track.get("source") == "youtube" else {}))
         self.stream_worker = worker
+        self._stream_workers.add(worker)
         key = self.stream_target
         worker.stream_ready.connect(
-            lambda stream, title, elapsed, k=key: self.stream_ready(k, stream, title, elapsed)
+            lambda stream, title, elapsed, k=key, w=worker:
+                self.stream_ready(k, stream, title, elapsed)
+                if w is self.stream_worker and not w._cancel_requested else None
         )
-        worker.failed.connect(lambda message, k=key: self.stream_error(k, message))
-        worker.finished.connect(self.stream_finished)
+        worker.failed.connect(lambda message, k=key, w=worker:
+                              self.stream_error(k, message)
+                              if w is self.stream_worker and not w._cancel_requested else None)
+        worker.finished.connect(lambda w=worker: self.stream_finished(w))
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
@@ -9779,6 +9825,7 @@ class MusicPlayer(QMainWindow):
         elif self.supermix_session is not None:
             self.supermix_session["waiting"] = False
         self.cancel_pending_request(cancel_supermix=self.supermix_session is None)
+        self._network_recovery_attempts = 0
         self.requested_track = dict(track)
         self.requested_index = index
         self.request_started = time.perf_counter()
@@ -9858,7 +9905,13 @@ class MusicPlayer(QMainWindow):
             auto_transition = self._finish_transition_pending
             self.requested_track = None
             self.requested_index = -1
-            self.set_status("Не удалось получить аудиопоток. Предыдущий трек продолжает играть.")
+            recovering = self._network_recovery is not None
+            if recovering:
+                self._network_recovery = None
+                self._playback_wanted = False
+                self.playback_watchdog.stop()
+            self.set_status("Не удалось восстановить поток. Проверь подключение или VPN." if recovering else
+                            "Не удалось получить аудиопоток. Предыдущий трек продолжает играть.")
             logging.getLogger("aurora").warning("Ошибка аудиопотока: %s", message)
             self.show_toast("Не удалось подготовить трек: " + str(message)[:180], 4500)
             if auto_transition:
@@ -9866,9 +9919,15 @@ class MusicPlayer(QMainWindow):
         else:
             logging.getLogger("aurora").info(f"[Music Player] Старая ошибка извлечения: {message}")
 
-    def stream_finished(self):
-        self.stream_worker = None
-        self.stream_target = None
+    def stream_finished(self, worker):
+        self._stream_workers.discard(worker)
+        if worker is self.stream_worker:
+            self.stream_worker = None
+            self.stream_target = None
+        elif self.stream_worker is not None and not self.stream_worker._cancel_requested:
+            return
+        if self._force_exit:
+            return
         pending_track = self.stream_pending_track
         self.stream_pending_track = None
         if pending_track is not None:
@@ -9907,20 +9966,25 @@ class MusicPlayer(QMainWindow):
             QMediaPlayer.MediaStatus.BufferedMedia,
         ) and player.source() == media_url
         self.pending_position_seen = False
+        self._recovery_seek_applied = False
         self.pending_media_timer.start(self.PENDING_MEDIA_TIMEOUT_MS)
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
-        if player.source() != media_url:
+        if player.source() != media_url or self._network_recovery is not None:
             player.stop()
             self.standby_key = None
             self.standby_ready = False
+            if self._network_recovery is not None:
+                player.setSource(QUrl())
             player.setSource(media_url)
         # Запускаем сразу, не ожидая LoadedMedia; звук переключится по движению позиции.
         if self.pending_slot != slot or self.requested_track is None:
             return
+        self._apply_recovery_seek(slot)
         player.play()
         if self.pending_slot == slot:
-            self.set_status("Загружаю звук на втором плеере; предыдущий продолжает играть…")
+            self.set_status("Восстанавливаю звук с прежней позиции…" if self._network_recovery else
+                            "Загружаю звук на втором плеере; предыдущий продолжает играть…")
         logging.getLogger("aurora").info(f"[Music Player] Qt запускает второй поток ({origin})")
 
     def on_pending_media_timeout(self):
@@ -9932,9 +9996,81 @@ class MusicPlayer(QMainWindow):
             "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз."
         )
 
+    def _remote_playback(self):
+        track = self.current_track or {}
+        return (track.get("source") in ("youtube", "soundcloud")
+                and not self.player.source().isLocalFile())
+
+    def _ended_early(self):
+        duration = self._last_duration
+        position = self._last_progress_position
+        return duration > 0 and position > 0 and duration - position > 3000
+
+    def check_playback_health(self):
+        """Recover a frozen network stream; pauses and user selections are exempt."""
+        if (self._force_exit or not self._playback_wanted or not self._remote_playback()
+                or self.is_seeking or self.requested_track is not None
+                or self.pending_slot is not None
+                or self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState):
+            return
+        if self._last_duration > 0 and self._last_progress_position >= self._last_duration - 800:
+            return
+        if time.monotonic() - self._last_progress_at >= self.PLAYBACK_STALL_SECONDS:
+            self.recover_current_stream("нет данных от сервера")
+
+    def recover_current_stream(self, reason):
+        if (self._force_exit or not self._playback_wanted or not self._remote_playback()
+                or self.requested_track is not None or self.pending_slot is not None
+                or self._finish_transition_pending):
+            return False
+        if self._network_recovery_attempts >= self.MAX_STREAM_RECOVERIES:
+            self._playback_wanted = False
+            self.playback_watchdog.stop()
+            self.set_status("Поток снова оборвался. Проверь подключение или VPN и нажми ▶.")
+            self.show_toast("Сервер не отдаёт аудио. Проверь подключение или VPN.", 4500)
+            return True
+        track = dict(self.current_track)
+        position = self._last_progress_position
+        duration = self._last_duration
+        self.cancel_pending_request(cancel_supermix=False)
+        self._network_recovery_attempts += 1
+        self._network_recovery = {"position": position, "duration": duration}
+        self.requested_track = track
+        self.requested_index = self.current_queue_index
+        self.request_started = time.perf_counter()
+        # This already IS a refresh. Do not chain the ordinary startup retry.
+        self.pending_refreshed = True
+        self.stream_cache.pop(self._key(track), None)
+        self.standby_key = None
+        self.standby_ready = False
+        logging.getLogger("aurora").info("Восстановление потока: %s; позиция %d мс; попытка %d",
+                                       reason, position, self._network_recovery_attempts)
+        self.start_stream_extraction(track)
+        self.set_status("Соединение прервалось. Восстанавливаю трек с прежней позиции…")
+        return True
+
+    def _apply_recovery_seek(self, slot):
+        recovery = self._network_recovery
+        if (recovery is None or slot != self.pending_slot or self._recovery_seek_applied
+                or self.players[slot].source() != self.pending_media_url):
+            return
+        position = recovery["position"]
+        if position > 0 and not self.players[slot].isSeekable():
+            return
+        self._recovery_seek_applied = True
+        if position > 0:
+            self.players[slot].setPosition(position)
+
     def on_slot_position(self, slot, position):
         """Отслеживает позицию обоих плееров и безопасно запускает автопереход."""
         if slot == self.pending_slot:
+            if self._network_recovery is not None:
+                self._apply_recovery_seek(slot)
+                target = self._network_recovery["position"]
+                # setPosition emits positionChanged too. Wait for actual playback
+                # beyond that position before making the recovered slot audible.
+                if not self._recovery_seek_applied or position <= target:
+                    return
             if (position > 0 and not self.pending_position_seen
                     and self.players[slot].source() == self.pending_media_url):
                 self.pending_position_seen = True
@@ -9945,6 +10081,9 @@ class MusicPlayer(QMainWindow):
             return
         if slot != self.active_slot:
             return
+        if position > 0 and position != self._last_progress_position:
+            self._last_progress_position = position
+            self._last_progress_at = time.monotonic()
         if not self.is_seeking:
             self.seek_slider.setValue(position)
         self.position_label.setText(self.format_position(position))
@@ -9990,6 +10129,8 @@ class MusicPlayer(QMainWindow):
     def on_slot_duration(self, slot, duration):
         if slot != self.active_slot:
             return
+        if duration > 0:
+            self._last_duration = duration
         self.seek_slider.setRange(0, max(0, duration))
         self.seek_slider.setEnabled(duration > 0 and self.player.isSeekable())
         self.duration_label.setText(self.format_position(duration))
@@ -10000,6 +10141,7 @@ class MusicPlayer(QMainWindow):
                           QMediaPlayer.MediaStatus.BufferingMedia,
                           QMediaPlayer.MediaStatus.BufferedMedia):
                 self.pending_ever_loaded = True
+                self._apply_recovery_seek(slot)
             elif status == QMediaPlayer.MediaStatus.StalledMedia:
                 self.set_status("Новый поток ждёт данные; старая музыка продолжает играть…")
         elif slot != self.active_slot:
@@ -10011,6 +10153,8 @@ class MusicPlayer(QMainWindow):
             return
         else:
             if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                if self._ended_early() and self.recover_current_stream("поток завершился до конца трека"):
+                    return
                 # Если радио уже догрузило новые треки, переходим к ним даже при guard
                 # от ранней проверки позиции. В остальных режимах guard блокирует дубль.
                 current_url = str((self.current_track or {}).get("url", ""))
@@ -10047,13 +10191,14 @@ class MusicPlayer(QMainWindow):
         if self.pending_slot is None or self.requested_track is None:
             return
         self.pending_media_timer.stop()
+        recovery = self._network_recovery
         new = self.pending_slot
         old = self.active_slot
         self.active_slot = new
         self.player = self.players[new]
         self.audio_output = self.audio_outputs[new]
         self.current_track = self.requested_track
-        if self.shuffle_enabled and isinstance(self.current_track, dict):
+        if recovery is None and self.shuffle_enabled and isinstance(self.current_track, dict):
             uid = self.current_track.get("queue_id")
             if uid:
                 self._shuffle_history.append(uid)
@@ -10069,6 +10214,20 @@ class MusicPlayer(QMainWindow):
         self.standby_ready = False
         self.last_switch_seconds = elapsed
         self.shuffle_future = None
+        self._network_recovery = None
+        self._playback_wanted = True
+        self._last_progress_at = time.monotonic()
+        self._last_progress_position = self.player.position()
+        self._last_duration = self.player.duration() or (recovery or {}).get("duration", 0)
+        if not self._last_duration:
+            try:
+                self._last_duration = max(0, int(float(self.current_track.get("duration") or 0) * 1000))
+            except (ValueError, TypeError, OverflowError):
+                self._last_duration = 0
+        if self._remote_playback():
+            self.playback_watchdog.start()
+        else:
+            self.playback_watchdog.stop()
 
         title = self.current_track.get("title") or "Без названия"
         artist = self.current_track.get("artist") or ""
@@ -10078,7 +10237,8 @@ class MusicPlayer(QMainWindow):
             artist, Qt.TextElideMode.ElideRight, max(80, self.bottom_artist.width() - 3)))
         self.bottom_artist.setToolTip(artist)
         self.show_cover(self.current_track.get("thumbnail", ""))
-        self.record_recent_track(self.current_track)
+        if recovery is None:
+            self.record_recent_track(self.current_track)
         self.update_bottom_track_actions()
         for list_widget in (self.source_list, self.youtube_likes_list,
                             self.soundcloud_likes_list, self.likes_list, self.queue_list):
@@ -10179,7 +10339,13 @@ class MusicPlayer(QMainWindow):
                 self.set_status("Не удалось открыть следующий трек; автоматически пробую следующий вариант.")
                 self.recover_auto_transition_failure(failed_track, failed_index)
             else:
-                self.set_status("Новый трек не удалось открыть, старая музыка продолжает играть.")
+                recovering = self._network_recovery is not None
+                if recovering:
+                    self._network_recovery = None
+                    self._playback_wanted = False
+                    self.playback_watchdog.stop()
+                self.set_status("Не удалось восстановить поток. Проверь подключение или VPN." if recovering else
+                                "Новый трек не удалось открыть, старая музыка продолжает играть.")
                 self.show_toast(message or "Неподдерживаемый аудиопоток", 4500)
             return
         if slot != self.active_slot:
@@ -10198,6 +10364,8 @@ class MusicPlayer(QMainWindow):
             self.set_status("Ошибка аудио при автопереходе; пробую следующий трек.")
             self.recover_auto_transition_failure(failed_track, failed_index)
             return
+        if self.recover_current_stream("ошибка сетевого потока"):
+            return
         self.set_status("Ошибка воспроизведения текущего трека.")
         self.show_toast(message or "Ошибка воспроизведения", 4500)
 
@@ -10214,9 +10382,22 @@ class MusicPlayer(QMainWindow):
             self.audio_outputs[self.idle_slot()].setVolume(0.0)
 
     def toggle_playback(self):
+        if self._network_recovery is not None:
+            self.cancel_pending_request(cancel_supermix=False)
+            self._playback_wanted = False
+            self.playback_watchdog.stop()
+            self.player.pause()
+            self.set_status("Воспроизведение на паузе.")
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._playback_wanted = False
             self.player.pause()
         elif not self.player.source().isEmpty():
+            self._playback_wanted = True
+            self._network_recovery_attempts = 0
+            self._last_progress_at = time.monotonic()
+            if self._remote_playback():
+                self.playback_watchdog.start()
             duration = self.player.duration()
             if duration > 0 and self.player.position() >= duration - 300:
                 self.player.setPosition(0)
@@ -10231,6 +10412,8 @@ class MusicPlayer(QMainWindow):
             QMessageBox.information(self, "Music Player", "Сначала выбери трек одним щелчком по строке или нажми ▶.")
 
     def stop_all(self):
+        self._playback_wanted = False
+        self.playback_watchdog.stop()
         self._stop_supermix_session()
         self.cancel_pending_request()
         for player, output in zip(self.players, self.audio_outputs):
@@ -10245,7 +10428,10 @@ class MusicPlayer(QMainWindow):
 
     def seek_released(self):
         if self.player.isSeekable():
-            self.player.setPosition(self.seek_slider.value())
+            position = self.seek_slider.value()
+            self._last_progress_position = position
+            self._last_progress_at = time.monotonic()
+            self.player.setPosition(position)
         self.is_seeking = False
 
     @staticmethod
@@ -10297,6 +10483,7 @@ class MusicPlayer(QMainWindow):
             return
         self.fade_timer.stop()
         self.pending_media_timer.stop()
+        self.playback_watchdog.stop()
         self.save_preferences()
         for player in self.players:
             player.stop()
