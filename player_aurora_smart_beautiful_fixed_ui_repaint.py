@@ -26,10 +26,10 @@ from collections import deque, OrderedDict
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter
+from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
-    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient,
+    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkDiskCache
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -3807,6 +3807,11 @@ class MusicPlayer(QMainWindow):
     PENDING_MEDIA_TIMEOUT_MS = 20_000
     PLAYBACK_STALL_SECONDS = 8
     MAX_STREAM_RECOVERIES = 2
+    ARTWORK_MAX_SIDE = 768
+    ARTWORK_MAX_PIXELS = 16_777_216
+    ARTWORK_MAX_DOWNLOAD = 5_000_000
+    ARTWORK_CACHE_BYTES = 32 * 1024 * 1024
+    THUMBNAIL_CACHE_BYTES = 4 * 1024 * 1024
 
     def install_shortcuts(self):
         self._shortcuts = []
@@ -4009,6 +4014,9 @@ class MusicPlayer(QMainWindow):
         self._likes_rendered_counts = {"youtube": 0, "soundcloud": 0, "local": 0}
         self._likes_list_signatures = {}
         self._likes_loading_more = set()
+        self._likes_live_rows = {"youtube": {}, "soundcloud": {}, "local": {}}
+        self._likes_updating_window = set()
+        self._likes_display_tracks = {}
         self._soundcloud_queue_waiting = False
         self._soundcloud_queue_anchor_url = ""
         self.queue_mode = "manual"  # manual, soundcloud_likes или radio
@@ -4192,7 +4200,8 @@ class MusicPlayer(QMainWindow):
             # Недоступный диск-кэш не должен мешать обычной загрузке обложек.
             logging.getLogger("aurora").info(f"[Music Player] Дисковый кэш обложек недоступен: {error}")
         self.pixmap_cache = OrderedDict()
-        self.image_waiters = {}  # URL -> список QLabel
+        self.thumbnail_cache = OrderedDict()
+        self.image_waiters = {}  # URL -> weak references to current image targets
         self.image_backlog = deque()
         self.active_images = 0
         self.image_limit = 6
@@ -4668,9 +4677,11 @@ class MusicPlayer(QMainWindow):
         self.likes_list = QListWidget()  # Локальные сердечки: favorites.json.
         for list_widget in (self.youtube_likes_list, self.soundcloud_likes_list, self.likes_list):
             list_widget.setObjectName("trackList")
+            list_widget.setUniformItemSizes(True)
             list_widget.setSpacing(2)
             list_widget.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
             list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            list_widget.viewport().installEventFilter(self)
             list_widget.customContextMenuRequested.connect(
                 lambda point, lw=list_widget: self.open_likes_menu(point, lw)
             )
@@ -6451,6 +6462,7 @@ class MusicPlayer(QMainWindow):
         self.soundcloud_account_status.setText(
             f"SoundCloud: обновляю лайки в фоне · сохранено {len(self.soundcloud_liked_tracks)} треков…"
         )
+        self.refresh_home_likes_counts()
         auth = self.soundcloud_auth_kwargs()
         for kind, url in (("likes", base + "/likes"),):
             worker = SearchWorker(
@@ -6563,14 +6575,15 @@ class MusicPlayer(QMainWindow):
         """Обновляет подписи источников без перестройки всех списков."""
         if not hasattr(self, "likes_tabs"):
             return
-        youtube_count = len(self.youtube_liked_tracks)
-        soundcloud_count = len(self.soundcloud_liked_tracks)
-        local_count = len(self.favorites)
+        youtube_count = len(self._youtube_likes_for_display())
+        soundcloud_count = sum(bool(isinstance(t, dict) and t.get("url")) for t in self.soundcloud_liked_tracks)
+        local_count = sum(bool(isinstance(t, dict) and t.get("url")) for t in self.favorites.values())
         combined_count = len(self.get_combined_likes())
         self.likes_tabs.setTabText(0, f"YouTube Music · {youtube_count}")
         self.likes_tabs.setTabText(1, f"SoundCloud · {soundcloud_count}")
         self.likes_tabs.setTabText(2, f"Мои лайки · {local_count}")
         self.likes_title.setText(f"{combined_count} треков в библиотеке")
+        self.refresh_home_likes_counts({"youtube": youtube_count, "soundcloud": soundcloud_count})
         self.refresh_connection_badge()
 
     def on_soundcloud_account_error(self, kind, worker, error):
@@ -6583,6 +6596,7 @@ class MusicPlayer(QMainWindow):
             "SoundCloud: не удалось загрузить личные данные. Проверь профиль/сессию браузера. "
             + self._soundcloud_profile_status[:220]
         )
+        self.refresh_home_likes_counts()
         self.refresh_connection_badge()
 
     def on_soundcloud_account_finished(self, kind, worker):
@@ -6604,6 +6618,7 @@ class MusicPlayer(QMainWindow):
                     QTimer.singleShot(0, lambda i=next_index: self.play_queue_index(i))
                 elif self.current_track is not None:
                     QTimer.singleShot(0, self.handle_track_finished)
+        self.refresh_home_likes_counts()
         self.refresh_connection_badge()
 
     def load_custom_playlists(self):
@@ -6701,7 +6716,35 @@ class MusicPlayer(QMainWindow):
             tile_mode=source != "soundcloud"
         )
         card.clicked.connect(lambda checked=False, src=source: self.open_likes_library(src))
+        card.setProperty("likes_source", source)
         self.start_cards.append(card)
+
+    def refresh_home_likes_counts(self, counts=None):
+        if counts is None:
+            counts = {"youtube": len(self._youtube_likes_for_display()),
+                      "soundcloud": sum(bool(isinstance(t, dict) and t.get("url"))
+                                        for t in self.soundcloud_liked_tracks)}
+        for card in self.start_cards:
+            source = card.property("likes_source")
+            if source not in counts:
+                continue
+            count = counts[source]
+            busy = self.youtube_sync_worker is not None if source == "youtube" else self._soundcloud_likes_loading
+            if 11 <= count % 100 <= 14:
+                ending, favorite = "треков", "любимых"
+            elif count % 10 == 1:
+                ending, favorite = "трек", "любимый"
+            elif 2 <= count % 10 <= 4:
+                ending, favorite = "трека", "любимых"
+            else:
+                ending, favorite = "треков", "любимых"
+            subtitle = (f"{count} {ending} · обновление…" if busy else
+                        f"{count} {favorite} {ending}" if count else "Вся твоя любимая музыка")
+            if card.subtitle != subtitle:
+                card.subtitle = subtitle
+                card.setAccessibleName(f"{card.title}: {subtitle}")
+                card.setToolTip(f"{card.title} — {subtitle}")
+                card.update()
 
     def rebuild_start_cards(self):
         """Карточки коллекции и настоящая история прослушиваний выбранного сервиса."""
@@ -6734,11 +6777,19 @@ class MusicPlayer(QMainWindow):
         self.layout_home_tiles()
         self.refresh_recent_tracks()
         self.refresh_supermix_card()
+        self.refresh_home_likes_counts()
 
     def eventFilter(self, watched, event):
         if (event.type() == QEvent.Type.Resize and hasattr(self, "start_cards_scroll")
                 and watched is self.start_cards_scroll.viewport() and not self._force_exit):
             QTimer.singleShot(0, self.layout_home_tiles)
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show) and not self._force_exit:
+            for name in ("youtube_likes_list", "soundcloud_likes_list", "likes_list"):
+                list_widget = getattr(self, name, None)
+                if list_widget is not None and watched is list_widget.viewport():
+                    QTimer.singleShot(0, lambda lw=list_widget: self._ensure_likes_row_window(lw))
+                    self.schedule_visible_artwork(list_widget)
+                    break
         return super().eventFilter(watched, event)
 
     def layout_home_tiles(self):
@@ -7287,6 +7338,9 @@ class MusicPlayer(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, dict(track))
         item.setSizeHint(QSize(200, 72))
         list_widget.addItem(item)
+        self._create_result_row(list_widget, item, track, index_number)
+
+    def _create_result_row(self, list_widget, item, track, index_number):
         # TrackRow отображает artist_display (кредиты каталога), но сигнал клика
         # передаёт исходный track, где artist остаётся канонической целью профиля.
         youtube_rating_row = (
@@ -7337,6 +7391,14 @@ class MusicPlayer(QMainWindow):
             )
             row.favorite_button.setToolTip("Локальное избранное — не меняет лайки в аккаунтах")
         self.set_pixmap_safe(row.thumbnail_label, self.fallback_cover)
+        current = self.current_track or {}
+        matches = bool(current.get("url") and current.get("url") == track.get("url")
+                       and current.get("source") == track.get("source"))
+        row.set_playing(matches, matches and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        requested = self.requested_track or {}
+        if requested.get("url") == track.get("url") and requested.get("source") == track.get("source"):
+            row.set_loading(True)
+        return row
 
     def update_playing_row_highlight(self):
         """Подсветка сверяется по URL+источнику; на паузе строка остаётся зелёной."""
@@ -7501,16 +7563,19 @@ class MusicPlayer(QMainWindow):
         )
 
     def _rebuild_likes_widget(self, list_widget, tracks, kind):
+        self._likes_display_tracks[kind] = tracks
         self._likes_loading_more.add(kind)
         list_widget.setUpdatesEnabled(False)
         list_widget.clear()
+        self._likes_live_rows[kind].clear()
         end = min(len(tracks), self._likes_render_batch)
         for index in range(end):
-            self.add_result_to_list(list_widget, tracks[index], index + 1)
+            self._add_likes_item(list_widget, tracks[index])
         self._likes_rendered_counts[kind] = end
         self._likes_list_signatures[kind] = self._likes_signature(tracks)
         list_widget.setUpdatesEnabled(True)
         self._likes_loading_more.discard(kind)
+        self._ensure_likes_row_window(list_widget)
         if end:
             self.schedule_visible_artwork(list_widget)
 
@@ -7518,7 +7583,7 @@ class MusicPlayer(QMainWindow):
         kind = self._likes_kind_for_widget(list_widget)
         if not kind or kind in self._likes_loading_more:
             return
-        tracks = self._likes_tracks_for_kind(kind)
+        tracks = self._likes_display_tracks.get(kind, [])
         start = self._likes_rendered_counts.get(kind, 0)
         if start >= len(tracks):
             return
@@ -7526,18 +7591,63 @@ class MusicPlayer(QMainWindow):
         self._likes_loading_more.add(kind)
         list_widget.setUpdatesEnabled(False)
         for index in range(start, end):
-            self.add_result_to_list(list_widget, tracks[index], index + 1)
+            self._add_likes_item(list_widget, tracks[index])
         list_widget.setUpdatesEnabled(True)
         self._likes_rendered_counts[kind] = end
         self._likes_list_signatures[kind] = self._likes_signature(tracks)
         self._likes_loading_more.discard(kind)
+        self._ensure_likes_row_window(list_widget)
         self.schedule_visible_artwork(list_widget)
+
+    @staticmethod
+    def _add_likes_item(list_widget, track):
+        # Lightweight items keep ordering, selection and the scroll geometry.
+        # The expensive child widgets exist only around the viewport.
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, dict(track))
+        item.setSizeHint(QSize(200, 72))
+        list_widget.addItem(item)
+
+    def _ensure_likes_row_window(self, list_widget):
+        kind = self._likes_kind_for_widget(list_widget)
+        if not kind or kind in self._likes_loading_more or kind in self._likes_updating_window:
+            return
+        self._likes_updating_window.add(kind)
+        try:
+            count = list_widget.count()
+            top = list_widget.indexAt(QPoint(10, 8)).row() if list_widget.isVisible() else 0
+            if top < 0:
+                top = list_widget.verticalScrollBar().value() // (72 + 2 * list_widget.spacing())
+            visible = max(1, list_widget.viewport().height() // 72 + 2) if list_widget.isVisible() else 1
+            first = max(0, top - 8)
+            end = min(count, max(first + 24, top + visible + 8))
+            wanted = set(range(first, end))
+            live = self._likes_live_rows[kind]
+            focused = QApplication.focusWidget()
+            for index, row in list(live.items()):
+                item = list_widget.item(index)
+                attached = item is not None and list_widget.itemWidget(item) is row
+                if attached and index not in wanted and focused is not None and row.isAncestorOf(focused):
+                    continue
+                if not attached or index not in wanted:
+                    if attached:
+                        row._eq_timer.stop()
+                        row.hide()
+                        list_widget.removeItemWidget(item)  # Qt schedules deletion.
+                    live.pop(index, None)
+            for index in range(first, end):
+                if index not in live:
+                    item = list_widget.item(index)
+                    track = item.data(Qt.ItemDataRole.UserRole)
+                    live[index] = self._create_result_row(list_widget, item, track, index + 1)
+        finally:
+            self._likes_updating_window.discard(kind)
 
     def maybe_load_more_likes(self, list_widget):
         kind = self._likes_kind_for_widget(list_widget)
         if not kind or kind in self._likes_loading_more:
             return
-        tracks = self._likes_tracks_for_kind(kind)
+        tracks = self._likes_display_tracks.get(kind, [])
         if self._likes_rendered_counts.get(kind, 0) >= len(tracks):
             return
         # Пустой виджет сразу получает первую порцию: скролл для этого не нужен.
@@ -7559,9 +7669,10 @@ class MusicPlayer(QMainWindow):
         self.schedule_visible_artwork(list_widget)
         if list_widget in (self.youtube_likes_list, self.soundcloud_likes_list, self.likes_list):
             self.maybe_load_more_likes(list_widget)
+            self._ensure_likes_row_window(list_widget)
 
     def refresh_likes_list(self, append_soundcloud_tracks=None, force_rebuild=False):
-        """Обновляет счётчики и создаёт строки лайков порциями по 150 штук."""
+        """Обновляет данные списков; TrackRow создаются только рядом с экраном."""
         if not hasattr(self, "likes_list"):
             return
         youtube_tracks = self._youtube_likes_for_display()
@@ -7595,6 +7706,7 @@ class MusicPlayer(QMainWindow):
             "soundcloud": self._likes_tracks_for_kind("soundcloud"),
             "local": self._likes_tracks_for_kind("local"),
         }
+        self._likes_display_tracks = display_tracks
 
         if append_soundcloud_tracks is None:
             for list_widget, tracks, kind in (
@@ -7670,6 +7782,7 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.setTabText(1, f"SoundCloud · {len(soundcloud_tracks)}")
         self.likes_tabs.setTabText(2, f"Мои лайки · {len(local_tracks)}")
         self.likes_title.setText(f"{len(combined)} треков в библиотеке")
+        self.refresh_home_likes_counts({"youtube": len(youtube_tracks), "soundcloud": len(soundcloud_tracks)})
 
         if self.youtube_auth_mode == "browser" and self.youtube_auth_browser:
             profile_suffix = f" · профиль {self.youtube_auth_profile}" if self.youtube_auth_profile else ""
@@ -8092,6 +8205,7 @@ class MusicPlayer(QMainWindow):
         )
         self.youtube_sync_worker = worker
         self.refresh_connection_badge()
+        self.refresh_home_likes_counts()
         worker.results_ready.connect(lambda tracks, note, w=worker: self.on_youtube_likes_results(w, tracks, note))
         worker.failed.connect(lambda error, w=worker: self.on_youtube_likes_error(w, error))
         worker.finished.connect(lambda w=worker: self.on_youtube_likes_finished(w))
@@ -8131,6 +8245,8 @@ class MusicPlayer(QMainWindow):
                 self.youtube_liked_tracks = []
                 self._likes_rendered_counts["youtube"] = 0
                 self._likes_list_signatures.pop("youtube", None)
+                self._likes_display_tracks["youtube"] = []
+                self._likes_live_rows["youtube"].clear()
                 self.youtube_likes_list.clear()
             for existing in self.youtube_liked_tracks:
                 if isinstance(existing, dict) and existing.get("url"):
@@ -8172,6 +8288,7 @@ class MusicPlayer(QMainWindow):
             return
         self.youtube_sync_worker = None
         self.refresh_connection_badge()
+        self.refresh_home_likes_counts()
         if self._youtube_sync_error:
             # При неудачном обновлении сохраняем последний удачный импорт,
             # даже если worker успел показать промежуточную порцию.
@@ -9079,6 +9196,7 @@ class MusicPlayer(QMainWindow):
         lists = (self.youtube_likes_list, self.soundcloud_likes_list, self.likes_list)
         if 0 <= int(index) < len(lists):
             list_widget = lists[int(index)]
+            self._ensure_likes_row_window(list_widget)
             self.schedule_visible_artwork(list_widget)
             QTimer.singleShot(0, lambda lw=list_widget: self.maybe_load_more_likes(lw))
 
@@ -9101,6 +9219,7 @@ class MusicPlayer(QMainWindow):
     def load_visible_artwork(self, list_widget):
         if list_widget is None or not list_widget.isVisible():
             return
+        self._ensure_likes_row_window(list_widget)
         viewport = list_widget.viewport()
         if viewport is None or viewport.width() <= 0 or viewport.height() <= 0:
             return
@@ -9251,10 +9370,19 @@ class MusicPlayer(QMainWindow):
     def set_pixmap_safe(self, label, image):
         try:
             side = max(1, min(label.width(), label.height()))
-            if bool(label.property("circular_image")):
-                label.setPixmap(circular_pixmap(image, side))
+            ratio = label.devicePixelRatioF()
+            circular = bool(label.property("circular_image"))
+            key = (image.cacheKey(), side, ratio, circular)
+            rendered = self.thumbnail_cache.get(key)
+            if rendered is None:
+                pixels = max(1, round(side * ratio))
+                rendered = (circular_pixmap(image, pixels) if circular else
+                            rounded_pixmap(image, pixels, round((13 if side >= 140 else 8) * ratio)))
+                rendered.setDevicePixelRatio(ratio)
+                self._cache_pixmap(self.thumbnail_cache, key, rendered, self.THUMBNAIL_CACHE_BYTES, 512)
             else:
-                label.setPixmap(rounded_pixmap(image, side, 13 if side >= 140 else 8))
+                self.thumbnail_cache.move_to_end(key)
+            label.setPixmap(rendered)
         except RuntimeError:
             # Пользователь сменил вкладку, QLabel уже удалён Qt.
             pass
@@ -9271,9 +9399,9 @@ class MusicPlayer(QMainWindow):
                 self.set_pixmap_safe(label, self.pixmap_cache[url])
             return
         if url in self.image_waiters:
-            self.image_waiters[url].append(label)
+            self.image_waiters[url].append(weakref.ref(label))
         else:
-            self.image_waiters[url] = [label]
+            self.image_waiters[url] = [weakref.ref(label)]
             self.image_backlog.append(url)
         self.pump_images()
 
@@ -9287,39 +9415,87 @@ class MusicPlayer(QMainWindow):
             card.set_cover(self.pixmap_cache[url])
             return
         if url in self.image_waiters:
-            self.image_waiters[url].append(card)
+            self.image_waiters[url].append(weakref.ref(card))
         else:
-            self.image_waiters[url] = [card]
+            self.image_waiters[url] = [weakref.ref(card)]
             self.image_backlog.append(url)
         self.pump_images()
 
     def pump_images(self):
         while self.active_images < self.image_limit and self.image_backlog:
             url = self.image_backlog.popleft()
+            targets = []
+            for reference in self.image_waiters.get(url, []):
+                target = reference()
+                try:
+                    if target is not None and target.property("requested_image") == url:
+                        targets.append(reference)
+                except RuntimeError:
+                    pass
+            if not targets:
+                self.image_waiters.pop(url, None)
+                continue
+            self.image_waiters[url] = targets
             self.active_images += 1
             request = QNetworkRequest(QUrl(url))
             request.setRawHeader(b"User-Agent", b"Mozilla/5.0")
+            request.setTransferTimeout(10_000)
             reply = self.network_manager.get(request)
+            reply.readyRead.connect(lambda r=reply: r.abort()
+                                    if r.bytesAvailable() > self.ARTWORK_MAX_DOWNLOAD else None)
             reply.finished.connect(lambda r=reply, u=url: self.image_finished(u, r))
 
+    @staticmethod
+    def _pixmap_bytes(pixmap):
+        return 0 if pixmap is None or pixmap.isNull() else pixmap.width() * pixmap.height() * pixmap.depth() // 8
+
+    @classmethod
+    def _cache_pixmap(cls, cache, key, pixmap, max_bytes, max_entries):
+        cache[key] = pixmap
+        cache.move_to_end(key)
+        used = sum(cls._pixmap_bytes(value) for value in cache.values())
+        while cache and (len(cache) > max_entries or used > max_bytes):
+            _, removed = cache.popitem(last=False)
+            used -= cls._pixmap_bytes(removed)
+
+    def _decode_artwork(self, data):
+        if not 0 < len(data) <= self.ARTWORK_MAX_DOWNLOAD:
+            return None
+        buffer = QBuffer()
+        buffer.setData(data)
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        reader = QImageReader(buffer)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if not size.isValid() or size.width() * size.height() > self.ARTWORK_MAX_PIXELS:
+            return None
+        bound = QSize(self.ARTWORK_MAX_SIDE, self.ARTWORK_MAX_SIDE)
+        if size.width() > bound.width() or size.height() > bound.height():
+            reader.setScaledSize(size.scaled(bound, Qt.AspectRatioMode.KeepAspectRatio))
+        image = reader.read()
+        if image.isNull():
+            return None
+        # Some image plugins ignore setScaledSize; bound the retained bitmap too.
+        if image.width() > bound.width() or image.height() > bound.height():
+            image = image.scaled(bound, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+        return QPixmap.fromImage(image)
+
     def image_finished(self, url, reply):
-        pixmap = QPixmap()
         try:
             data = bytes(reply.readAll())
-            if 0 < len(data) < 5_000_000 and pixmap.loadFromData(data):
-                self.pixmap_cache[url] = pixmap
-            else:
-                self.pixmap_cache[url] = None
-            self.pixmap_cache.move_to_end(url)
-            while len(self.pixmap_cache) > 250:
-                self.pixmap_cache.popitem(last=False)
-            for label in self.image_waiters.pop(url, []):
+            pixmap = self._decode_artwork(data)
+            self._cache_pixmap(self.pixmap_cache, url, pixmap, self.ARTWORK_CACHE_BYTES, 250)
+            for reference in self.image_waiters.pop(url, []):
+                label = reference()
+                if label is None:
+                    continue
                 # Проверяем URL, чтобы старая загрузка не заменила новую обложку.
                 try:
                     is_current = label.property("requested_image") == url
                 except RuntimeError:
                     continue
-                if is_current and self.pixmap_cache[url] is not None:
+                if is_current and pixmap is not None:
                     if isinstance(label, SpotifyPlaylistCard):
                         label.set_cover(pixmap)
                     else:

@@ -1,4 +1,5 @@
 import importlib.util
+import gc
 import math
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from unittest.mock import patch
 import wave
 
@@ -23,7 +25,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QEventLoop, QSettings
-from PyQt6.QtGui import QEnterEvent
+from PyQt6.QtGui import QEnterEvent, QImage
 app = m.QApplication([])
 app.setStyle('Fusion')
 app.setQuitOnLastWindowClosed(False)
@@ -680,7 +682,7 @@ class PlayerChanges(unittest.TestCase):
             self.w._update_supermix_cover()
             pump.assert_called_once()
         self.assertEqual(card.property('requested_image'), cover_url)
-        self.assertEqual(self.w.image_waiters[cover_url], [card])
+        self.assertEqual([reference() for reference in self.w.image_waiters[cover_url]], [card])
         self.assertIn(cover_url, self.w.image_backlog)
         self.assertIsNone(card._cover_pixmap)
         self.assertEqual(card._artwork.cacheKey(), original_artwork)
@@ -1075,6 +1077,324 @@ class PlayerChanges(unittest.TestCase):
         self.w.maybe_load_more_likes(self.w.youtube_likes_list)
         self.assertIs(first, self.w.youtube_likes_list.itemWidget(self.w.youtube_likes_list.item(0)))
         self.assertEqual(len(self.visible_youtube_ids()), 5)
+
+    def large_library_fixture(self, count=600):
+        w = self.w
+        tracks = [self.youtube_track(f'window{i:05}') for i in range(count)]
+        w.youtube_liked_tracks = tracks
+        w.refresh_likes_list(force_rebuild=True)
+        w.set_source('likes')
+        while w._likes_rendered_counts['youtube'] < count:
+            w._append_likes_rows(w.youtube_likes_list)
+        app.processEvents()
+        return tracks
+
+    def settle_row_deletions(self):
+        app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+    def test_large_library_keeps_all_items_but_only_visible_nearby_widgets(self):
+        w = self.w
+        tracks = self.large_library_fixture()
+        lw = w.youtube_likes_list
+        for index in (400, 100, 599, 0):
+            lw.scrollToItem(lw.item(index), m.QListWidget.ScrollHint.PositionAtTop)
+            self.settle_row_deletions()
+            self.assertEqual(lw.count(), len(tracks))
+            self.assertLess(len(lw.findChildren(m.TrackRow)), 45)
+            row = lw.itemWidget(lw.item(index))
+            self.assertIsInstance(row, m.TrackRow)
+            self.assertEqual(row.track['video_id'], tracks[index]['video_id'])
+            for y in range(8, lw.viewport().height() - 8, 76):
+                item = lw.itemAt(m.QPoint(10, y))
+                if item is not None:
+                    self.assertIsInstance(lw.itemWidget(item), m.TrackRow)
+            with patch.object(w, 'play_youtube_likes_from') as play:
+                row.play_button.click()
+                play.assert_called_once_with(tracks[index])
+        self.assertEqual(self.visible_youtube_ids(), [t['video_id'] for t in tracks])
+
+    def test_offscreen_current_and_loading_rows_restore_state_when_recreated(self):
+        w = self.w
+        tracks = self.large_library_fixture()
+        lw = w.youtube_likes_list
+        w.current_track = tracks[400]
+        w.requested_track = tracks[500]
+        for index in (400, 500, 0, 400, 500):
+            lw.scrollToItem(lw.item(index), m.QListWidget.ScrollHint.PositionAtTop)
+            self.settle_row_deletions()
+            row = lw.itemWidget(lw.item(index))
+            if index == 400:
+                self.assertTrue(row._is_current)
+                self.assertFalse(row._loading)
+            elif index == 500:
+                self.assertTrue(row._loading)
+                self.assertEqual(row.index_label.text(), '⏳')
+
+    def test_virtual_library_search_and_unlike_failure_restore_the_correct_track(self):
+        w = self.w
+        tracks = self.large_library_fixture()
+        target = tracks[400]
+        w.likes_search_input.setText(target['title'])
+        self.settle_row_deletions()
+        lw = w.youtube_likes_list
+        self.assertEqual(lw.count(), 1)
+        self.assertEqual(lw.itemWidget(lw.item(0)).track, target)
+        self.request_like(target, False)
+        self.assertEqual(lw.count(), 0)
+        with patch.object(m.QMessageBox, 'warning'):
+            w.on_youtube_music_like_result(target, False, False, 'Network failure')
+        self.settle_row_deletions()
+        self.assertEqual(lw.count(), 1)
+        self.assertEqual(lw.itemWidget(lw.item(0)).track['video_id'], target['video_id'])
+        self.assertTrue(lw.itemWidget(lw.item(0)).favorite_button.isChecked())
+        w.likes_search_input.clear()
+        self.settle_row_deletions()
+        self.assertEqual(lw.count(), w._likes_render_batch)
+        self.assertLess(len(lw.findChildren(m.TrackRow)), 45)
+
+    def test_soundcloud_and_local_library_rows_are_windowed_and_dispatch_actions(self):
+        w = self.w
+        with patch.object(w, 'queue_artwork_lookup'):
+            for source, lw, tab in (('soundcloud', w.soundcloud_likes_list, 1), ('local', w.likes_list, 2)):
+                tracks = [{'source': source, 'url': f'https://example.invalid/{source}/{i}',
+                           'title': f'{source} {i}'} for i in range(350)]
+                if source == 'soundcloud':
+                    w.soundcloud_liked_tracks = tracks
+                else:
+                    w.favorites = {w.favorite_key(t): t for t in tracks}
+                w.refresh_likes_list(force_rebuild=True)
+                w.set_source('likes')
+                w.likes_tabs.setCurrentIndex(tab)
+                kind = w._likes_kind_for_widget(lw)
+                while w._likes_rendered_counts[kind] < len(tracks):
+                    w._append_likes_rows(lw)
+                lw.scrollToItem(lw.item(300), m.QListWidget.ScrollHint.PositionAtTop)
+                self.settle_row_deletions()
+                row = lw.itemWidget(lw.item(300))
+                self.assertIsInstance(row, m.TrackRow)
+                self.assertLess(len(lw.findChildren(m.TrackRow)), 45)
+                method = 'play_soundcloud_likes_from' if source == 'soundcloud' else 'add_to_queue'
+                with patch.object(w, method) as play:
+                    row.play_button.click()
+                    self.assertEqual(play.call_args.args[0]['url'], tracks[300]['url'])
+
+    @staticmethod
+    def encoded_image(width=2048, height=1024, color='#426699', fmt='JPEG'):
+        image = QImage(width, height, QImage.Format.Format_RGB32)
+        image.fill(m.QColor(color))
+        buffer = m.QBuffer()
+        buffer.open(m.QIODevice.OpenModeFlag.WriteOnly)
+        assert image.save(buffer, fmt)
+        return bytes(buffer.data())
+
+    def test_large_artwork_is_decoded_to_display_resolution_and_bad_images_are_ignored(self):
+        w = self.w
+        pixmap = w._decode_artwork(self.encoded_image())
+        self.assertEqual(pixmap.size(), m.QSize(768, 384))
+        self.assertIsNone(w._decode_artwork(b'not an image'))
+        self.assertIsNone(w._decode_artwork(b''))
+        with patch.object(m, 'QImageReader') as reader:
+            reader.return_value.size.return_value = m.QSize(10000, 10000)
+            self.assertIsNone(w._decode_artwork(b'header'))
+            reader.return_value.read.assert_not_called()
+
+    def test_artwork_cache_is_bounded_by_bytes_and_preserves_recently_used_entries(self):
+        w = self.w
+        cache = w.pixmap_cache
+        cache.clear()
+        image = m.QPixmap(32, 32)
+        image.fill(m.QColor('blue'))
+        size = w._pixmap_bytes(image)
+        for key in ('a', 'b'):
+            w._cache_pixmap(cache, key, image, size * 2, 250)
+        cache.move_to_end('a')
+        w._cache_pixmap(cache, 'c', image, size * 2, 250)
+        self.assertEqual(list(cache), ['a', 'c'])
+        w._cache_pixmap(cache, 'c', image, size * 2, 250)
+        self.assertLessEqual(sum(w._pixmap_bytes(p) for p in cache.values()), size * 2)
+        for index in range(260):
+            w._cache_pixmap(cache, str(index), None, size * 2, 250)
+        self.assertEqual(len(cache), 250)
+
+    def test_repeated_album_thumbnails_share_pixels_and_respect_high_dpi(self):
+        w = self.w
+        labels = [m.QLabel(), m.QLabel()]
+        source = m.QPixmap(512, 512)
+        source.fill(m.QColor('blue'))
+        for label in labels:
+            label.setFixedSize(44, 44)
+            with patch.object(label, 'devicePixelRatioF', return_value=2.0):
+                w.set_pixmap_safe(label, source)
+        self.assertEqual(labels[0].pixmap().cacheKey(), labels[1].pixmap().cacheKey())
+        # Mocking the Python DPI accessor doesn't change QLabel's native DPI.
+        # Inspect the prepared bitmap before Qt adapts it for this 1x test screen.
+        rendered = w.thumbnail_cache[(source.cacheKey(), 44, 2.0, False)]
+        self.assertEqual(rendered.devicePixelRatioF(), 2)
+        self.assertEqual(rendered.size(), m.QSize(88, 88))
+        self.assertEqual(rendered.toImage().pixelColor(44, 44), m.QColor('blue'))
+
+    def test_completed_image_still_reaches_target_when_it_exceeds_cache_budget(self):
+        w = self.w
+        label = m.QLabel()
+        label.setFixedSize(44, 44)
+        url = 'https://example.invalid/cover.jpg'
+        data = self.encoded_image(128, 128, '#124599', 'PNG')
+        class Reply:
+            deleted = False
+            def readAll(self): return data
+            def deleteLater(self): self.deleted = True
+        reply = Reply()
+        with patch.object(w, 'pump_images'):
+            w.request_image(url, label)
+            w.ARTWORK_CACHE_BYTES = 1
+            w.image_finished(url, reply)
+        self.assertNotIn(url, w.pixmap_cache)
+        self.assertEqual(label.pixmap().toImage().pixelColor(22, 22), m.QColor('#124599'))
+        self.assertTrue(reply.deleted)
+
+    def test_cancelled_artwork_targets_are_not_retained_or_downloaded(self):
+        w = self.w
+        label = m.QLabel()
+        url = 'https://example.invalid/unneeded.jpg'
+        with patch.object(w, 'pump_images'):
+            w.request_image(url, label)
+        reference = weakref.ref(label)
+        del label
+        gc.collect()
+        self.assertIsNone(reference())
+        with patch.object(w.network_manager, 'get') as request:
+            w.pump_images()
+            request.assert_not_called()
+        self.assertNotIn(url, w.image_waiters)
+        self.assertFalse(w.image_backlog)
+
+    def test_late_artwork_cannot_replace_a_newer_image_request(self):
+        w = self.w
+        label = m.QLabel()
+        label.setFixedSize(44, 44)
+        old_url = 'https://example.invalid/old.jpg'
+        new_url = 'https://example.invalid/new.jpg'
+        data = self.encoded_image(128, 128, 'red', 'PNG')
+        class Reply:
+            def readAll(self): return data
+            def deleteLater(self): pass
+        with patch.object(w, 'pump_images'):
+            w.request_image(old_url, label)
+            w.request_image(new_url, label)
+            expected = label.pixmap().cacheKey()
+            w.image_finished(old_url, Reply())
+        self.assertEqual(label.property('requested_image'), new_url)
+        self.assertEqual(label.pixmap().cacheKey(), expected)
+
+    def test_real_http_artwork_download_is_bounded_and_displays_valid_image(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        w = self.w
+        encoded = self.encoded_image(128, 128, '#124599', 'PNG')
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = encoded if self.path == '/valid.png' else b'x' * 8192
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            def log_message(self, *args): pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        normal, oversized = m.QLabel(), m.QLabel()
+        normal.setFixedSize(44, 44)
+        oversized.setFixedSize(44, 44)
+        w.ARTWORK_MAX_DOWNLOAD = 1024
+        try:
+            # Production normalizes HTTP artwork URLs to HTTPS. This fixture is
+            # a plain loopback HTTP server; leave TLS policy itself unchanged.
+            with patch.object(m, 'normalize_artwork_url', side_effect=lambda url: url), \
+                 patch.object(w.network_manager, 'get', wraps=w.network_manager.get) as get:
+                w.request_image(base + '/valid.png', normal)
+                w.request_image(base + '/oversized.png', oversized)
+                wait_for(lambda: w.active_images == 0)
+                self.assertEqual(get.call_count, 2)
+                self.assertTrue(all(call.args[0].transferTimeout() == 10000 for call in get.call_args_list))
+            self.assertEqual(normal.pixmap().toImage().pixelColor(22, 22), m.QColor('#124599'))
+            self.assertIsNone(w.pixmap_cache[base + '/oversized.png'])
+            self.assertFalse(w.image_waiters)
+            self.assertFalse(w.image_backlog)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+    def test_home_counts_follow_sync_pages_without_replacing_supermix_card(self):
+        w = self.w
+        mix = w.start_cards[1]
+        likes_card = w.start_cards[0]
+        worker = self.begin_sync()
+        self.assertIn('обновление', likes_card.subtitle)
+        tracks = [self.youtube_track(f'page{i:07}') for i in range(7)]
+        w.on_youtube_likes_results(worker, tracks[:3], '__SC_LIKES_PAGE__:3')
+        self.assertEqual(likes_card.subtitle, '3 трека · обновление…')
+        self.assertIn('3', w.likes_tabs.tabText(0))
+        w.on_youtube_likes_results(worker, tracks[3:], '__SC_LIKES_PAGE__:7')
+        self.assertIn('7 треков', likes_card.subtitle)
+        w.on_youtube_likes_results(worker, [], '__SC_LIKES_DONE__:7')
+        w.on_youtube_likes_finished(worker)
+        self.assertEqual(likes_card.subtitle, '7 любимых треков')
+        self.assertIs(w.start_cards[1], mix)
+        self.assertIs(w.start_cards[0], likes_card)
+
+    def test_home_counts_include_pending_likes_and_rollback_for_both_services(self):
+        w = self.w
+        track = self.youtube_track('countlike01')
+        self.request_like(track, True)
+        self.assertEqual(w.start_cards[0].subtitle, '1 любимый трек')
+        self.assertIn('1', w.likes_tabs.tabText(0))
+        with patch.object(m.QMessageBox, 'warning'):
+            w.on_youtube_music_like_result(track, True, False, 'Rejected')
+        self.assertEqual(w.start_cards[0].subtitle, 'Вся твоя любимая музыка')
+        w.set_source('soundcloud')
+        w.soundcloud_liked_tracks = [{'source': 'soundcloud', 'url': 'https://example.invalid/a', 'title': 'A'}]
+        w._soundcloud_likes_loading = True
+        w.refresh_likes_status_only()
+        self.assertEqual(w.start_cards[0].subtitle, '1 трек · обновление…')
+        self.assertIn('1', w.likes_tabs.tabText(1))
+        w._soundcloud_likes_loading = False
+        w.refresh_likes_status_only()
+        self.assertEqual(w.start_cards[0].subtitle, '1 любимый трек')
+
+    def test_first_sync_page_replaces_a_scrolled_virtual_library(self):
+        w = self.w
+        self.large_library_fixture()
+        lw = w.youtube_likes_list
+        lw.scrollToBottom()
+        self.settle_row_deletions()
+        worker = self.begin_sync()
+        tracks = [self.youtube_track('newpage0001'), self.youtube_track('newpage0002')]
+        w.on_youtube_likes_results(worker, tracks, '__SC_LIKES_PAGE__:2')
+        self.settle_row_deletions()
+        self.assertEqual(self.visible_youtube_ids(), [t['video_id'] for t in tracks])
+        self.assertEqual(len(lw.findChildren(m.TrackRow)), 2)
+        self.assertEqual(lw.itemWidget(lw.item(0)).track['video_id'], 'newpage0001')
+
+    def test_soundcloud_home_busy_count_follows_sync_start_error_and_finish(self):
+        w = self.w
+        w.set_source('soundcloud')
+        w.soundcloud_profile_url = 'https://soundcloud.com/example'
+        with patch.object(m, 'SearchWorker') as worker:
+            w.load_soundcloud_account_content(force=True)
+            self.assertEqual(w.start_cards[0].subtitle, '0 треков · обновление…')
+            w.on_soundcloud_account_error('likes', worker.return_value, 'Temporary failure')
+            self.assertEqual(w.start_cards[0].subtitle, 'Вся твоя любимая музыка')
+            w.on_soundcloud_account_finished('likes', worker.return_value)
+            w.load_soundcloud_account_content(force=True)
+            self.assertIn('обновление', w.start_cards[0].subtitle)
+            w.on_soundcloud_account_finished('likes', worker.return_value)
+            self.assertEqual(w.start_cards[0].subtitle, 'Вся твоя любимая музыка')
 
     def test_sync_pages_preserve_new_likes_and_unlikes(self):
         a, b, c = [self.youtube_track(key) for key in ('newlike0001', 'removed0001', 'remote00001')]
