@@ -1,7 +1,7 @@
 # Сборка EXE для Windows
 
 1. Установи **Python 3.13 или 3.12, 64-bit** с [python.org](https://www.python.org/downloads/windows/). При установке включи Python Launcher или добавление Python в PATH.
-2. Положи `build_exe.bat` рядом с актуальным `player_aurora_smart_beautiful_fixed_ui_repaint.py`. Также поддерживается имя `player.py`.
+2. Положи `build_exe.bat` рядом с актуальным `player_aurora_smart_beautiful_fixed_ui_repaint.py`. Также поддерживается имя `player.py`. Рядом нужны папки `assets` (с `aurora.ico`) и `fonts` из репозитория.
 3. Запусти `build_exe.bat` двойным щелчком и дождись **BUILD SUCCEEDED**. Для установки зависимостей нужен интернет; права администратора не требуются.
 4. Готовый плеер: **`dist\AuroraMusicPlayer\AuroraMusicPlayer.exe`**.
 
@@ -11,6 +11,10 @@ PyQt6, yt-dlp с дополнительными зависимостями и yt
 включаются вместе с данными пакетов и динамически загружаемыми модулями.
 Папка `fonts` включается целиком: шрифт Inter с кириллицей и его лицензия
 SIL OFL 1.1. Отдельная установка шрифта не требуется.
+Иконка `assets\aurora.ico` включается в ресурс EXE через `--icon` и в данные
+приложения через `--add-data`. Она содержит размеры 16–256 px; дополнительных
+библиотек для её сборки не требуется. Для изменения исходной отрисовки см.
+[assets/README.md](assets/README.md).
 При повторной сборке окружение используется снова, зависимости обновляются.
 
 По умолчанию создаётся папка с EXE без консольного окна и зависимостями в
@@ -40,7 +44,7 @@ build_exe.bat debug
 `%LOCALAPPDATA%\AuroraMusicPlayer\player.log`.
 
 Сборка Windows EXE выполняется на Windows. Проверка исходников и инструкции
-в Linux не подтверждают работу готового EXE на Windows.
+в Linux не подтверждают работу готового EXE и вид системного заголовка на Windows.
 
 ## Автоматическая сборка на GitHub
 

@@ -29,6 +29,7 @@ from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QEventLoop, QSettings
 from PyQt6.QtGui import QEnterEvent, QImage
 app = m.QApplication([])
+m.configure_application(app)
 app.setStyle('Fusion')
 m.setup_font(app)
 app.setQuitOnLastWindowClosed(False)
@@ -434,6 +435,105 @@ class PlayerChanges(unittest.TestCase):
         self.assertEqual(len(w.recent_rows), 12)
         self.assertTrue(w.recent_more_button.isHidden())
         self.assertEqual(w.recent_tracks, [])
+
+    def test_application_icon_is_valid_at_shell_sizes_and_keeps_existing_data_location(self):
+        original_name = app.applicationName()
+        original_location = m.QStandardPaths.writableLocation(m.QStandardPaths.StandardLocation.AppDataLocation)
+        m.configure_application(app)
+        self.assertEqual(app.applicationName(), original_name)
+        self.assertEqual(m.QStandardPaths.writableLocation(m.QStandardPaths.StandardLocation.AppDataLocation), original_location)
+        for side in (16, 32, 48, 256):
+            self.assertFalse(app.windowIcon().pixmap(side, side).isNull())
+        self.assertEqual(self.w.windowIcon().cacheKey(), app.windowIcon().cacheKey())
+        dialog = m.SettingsDialog(self.w)
+        self.assertEqual(dialog.windowIcon().cacheKey(), app.windowIcon().cacheKey())
+        data = (ROOT / 'assets' / 'aurora.ico').read_bytes()
+        self.assertEqual(struct.unpack_from('<HHH', data), (0, 1, 7))
+        sizes = []
+        for index in range(7):
+            width, height, _, _, _, bits, length, offset = struct.unpack_from('<BBBBHHII', data, 6 + 16 * index)
+            width, height = width or 256, height or 256
+            image = QImage.fromData(data[offset:offset + length])
+            self.assertEqual(image.size(), m.QSize(width, height))
+            self.assertEqual(bits, 32)
+            sizes.append(width)
+        self.assertEqual(sizes, [16, 24, 32, 48, 64, 128, 256])
+
+    def test_windows_title_bar_colors_use_colorref_and_pointer_sized_handles(self):
+        from types import SimpleNamespace
+        calls = []
+        def attribute(hwnd, number, pointer, size):
+            calls.append((hwnd.value, number, pointer._obj.value, size))
+            return 0
+        from unittest.mock import Mock
+        api = SimpleNamespace(DwmSetWindowAttribute=Mock(side_effect=attribute))
+        with patch.object(m.sys, 'platform', 'win32'), \
+             patch.object(self.w, 'effectiveWinId', return_value=0x123456789):
+            self.assertTrue(m.apply_native_title_bar(self.w, 'dark', dwm_api=api))
+            values = {number: value for _, number, value, _ in calls}
+            self.assertEqual(values[20], 1)
+            self.assertEqual(values[35], 0x100D0B)
+            self.assertEqual(values[36], 0xF5EEE9)
+            self.assertTrue(all(hwnd == 0x123456789 and size == 4 for hwnd, _, _, size in calls))
+            calls.clear()
+            self.assertTrue(m.apply_native_title_bar(self.w, 'light', dwm_api=api))
+            values = {number: value for _, number, value, _ in calls}
+            self.assertEqual(values[20], 0)
+            self.assertEqual(values[35], 0xF2EDE9)
+
+    def test_windows_caption_redraws_immediately_after_theme_change(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        dwm = SimpleNamespace(DwmSetWindowAttribute=Mock(return_value=0))
+        redraw = Mock(return_value=1)
+        dll = SimpleNamespace(user32=SimpleNamespace(RedrawWindow=redraw))
+        with patch.object(m.sys, 'platform', 'win32'), \
+             patch.object(self.w, 'effectiveWinId', return_value=123), \
+             patch.object(m.ctypes, 'WinDLL', return_value=dwm, create=True), \
+             patch.object(m.ctypes, 'windll', dll, create=True):
+            self.assertTrue(m.apply_native_title_bar(self.w, 'dark'))
+            self.assertEqual(redraw.call_args.args[0].value, 123)
+            self.assertEqual(redraw.call_args.args[3], 0x0501)
+            redraw.side_effect = OSError('redraw unavailable')
+            self.assertTrue(m.apply_native_title_bar(self.w, 'light'))
+
+    def test_windows_title_bar_falls_back_for_older_windows_and_ignores_unsupported_api(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        api = SimpleNamespace(DwmSetWindowAttribute=Mock(side_effect=lambda _h, n, _p, _s: 0 if n == 19 else -1))
+        with patch.object(m.sys, 'platform', 'win32'), patch.object(self.w, 'effectiveWinId', return_value=123):
+            self.assertTrue(m.apply_native_title_bar(self.w, 'dark', dwm_api=api))
+            self.assertEqual([call.args[1] for call in api.DwmSetWindowAttribute.call_args_list][:2], [20, 19])
+            api.DwmSetWindowAttribute.side_effect = OSError('unsupported')
+            self.assertFalse(m.apply_native_title_bar(self.w, 'dark', dwm_api=api))
+
+    def test_native_chrome_follows_owner_theme_and_keeps_mini_player_frameless(self):
+        watcher = m.NativeTitleBarFilter(app)
+        dialog = m.SettingsDialog(self.w)
+        mini = m.MiniPlayer(self.w)
+        with patch.object(m, 'apply_native_title_bar') as apply:
+            watcher.eventFilter(dialog, QEvent(QEvent.Type.Show))
+            apply.assert_called_once_with(dialog, 'dark')
+            self.w.theme = 'light'
+            watcher.eventFilter(dialog, QEvent(QEvent.Type.WinIdChange))
+            apply.assert_called_with(dialog, 'light')
+            apply.reset_mock()
+            watcher.eventFilter(mini, QEvent(QEvent.Type.Show))
+            apply.assert_not_called()
+        self.assertTrue(mini.windowFlags() & m.Qt.WindowType.FramelessWindowHint)
+
+    def test_windows_taskbar_identity_is_stable_and_optional_on_other_platforms(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        identity = Mock(return_value=0)
+        dll = SimpleNamespace(shell32=SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=identity))
+        with patch.object(m.sys, 'platform', 'win32'), patch.object(m.ctypes, 'windll', dll, create=True):
+            self.assertTrue(m.set_windows_app_id())
+            identity.assert_called_once_with('AuroraLocal.MusicPlayer')
+            identity.side_effect = OSError('unsupported')
+            self.assertFalse(m.set_windows_app_id())
+        with patch.object(m.sys, 'platform', 'linux'):
+            self.assertFalse(m.set_windows_app_id())
 
     def test_bundled_font_supports_cyrillic(self):
         self.assertIn('Inter', app.font().family())

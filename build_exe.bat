@@ -10,6 +10,7 @@ if errorlevel 1 (
 )
 
 set "PLAYER_SOURCE=player_aurora_smart_beautiful_fixed_ui_repaint.py"
+set "PLAYER_ICON=assets\aurora.ico"
 set "PLAYER_NAME=AuroraMusicPlayer"
 set "PLAYER_WINDOW_OPTION=--windowed"
 set "PLAYER_BUILD_PYTHON=.build-venv\Scripts\python.exe"
@@ -33,6 +34,7 @@ if "%PLAYER_BUILD_MODE%"=="--onefile" set "PLAYER_OUTPUT=dist\%PLAYER_NAME%.exe"
 
 if not exist "%PLAYER_SOURCE%" if exist "player.py" set "PLAYER_SOURCE=player.py"
 if not exist "%PLAYER_SOURCE%" goto missing_source
+if not exist "%PLAYER_ICON%" goto missing_icon
 if exist "%PLAYER_BUILD_PYTHON%" goto dependencies
 
 echo [1/3] Looking for Python and creating the build environment...
@@ -59,7 +61,7 @@ if errorlevel 1 goto failed
 if exist "fonts\" set "PLAYER_FONT_OPTIONS=--add-data=fonts:fonts"
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "assets:assets" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
 if not exist "%PLAYER_OUTPUT%" goto failed
 
@@ -72,6 +74,10 @@ goto success
 
 :missing_source
 echo ERROR: Put build_exe.bat next to %PLAYER_SOURCE% and try again.
+goto failed
+
+:missing_icon
+echo ERROR: The assets folder with aurora.ico is missing. Download the full repository.
 goto failed
 
 :missing_python

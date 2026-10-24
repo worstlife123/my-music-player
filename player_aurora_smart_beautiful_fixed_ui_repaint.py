@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR
+from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
     QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage,
@@ -47,8 +47,123 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 
+
+APP_USER_MODEL_ID = "AuroraLocal.MusicPlayer"
+_APP_ICON = None
+
+
+def application_icon():
+    global _APP_ICON
+    if _APP_ICON is None:
+        path = Path(__file__).resolve().parent / "assets" / "aurora.ico"
+        icon = QIcon(str(path)) if path.is_file() else QIcon()
+        if icon.isNull() or icon.pixmap(32, 32).isNull():
+            icon = QIcon()
+            for side in (16, 24, 32, 48, 64, 128, 256):
+                pixmap = make_service_artwork("brand", pixel_size=side)
+                pixmap.setDevicePixelRatio(1)
+                icon.addPixmap(pixmap)
+        _APP_ICON = icon
+    return QIcon(_APP_ICON)
+
+
+def set_windows_app_id():
+    if sys.platform != "win32":
+        return False
+    try:
+        function = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        function.argtypes = [ctypes.c_wchar_p]
+        function.restype = ctypes.c_int32
+        return function(APP_USER_MODEL_ID) >= 0
+    except (AttributeError, OSError):
+        logging.getLogger("aurora").debug("Windows AppUserModelID недоступен")
+        return False
+
+
+def native_window_theme(widget):
+    owner = widget
+    while owner is not None:
+        theme = getattr(owner, "theme", None)
+        if theme in ("dark", "light"):
+            return theme
+        owner = owner.parentWidget()
+    app = QApplication.instance()
+    return "light" if app is not None and app.property("auroraTheme") == "light" else "dark"
+
+
+def apply_native_title_bar(widget, theme, dwm_api=None):
+    """Color the native frame without replacing Windows sizing/Snap/system buttons."""
+    if (sys.platform != "win32" or not isinstance(widget, (QMainWindow, QDialog))
+            or not widget.isWindow() or widget.windowFlags() & Qt.WindowType.FramelessWindowHint):
+        return False
+    try:
+        handle = widget.effectiveWinId()
+        if not handle:
+            return False
+        api = dwm_api if dwm_api is not None else ctypes.WinDLL("dwmapi")
+        function = api.DwmSetWindowAttribute
+        function.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_int32
+        hwnd = ctypes.c_void_p(int(handle))
+        def attribute(number, value):
+            data = ctypes.c_uint32(value)
+            return function(hwnd, number, ctypes.byref(data), ctypes.sizeof(data)) >= 0
+        dark = theme != "light"
+        # Windows 10 builds use 19 or 20. Caption/text/border colors are Windows 11.
+        applied = attribute(20, int(dark))
+        if not applied:
+            applied = attribute(19, int(dark))
+        def colorref(hex_color):
+            color = QColor(hex_color)
+            return color.red() | color.green() << 8 | color.blue() << 16
+        background = colorref("#0B0D10" if dark else "#E9EDF2")
+        text = colorref("#E9EEF5" if dark else "#18202A")
+        for number, value in ((35, background), (36, text), (34, background)):
+            applied = attribute(number, value) or applied
+        if applied and dwm_api is None and widget.isVisible():
+            try:
+                redraw = ctypes.windll.user32.RedrawWindow
+                redraw.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+                redraw.restype = ctypes.c_int32
+                redraw(hwnd, None, None, 0x0501)  # INVALIDATE | UPDATENOW | FRAME
+            except (AttributeError, OSError):
+                pass
+        return applied
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Unsupported DWM attributes must never prevent opening the player.
+        logging.getLogger("aurora").debug("Оформление заголовка DWM недоступно")
+        return False
+
+
+class NativeTitleBarFilter(QObject):
+    def eventFilter(self, watched, event):
+        if (event.type() in (QEvent.Type.Show, QEvent.Type.WinIdChange)
+                and isinstance(watched, (QMainWindow, QDialog))
+                and watched.isWindow()
+                and not watched.windowFlags() & Qt.WindowType.FramelessWindowHint):
+            apply_native_title_bar(watched, native_window_theme(watched))
+        return False
+
+
+def configure_application(app):
+    app.setApplicationDisplayName("Aurora Music Player")
+    app.setWindowIcon(application_icon())
+    if sys.platform == "win32" and not hasattr(app, "_aurora_title_bar_filter"):
+        app._aurora_title_bar_filter = NativeTitleBarFilter(app)
+        app.installEventFilter(app._aurora_title_bar_filter)
+
+
+def refresh_native_title_bars(theme):
+    app = QApplication.instance()
+    if app is None:
+        return
+    app.setProperty("auroraTheme", theme)
+    if sys.platform == "win32":
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, (QMainWindow, QDialog)) and widget.isVisible():
+                apply_native_title_bar(widget, native_window_theme(widget))
 
 def yt_dlp_tls_options():
     """Проверяет HTTPS и учитывает явно настроенное системное хранилище CA."""
@@ -2528,12 +2643,13 @@ class PlayerBackdrop(QWidget):
         painter.end()
 
 
-def make_service_artwork(source):
+def make_service_artwork(source, pixel_size=80):
     """Small local artwork for navigation; no downloads or emoji fonts."""
-    pixmap = QPixmap(80, 80)
+    pixmap = QPixmap(pixel_size, pixel_size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(pixel_size / 80, pixel_size / 80)
     colors = {"youtube": ("#FF5469", "#C81036"), "soundcloud": ("#FFB15B", "#F15024"),
               "likes": ("#9A86FF", "#5B3AB1"), "brand": ("#73E9C1", "#3189A4")}
     start, end = colors.get(source, colors["brand"])
@@ -4480,6 +4596,7 @@ class MusicPlayer(QMainWindow):
         self._shuffle_history = deque(maxlen=min(20, 200))
         self._shuffle_weights_cache = {}
         self.setWindowTitle("Aurora Music Player")
+        self.setWindowIcon(application_icon())
         self.resize(1380, 860)
         self.setMinimumSize(1000, 650)
 
@@ -4683,7 +4800,7 @@ class MusicPlayer(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = None
             return
-        icon = QIcon(control_icon("play", "#1DB954").pixmap(32, 32))
+        icon = application_icon()
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip("Music Player · Green Edition")
         menu = QMenu(self)
@@ -5700,6 +5817,7 @@ class MusicPlayer(QMainWindow):
             """
         self.backdrop.set_appearance(self.theme, self.wallpaper_dim)
         self.setStyleSheet(dark_styles if self.theme == "dark" else dark_styles + light_styles)
+        refresh_native_title_bars(self.theme)
         if self.mini_player is not None:
             self.mini_player.apply_theme()
         icon_color = "#D2DAE5" if self.theme == "dark" else "#526075"
@@ -11598,7 +11716,11 @@ def run_smoke_test():
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.environ[variable] = str(path)
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        set_windows_app_id()
         app = QApplication([sys.argv[0]])
+        configure_application(app)
+        if app.windowIcon().pixmap(32, 32).isNull():
+            raise RuntimeError("Иконка приложения недоступна")
         app.setStyle("Fusion")
         setup_font(app)
         window = MusicPlayer(settings=QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat))
@@ -11637,7 +11759,9 @@ def main():
     if "--smoke-test" in sys.argv:
         sys.exit(run_smoke_test())
     setup_logging()
+    set_windows_app_id()
     app = QApplication(sys.argv)
+    configure_application(app)
     app.setStyle("Fusion")
     family = setup_font(app)
     window = MusicPlayer()

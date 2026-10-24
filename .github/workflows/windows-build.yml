@@ -8,6 +8,7 @@ on:
       - 'player_aurora_smart_beautiful_fixed_ui_repaint.py'
       - 'build_exe.bat'
       - 'fonts/**'
+      - 'assets/**'
       - 'tests/**'
       - '.github/workflows/windows-build.yml'
   workflow_dispatch:
