@@ -462,13 +462,14 @@ class PlayerChanges(unittest.TestCase):
         w.sidebar_settings_button.setFocus()
         app.processEvents()
         self.assertFalse(w.search_shell.property('focused'))
-        w.toggle_sidebar()
         w.nav_buttons[1].click()
         self.assertEqual(w.current_source, 'soundcloud')
-        self.assertTrue(w.brand_name.isHidden())
-        w.toggle_sidebar()
-        self.assertFalse(w.brand_name.isHidden())
+        self.assertEqual(w.sidebar.width(), 216)
         self.assertEqual(w.sidebar_settings_button.text(), 'Настройки')
+        w.settings.setValue('sidebar_collapsed', True)
+        with self.reopened_player() as restored:
+            self.assertEqual(restored.sidebar.width(), 216)
+            self.assertEqual(restored.sidebar_settings_button.text(), 'Настройки')
 
     def test_home_recent_tracks_are_scoped_to_service_and_play_the_selected_track(self):
         youtube = self.youtube_track('history0001')
@@ -2111,6 +2112,102 @@ class PlayerChanges(unittest.TestCase):
             record.assert_not_called()
             self.assertIsNone(w._network_recovery)
             self.assertEqual(w._network_recovery_attempts, 1)
+
+    def test_shortened_remote_duration_cannot_advance_at_the_middle_for_either_service(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        track['duration'] = 10
+        for source in ('youtube', 'soundcloud'):
+            with self.subTest(source=source), patch.object(w.player, 'duration', return_value=5000), \
+                 patch.object(w, 'handle_track_finished') as advance, \
+                 patch.object(w, 'start_stream_extraction') as extract:
+                track['source'] = source
+                w.current_track = track
+                w._network_recovery_attempts = 0
+                w.on_slot_duration(w.active_slot, 5000)
+                self.assertEqual(w.playback_duration_ms(), 10000)
+                self.assertEqual(w.seek_slider.maximum(), 10000)
+                w.on_slot_position(w.active_slot, 4800)
+                self.assertFalse(w._finish_transition_pending)
+                w.on_slot_status(w.active_slot, m.QMediaPlayer.MediaStatus.EndOfMedia)
+                extract.assert_called_once_with(track)
+                self.assertEqual(w._network_recovery['duration'], 10000)
+                self.assertEqual(w._network_recovery['position'], 4800)
+                advance.assert_not_called()
+                w.cancel_pending_request(cancel_supermix=False)
+
+    def test_watchdog_still_recovers_when_qt_claims_a_shorter_duration(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        track['duration'] = 10
+        w._last_duration = 5000
+        w._last_progress_position = 5000
+        w._last_progress_at = time.monotonic() - 20
+        with patch.object(w, 'recover_current_stream') as recover:
+            w.check_playback_health()
+            recover.assert_called_once()
+
+    def test_recovery_seek_uses_full_duration_not_partial_qt_duration(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        track['duration'] = 10
+        w._last_progress_position = 7000
+        with patch.object(w, 'start_stream_extraction'):
+            w.recover_current_stream('truncated stream')
+        slot = w.idle_slot()
+        media = m.QUrl('https://example.invalid/refreshed')
+        w.pending_slot = slot
+        w.pending_media_url = media
+        with patch.object(w.players[slot], 'source', return_value=media), \
+             patch.object(w.players[slot], 'duration', return_value=5000), \
+             patch.object(w.players[slot], 'isSeekable', return_value=True), \
+             patch.object(w.players[slot], 'setPosition') as seek:
+            w._apply_recovery_seek(slot)
+            seek.assert_called_once_with(7000)
+        self.assertEqual(w._network_recovery['position'], 7000)
+
+    def test_extracted_duration_updates_request_and_queue_without_signed_urls(self):
+        w = self.w
+        track = {**self.youtube_track('metadata001'), 'queue_id': 'stable'}
+        w.requested_track = dict(track)
+        w.queue_tracks = [dict(track)]
+        worker = m.StreamWorker(track)
+        metadata = QSignalSpy(worker.metadata_ready)
+        events = []
+        worker.metadata_ready.connect(lambda data: (events.append('metadata'), w.accept_stream_metadata(track['url'], data)))
+        worker.stream_ready.connect(lambda *_args: events.append('stream'))
+        info = {'url': 'https://r1.googlevideo.com/videoplayback?sig=PRIVATE',
+                'duration': 180, 'title': 'Test', 'format_id': '140', 'protocol': 'https'}
+        with patch.object(worker, '_extract', return_value=info):
+            worker.run()
+        self.assertEqual(events, ['metadata', 'stream'])
+        self.assertEqual(w.requested_track['duration'], 180)
+        self.assertEqual(w.queue_tracks[0]['duration'], 180)
+        self.assertEqual(w.queue_tracks[0]['queue_id'], 'stable')
+        self.assertEqual(metadata[0][0]['hostname'], 'r1.googlevideo.com')
+        self.assertNotIn('PRIVATE', str(metadata[0]))
+
+    def test_recovery_format_selector_chooses_an_alternative_and_keeps_single_format_tracks_playable(self):
+        for source, format_id in (('youtube', '140'), ('soundcloud', 'http_mp3_128')):
+            with self.subTest(source=source):
+                track = dict(self.youtube_track('format00001'), source=source)
+                worker = m.StreamWorker(track, avoid_format_id=format_id)
+                with patch.object(worker, '_extract', return_value={'url': 'https://example.invalid/audio'}) as extract:
+                    worker.run()
+                options = extract.call_args.args[0]
+                self.assertFalse(options['nocheckcertificate'])
+                formats = [
+                    {'format_id': format_id, 'url': 'https://example.invalid/old', 'acodec': 'aac',
+                     'vcodec': 'none', 'ext': 'm4a', 'protocol': 'https', 'abr': 128},
+                    {'format_id': '251', 'url': 'https://example.invalid/new', 'acodec': 'opus',
+                     'vcodec': 'none', 'ext': 'webm', 'protocol': 'https', 'abr': 160},
+                ]
+                with m.YoutubeDL({'quiet': True}) as downloader:
+                    selector = downloader.build_format_selector(options['format'])
+                    selected = list(selector({'formats': formats, 'has_merged_format': False, 'incomplete_formats': False}))
+                    self.assertEqual(selected[0]['format_id'], '251')
+                    selected = list(selector({'formats': formats[:1], 'has_merged_format': False, 'incomplete_formats': False}))
+                    self.assertEqual(selected[0]['format_id'], format_id)
 
     def test_network_recovery_seek_event_alone_cannot_commit_playback(self):
         w = self.w

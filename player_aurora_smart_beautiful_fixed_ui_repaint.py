@@ -2220,14 +2220,16 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
 class StreamWorker(QThread):
     # Ссылка, название и время её получения (секунды).
     stream_ready = pyqtSignal(str, str, float)
+    metadata_ready = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, track, parent=None, cookie_file=None, cookies_from_browser=None, audio_quality="auto"):
+    def __init__(self, track, parent=None, cookie_file=None, cookies_from_browser=None, audio_quality="auto", avoid_format_id=""):
         super().__init__(parent)
         self.track = dict(track)
         self.cookie_file = str(cookie_file or "").strip()
         self.cookies_from_browser = str(cookies_from_browser or "").strip()
         self.audio_quality = str(audio_quality or "auto")
+        self.avoid_format_id = str(avoid_format_id or "")
         self._cancel_requested = False
 
     def cancel(self):
@@ -2260,9 +2262,14 @@ class StreamWorker(QThread):
             "economy": "bestaudio[abr<=128]/bestaudio/best",
             "compatibility": "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best",
         }
+        selector = format_options.get(self.audio_quality, format_options["auto"])
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
+            # Try a different available encoding first; retain a fallback for single-format tracks.
+            alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in selector.split("/"))
+            selector = alternate + "/" + selector
         options = {
             **yt_dlp_tls_options(),
-            "format": format_options.get(self.audio_quality, format_options["auto"]),
+            "format": selector,
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -2318,16 +2325,28 @@ class StreamWorker(QThread):
                     raise RuntimeError("Не найден доступный трек.")
 
             stream_url = info.get("url")
+            selected_info = info
             if not stream_url:
                 formats = info.get("requested_formats") or info.get("formats") or []
                 selected = next((f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")), None)
                 stream_url = selected.get("url") if selected else None
+                selected_info = selected or info
 
             if not stream_url:
                 raise RuntimeError("Не удалось получить аудиопоток: YouTube не вернул прямую ссылку.")
             title = info.get("title") or self.track.get("title") or "Трек"
             if self._cancel_requested:
                 return
+            try:
+                duration = float(info.get("duration") or 0)
+                if not math.isfinite(duration) or not 0 < duration <= 604800:
+                    duration = 0
+            except (TypeError, ValueError, OverflowError):
+                duration = 0
+            self.metadata_ready.emit({"duration": duration, "is_live": bool(info.get("is_live")),
+                                      "format_id": str(selected_info.get("format_id") or ""),
+                                      "protocol": str(selected_info.get("protocol") or ""),
+                                      "hostname": QUrl(stream_url).host()})
             self.stream_ready.emit(stream_url, title, time.perf_counter() - started)
         except Exception as error:
             if not self._cancel_requested:
@@ -3479,9 +3498,6 @@ class SettingsDialog(QDialog):
         )
         general_layout.addLayout(self._form_row("Тема оформления", self.theme_choice))
         self._add_group_label(general_layout, "ПАНЕЛИ")
-        self.compact_sidebar = QCheckBox("Сворачивать меню слева")
-        self.compact_sidebar.setChecked(player.sidebar_collapsed)
-        general_layout.addWidget(self.compact_sidebar)
         self.minimize_to_tray = QCheckBox("При закрытии окна сворачивать плеер в системный трей")
         self.minimize_to_tray.setChecked(player.minimize_to_tray)
         self.hide_on_minimize = QCheckBox("Скрывать окно в трей при нажатии кнопки сворачивания")
@@ -3851,8 +3867,6 @@ class SettingsDialog(QDialog):
         player.refresh_repeat_button()
         player.shuffle_button.setChecked(self.shuffle.isChecked())
         player.autoplay_playlists = self.autoplay_playlists.isChecked()
-        if player.sidebar_collapsed != self.compact_sidebar.isChecked():
-            player.toggle_sidebar()
         player.apply_styles()
         player.save_preferences()
         self.accept()
@@ -4452,7 +4466,6 @@ class MusicPlayer(QMainWindow):
         self.shuffle_future = None
         self._shuffle_history = deque(maxlen=min(20, 200))
         self._shuffle_weights_cache = {}
-        self.saved_sidebar = self.settings.value("sidebar_collapsed", False, type=bool)
         self.setWindowTitle("Aurora Music Player")
         self.resize(1380, 860)
         self.setMinimumSize(1000, 650)
@@ -4471,7 +4484,6 @@ class MusicPlayer(QMainWindow):
             self._youtube_last_sync_at = 0.0
         self.sort_mode = "relevance"
         self.result_limit = max(25, min(100, int(self.settings.value("search_limit", 50))))
-        self.sidebar_collapsed = False
         self.queue_open = False
         self.mini_player = None
         self._restored_playback = None
@@ -4541,6 +4553,7 @@ class MusicPlayer(QMainWindow):
 
         # Прямые ссылки временные и могут истекать; сохраняем их на 8 минут.
         self.stream_cache = {}
+        self._stream_details = OrderedDict()
         self.stream_cache_ttl = 8 * 60
         self._stream_workers = set()
         self.prefetch_worker = None
@@ -4641,8 +4654,6 @@ class MusicPlayer(QMainWindow):
         self.update_browse_empty_state()
         self.refresh_likes_list()
         self.show_cover("")
-        if self.saved_sidebar:
-            self.toggle_sidebar()
         self.refresh_repeat_button()
         self.shuffle_button.setChecked(self.shuffle_enabled)
         self.set_volume(int(round(self.volume * 100)))
@@ -4801,30 +4812,6 @@ class MusicPlayer(QMainWindow):
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(14, 20, 14, 16)
         side_layout.setSpacing(8)
-
-        top = QHBoxLayout()
-        top.setSpacing(9)
-        self.brand_mark = QLabel()
-        self.brand_mark.setPixmap(make_service_artwork("brand").scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        self.brand_mark.setObjectName("brandMark")
-        self.brand_mark.setFixedSize(32, 32)
-        self.brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.brand_name = QLabel("Aurora")
-        self.brand_name.setObjectName("brandName")
-        self.sidebar_toggle = QPushButton("‹")
-        self.sidebar_toggle.setObjectName("iconButton")
-        self.sidebar_toggle.setToolTip("Свернуть меню")
-        self.sidebar_toggle.setFixedSize(28, 32)
-        top.addWidget(self.brand_mark)
-        top.addWidget(self.brand_name)
-        top.addStretch(1)
-        top.addWidget(self.sidebar_toggle)
-        side_layout.addLayout(top)
-        side_layout.addSpacing(20)
-        self.menu_hint = QLabel("", self.sidebar)
-        self.menu_hint.setObjectName("eyebrow")
-        self.menu_hint.setContentsMargins(14, 0, 0, 8)
-        self.menu_hint.hide()
 
         self.nav_buttons = []
         self.nav_data = [
@@ -5662,8 +5649,6 @@ class MusicPlayer(QMainWindow):
             QSlider#seekSlider::handle:horizontal { background: #278454; }
         """
         dark_styles += r"""
-            QLabel#brandMark { background: transparent; color: #10251A; border-radius: 10px; font-size: 20px; font-weight: 800; }
-            QLabel#brandName { color: #F0F4F8; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
             QFrame#sidebarDivider { background: #252D37; }
             QFrame#searchBox { background: #1E242D; border: 1px solid #303A48; border-radius: 16px; }
             QFrame#searchBox[focused="true"] { border-color: #66CD94; background: #222B35; }
@@ -5675,8 +5660,6 @@ class MusicPlayer(QMainWindow):
             QPushButton#searchSubmit:disabled { background: #2A3C33; color: #899F93; }
         """
         light_styles += r"""
-            QLabel#brandMark { background: transparent; color: #237B4A; }
-            QLabel#brandName { color: #1C2938; }
             QFrame#sidebarDivider { background: #E0E6ED; }
             QFrame#searchBox { background: #F2F5F8; border-color: #D8E0EA; }
             QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #278454; }
@@ -5741,7 +5724,6 @@ class MusicPlayer(QMainWindow):
         for i, button in enumerate(self.nav_buttons):
             button.clicked.connect(lambda checked=False, index=i: self.set_source(self.nav_data[index][2]))
 
-        self.sidebar_toggle.clicked.connect(self.toggle_sidebar)
         self.queue_toggle.clicked.connect(self.toggle_queue)
         self.search_button.clicked.connect(self.start_search)
         self.back_button.clicked.connect(self.return_to_start_screen)
@@ -5898,7 +5880,7 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("hide_on_minimize", self.hide_on_minimize)
         self.settings.setValue("fade_duration_ms", self.fade_duration_ms)
         self.settings.setValue("fade_steps", round(self.fade_duration_ms / 30))
-        self.settings.setValue("sidebar_collapsed", self.sidebar_collapsed)
+        self.settings.remove("sidebar_collapsed")
         self.settings.setValue("repeat_mode", self.repeat_mode)
         self.settings.setValue("shuffle", self.shuffle_enabled)
         self.settings.setValue("autoplay_playlists", self.autoplay_playlists)
@@ -6396,25 +6378,8 @@ class MusicPlayer(QMainWindow):
         self._finish_guard_url = str((self.current_track or {}).get("url", ""))
 
     # ---------------------------------------------------------
-    # Сворачивание меню и показ очереди по требованию.
+    # Показ очереди по требованию.
     # ---------------------------------------------------------
-
-    def toggle_sidebar(self):
-        self.sidebar_collapsed = not self.sidebar_collapsed
-        collapsed = self.sidebar_collapsed
-        self.sidebar.setFixedWidth(72 if collapsed else 216)
-        self.sidebar.layout().setContentsMargins(8 if collapsed else 14, 20, 8 if collapsed else 14, 16)
-        self.menu_hint.hide()
-        self.brand_mark.setVisible(not collapsed)
-        self.brand_name.setVisible(not collapsed)
-        self.sidebar_settings_button.setText("" if collapsed else "Настройки")
-        self.sidebar_toggle.setText("›" if collapsed else "‹")
-        self.sidebar_toggle.setToolTip("Развернуть меню" if collapsed else "Свернуть меню")
-        for button, (icon, title, _) in zip(self.nav_buttons, self.nav_data):
-            if isinstance(button, AnimatedNavButton):
-                button.set_collapsed(collapsed)
-            else:
-                button.setText(icon if collapsed else f"{icon}    {title}")
 
     def toggle_queue(self):
         """Выдвигает очередь в самом приложении, не создавая новое окно."""
@@ -10720,6 +10685,8 @@ class MusicPlayer(QMainWindow):
         worker = StreamWorker(track, self, audio_quality=self.audio_quality,
                               **(self.youtube_auth_kwargs() if track.get("source") == "youtube" else {}))
         self.prefetch_worker = worker
+        worker.metadata_ready.connect(lambda data, k=key, w=worker:
+                                      self.accept_stream_metadata(k, data) if not w._cancel_requested else None)
         worker.stream_ready.connect(
             lambda stream, title, elapsed, k=key:
                 self.prefetch_ready(k, stream, title, elapsed)
@@ -10793,11 +10760,15 @@ class MusicPlayer(QMainWindow):
         self.stream_pending_track = None
         self.stream_target = key
         self.set_status("Получаю ссылку на новый трек, предыдущий пока играет…")
-        worker = StreamWorker(track, self, audio_quality=self.audio_quality,
+        avoid_format = self._stream_details.get(key, {}).get("format_id", "") if self._network_recovery is not None else ""
+        worker = StreamWorker(track, self, audio_quality=self.audio_quality, avoid_format_id=avoid_format,
                               **(self.youtube_auth_kwargs() if track.get("source") == "youtube" else {}))
         self.stream_worker = worker
         self._stream_workers.add(worker)
         key = self.stream_target
+        worker.metadata_ready.connect(lambda data, k=key, w=worker:
+                                      self.accept_stream_metadata(k, data)
+                                      if w is self.stream_worker and not w._cancel_requested else None)
         worker.stream_ready.connect(
             lambda stream, title, elapsed, k=key, w=worker:
                 self.stream_ready(k, stream, title, elapsed)
@@ -10857,6 +10828,43 @@ class MusicPlayer(QMainWindow):
             return
         self.start_stream_extraction(track)
 
+    @staticmethod
+    def track_duration_ms(track):
+        if not isinstance(track, dict) or track.get("is_live"):
+            return 0
+        try:
+            seconds = float(track.get("duration") or 0)
+            return int(seconds * 1000) if math.isfinite(seconds) and 0 < seconds <= 604800 else 0
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def accept_stream_metadata(self, key, data):
+        self._stream_details[key] = dict(data)
+        self._stream_details.move_to_end(key)
+        while len(self._stream_details) > 64:
+            self._stream_details.popitem(last=False)
+        duration = self.track_duration_ms(data)
+        queue_changed = False
+        for track in [self.requested_track, self.current_track, *self.queue_tracks]:
+            if isinstance(track, dict) and self._key(track) == key:
+                if duration or data.get("is_live"):
+                    changed = track.get("duration") != duration / 1000 or track.get("is_live", False) != data.get("is_live", False)
+                    track["duration"] = duration / 1000
+                    track["is_live"] = bool(data.get("is_live"))
+                    queue_changed |= changed
+        if queue_changed:
+            self.schedule_session_save()
+        # Signed URLs and cookies are deliberately excluded from diagnostics.
+        logging.getLogger("aurora").info("Аудиопоток: host=%s; format=%s; protocol=%s; duration_ms=%d",
+                                       data.get("hostname", ""), data.get("format_id", ""),
+                                       data.get("protocol", ""), duration)
+
+    def playback_duration_ms(self):
+        duration = self._last_duration
+        if self._remote_playback():
+            duration = max(duration, self.track_duration_ms(self.current_track))
+        return duration
+
     def stream_ready(self, key, stream_url, title, extraction_seconds):
         self.save_stream(key, stream_url, title)
         logging.getLogger("aurora").info(f"[Music Player] yt-dlp ({title}): {extraction_seconds:.1f} с")
@@ -10906,7 +10914,7 @@ class MusicPlayer(QMainWindow):
                 self._network_recovery = None
                 self._playback_wanted = False
                 self.playback_watchdog.stop()
-            self.set_status("Не удалось восстановить поток. Проверь подключение или VPN." if recovering else
+            self.set_status("Не удалось восстановить поток. Проверь доступ к аудиосерверу." if recovering else
                             "Не удалось получить аудиопоток. Предыдущий трек продолжает играть.")
             logging.getLogger("aurora").warning("Ошибка аудиопотока: %s", message)
             self.show_toast("Не удалось подготовить трек: " + str(message)[:180], 4500)
@@ -10998,7 +11006,7 @@ class MusicPlayer(QMainWindow):
                 and not self.player.source().isLocalFile())
 
     def _ended_early(self):
-        duration = self._last_duration
+        duration = self.playback_duration_ms()
         position = self._last_progress_position
         return duration > 0 and position > 0 and duration - position > 3000
 
@@ -11009,7 +11017,8 @@ class MusicPlayer(QMainWindow):
                 or self.pending_slot is not None
                 or self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState):
             return
-        if self._last_duration > 0 and self._last_progress_position >= self._last_duration - 800:
+        duration = self.playback_duration_ms()
+        if duration > 0 and self._last_progress_position >= duration - 800:
             return
         if time.monotonic() - self._last_progress_at >= self.PLAYBACK_STALL_SECONDS:
             self.recover_current_stream("нет данных от сервера")
@@ -11022,12 +11031,12 @@ class MusicPlayer(QMainWindow):
         if self._network_recovery_attempts >= self.MAX_STREAM_RECOVERIES:
             self._playback_wanted = False
             self.playback_watchdog.stop()
-            self.set_status("Поток снова оборвался. Проверь подключение или VPN и нажми ▶.")
-            self.show_toast("Сервер не отдаёт аудио. Проверь подключение или VPN.", 4500)
+            self.set_status("Аудиосервер недоступен. Проверь подключение и настройки «Запрета» или прокси, затем нажми ▶.")
+            self.show_toast("Не удалось получить аудио после повторных подключений.", 4500)
             return True
         track = dict(self.current_track)
         position = self._last_progress_position
-        duration = self._last_duration
+        duration = self.playback_duration_ms()
         self.cancel_pending_request(cancel_supermix=False)
         self._network_recovery_attempts += 1
         self._network_recovery = {"position": position, "duration": duration}
@@ -11052,6 +11061,8 @@ class MusicPlayer(QMainWindow):
                 or self.players[slot].source() != self.pending_media_url):
             return
         duration = self.players[slot].duration()
+        if not self.players[slot].source().isLocalFile():
+            duration = max(duration, self.track_duration_ms(self.requested_track), (recovery or {}).get("duration", 0))
         if duration > 0:
             position = min(position, max(0, duration - 1000))
             if recovery is not None:
@@ -11103,7 +11114,7 @@ class MusicPlayer(QMainWindow):
                 self._last_radio_refill_check = now
                 self.maybe_refill_radio()
 
-        duration = self.player.duration()
+        duration = self.playback_duration_ms() if self._remote_playback() else self.player.duration()
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         current_url = str((self.current_track or {}).get("url", ""))
         near_end = duration > 0 and position > 0 and 0 <= duration - position < 800
@@ -11135,7 +11146,8 @@ class MusicPlayer(QMainWindow):
         if slot != self.active_slot:
             return
         if duration > 0:
-            self._last_duration = duration
+            self._last_duration = max(self._last_duration, duration) if self._remote_playback() else duration
+        duration = self.playback_duration_ms() if self._remote_playback() else duration
         self.seek_slider.setRange(0, max(0, duration))
         self.seek_slider.setEnabled(duration > 0 and self.player.isSeekable())
         self.duration_label.setText(self.format_position(duration))
@@ -11158,6 +11170,9 @@ class MusicPlayer(QMainWindow):
             return
         else:
             if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                logging.getLogger("aurora").info("Конец потока: source=%s; host=%s; position_ms=%d; qt_duration_ms=%d; expected_ms=%d",
+                                               (self.current_track or {}).get("source", ""), self.player.source().host(),
+                                               self._last_progress_position, self.player.duration(), self.playback_duration_ms())
                 if self._ended_early() and self.recover_current_stream("поток завершился до конца трека"):
                     return
                 # Если радио уже догрузило новые треки, переходим к ним даже при guard
@@ -11234,6 +11249,7 @@ class MusicPlayer(QMainWindow):
             except (ValueError, TypeError, OverflowError):
                 self._last_duration = 0
         if self._remote_playback():
+            self._last_duration = max(self._last_duration, self.track_duration_ms(self.current_track), (recovery or {}).get("duration", 0))
             self.playback_watchdog.start()
         else:
             self.playback_watchdog.stop()
@@ -11354,7 +11370,7 @@ class MusicPlayer(QMainWindow):
                     self._network_recovery = None
                     self._playback_wanted = False
                     self.playback_watchdog.stop()
-                self.set_status("Не удалось восстановить поток. Проверь подключение или VPN." if recovering else
+                self.set_status("Не удалось восстановить поток. Проверь доступ к аудиосерверу." if recovering else
                                 "Новый трек не удалось открыть, старая музыка продолжает играть.")
                 self.show_toast(message or "Неподдерживаемый аудиопоток", 4500)
             return
