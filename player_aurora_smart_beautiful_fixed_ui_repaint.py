@@ -813,10 +813,6 @@ class SpotifyPlaylistCard(QPushButton):
 
     def enterEvent(self, event):
         self._hover_animation.stop()
-        if self.tile_mode or self._artwork is not None:
-            self._set_hover(1.0)
-            super().enterEvent(event)
-            return
         self._hover_animation.setStartValue(self._hover)
         self._hover_animation.setEndValue(1.0)
         self._hover_animation.start()
@@ -824,10 +820,6 @@ class SpotifyPlaylistCard(QPushButton):
 
     def leaveEvent(self, event):
         self._hover_animation.stop()
-        if self.tile_mode or self._artwork is not None:
-            self._set_hover(0.0)
-            super().leaveEvent(event)
-            return
         self._hover_animation.setStartValue(self._hover)
         self._hover_animation.setEndValue(0.0)
         self._hover_animation.start()
@@ -987,23 +979,28 @@ class SpotifyPlaylistCard(QPushButton):
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         active = self.playback_state in ("playing", "paused", "waiting")
         if active:
-            border = "#23834D" if light else "#48CB83"
-            background = "#E4F4EA" if light else "#172D23"
-        elif self._hover > 0:
-            border = "#C5D2E0" if light else "#384354"
-            background = "#EBF0F6" if light else "#212732"
+            border = QColor("#23834D" if light else "#389E63")
+            background = QColor("#E4F4EA" if light else "#162B22")
         else:
-            border = "#DCE3EC" if light else "#252C37"
-            background = "#F5F8FB" if light else "#181C24"
-        painter.setPen(QPen(QColor(border), 1.5 if active else 1.0))
-        painter.setBrush(QColor(background))
-        painter.drawRoundedRect(bounds, 16, 16)
+            bg_idle = QColor("#F5F8FB" if light else "#161B23")
+            bg_hover = QColor("#EBF0F6" if light else "#222936")
+            background = self._blend(bg_idle, bg_hover, self._hover)
+            border_idle = QColor(220, 227, 236, 255) if light else QColor(255, 255, 255, 15)
+            border_hover = QColor(197, 210, 224, 255) if light else QColor(255, 255, 255, 34)
+            border = self._blend(border_idle, border_hover, self._hover)
+        painter.setPen(QPen(border, 1.4 if active else 1.0))
+        painter.setBrush(background)
+        painter.drawRoundedRect(bounds, 14, 14)
         side = self.width() - 28
         cover = QRectF(14, 14, side, side)
         artwork = self._cover_pixmap if self._cover_pixmap is not None else self._artwork
         if artwork is not None and not artwork.isNull():
+            # Soft shadow under the square album artwork inside the card
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 28 if light else 75))
+            painter.drawRoundedRect(cover.translated(0, 4), 11, 11)
             path = QPainterPath()
-            path.addRoundedRect(cover, 12, 12)
+            path.addRoundedRect(cover, 10, 10)
             painter.save()
             painter.setClipPath(path)
             scaled = self._cover_for_size(artwork, side)
@@ -1013,29 +1010,40 @@ class SpotifyPlaylistCard(QPushButton):
             if active or self._hover > 0:
                 vignette = QLinearGradient(cover.topLeft(), cover.bottomLeft())
                 vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
-                vignette.setColorAt(0.65, QColor(0, 0, 0, 12))
-                vignette.setColorAt(1.0, QColor(0, 0, 0, 72))
+                vignette.setColorAt(0.6, QColor(0, 0, 0, int(14 * self._hover)))
+                vignette.setColorAt(1.0, QColor(0, 0, 0, int(75 * max(0.4, self._hover))))
                 painter.fillRect(cover, vignette)
             painter.restore()
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
-            painter.drawRoundedRect(cover, 12, 12)
+            painter.setPen(QPen(QColor(255, 255, 255, 22), 1))
+            painter.drawRoundedRect(cover, 10, 10)
         self._paint_playback_badge(painter, cover)
-        # Active Supermix controls the running session instead of starting another one.
-        button = QRectF(cover.right() - 44, cover.bottom() - 44, 36, 36)
+        # Spotify-style green floating action button that lifts smoothly on hover
+        lift = (1.0 - self._hover) * 3.5 if not active else 0.0
+        btn_size = 40.0
+        button = QRectF(cover.right() - btn_size - 8.0, cover.bottom() - btn_size - 8.0 + lift, btn_size, btn_size)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 65))
-        painter.drawEllipse(button.translated(0, 2))
-        painter.setBrush(QColor("#1ED760" if active or self._hover > 0 else "#FFFFFF"))
+        painter.setBrush(QColor(0, 0, 0, int(85 + 45 * self._hover)))
+        painter.drawEllipse(button.translated(0, 3))
+        btn_color = QColor("#1ED760") if (active or self._hover > 0.1) else QColor("#1DB954")
+        painter.setBrush(btn_color)
         painter.drawEllipse(button)
         action = "pause" if self.playback_state == "playing" else self.action_icon
-        draw_vector_icon(painter, action, button.adjusted(10, 10, -10, -10), "#0E1512")
+        draw_vector_icon(painter, action, button.adjusted(11, 11, -11, -11), "#0A140E")
         title_font = QFont(self.font().family(), 11, QFont.Weight.Bold)
         painter.setFont(title_font)
-        painter.setPen(QColor(("#1F7A46" if light else "#7CE6A6") if active else
-                              ("#16202C" if light else "#F4F7FA")))
-        painter.drawText(QRectF(14, cover.bottom() + 10, side, 24), Qt.AlignmentFlag.AlignVCenter,
+        painter.setPen(QColor(("#1F7A46" if light else "#68E59C") if active else
+                              ("#141C26" if light else "#F7F9FC")))
+        title_y = cover.bottom() + 10
+        painter.drawText(QRectF(14, title_y, side, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(side)))
+        subtitle_text = str(self.subtitle or "").strip()
+        if subtitle_text:
+            sub_font = QFont(self.font().family(), 9, QFont.Weight.Medium)
+            painter.setFont(sub_font)
+            painter.setPen(QColor("#5C697C" if light else "#98A4B5"))
+            painter.drawText(QRectF(14, title_y + 20, side, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             QFontMetrics(sub_font).elidedText(subtitle_text, Qt.TextElideMode.ElideRight, int(side)))
         painter.end()
 
     def paintEvent(self, event):
@@ -2931,16 +2939,30 @@ class AnimatedNavButton(QPushButton):
 
 class MarqueeLabel(QLabel):
     """Спокойный заголовок трека без дёрганья и без точки: длинный текст аккуратно сокращается троеточием."""
+    MAX_NATURAL_WIDTH = 215
+
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full_text = ""
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.setMaximumWidth(self.MAX_NATURAL_WIDTH)
         self.setText(text)
 
     def setText(self, text):
         self._full_text = str(text or "")
         super().setText(self._full_text)
+        self.updateGeometry()
         self.update()
+
+    def sizeHint(self):
+        base = super().sizeHint()
+        fm = QFontMetrics(self.font())
+        text_w = fm.horizontalAdvance(self._full_text) + 4 if self._full_text else 40
+        return QSize(min(self.MAX_NATURAL_WIDTH, max(36, text_w)), base.height())
+
+    def minimumSizeHint(self):
+        return QSize(36, super().minimumSizeHint().height())
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -5603,7 +5625,8 @@ class MusicPlayer(QMainWindow):
         for button in (self.bottom_artist, self.expanded_artist):
             button.setEnabled(bool(name))
             button.setCursor(Qt.CursorShape.PointingHandCursor if name else Qt.CursorShape.ArrowCursor)
-            button.setText(button.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, max(40, button.width() - 8)))
+            max_w = 215 if button is self.bottom_artist else max(40, button.width() - 8)
+            button.setText(button.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, max_w))
             button.setToolTip(f"Открыть исполнителя: {name}" if name else display)
             button.setAccessibleName(f"Открыть исполнителя: {name}" if name else display)
         if self.view_stack.currentWidget() is self.cover_page:
@@ -5654,18 +5677,15 @@ class MusicPlayer(QMainWindow):
             self.fade_to_page(self.browse_page)
 
     def create_bottom_bar(self):
-        """Нижняя панель с единственной обложкой текущего трека."""
+        """Нижняя панель в стиле Spotify: слева трек и сердечко рядом с текстом, по центру транспорт + таймлайн, справа громкость и очередь."""
         bar = PlayerBar()
         self.player_bar = bar
         bar.setObjectName("playerBar")
-        base = QVBoxLayout(bar)
-        base.setContentsMargins(14, 10, 14, 8)
-        base.setSpacing(6)
+        base = QHBoxLayout(bar)
+        base.setContentsMargins(16, 10, 16, 10)
+        base.setSpacing(0)
 
-        controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(0)
-        # Левая и правая зоны одинаковой ширины: транспорт строго в центре.
+        # 1. Левая колонка: Обложка + (Название / Исполнитель) + Сердечко сразу рядом с текстом.
         track_info = QWidget()
         track_info.setFixedWidth(360)
         info = QHBoxLayout(track_info)
@@ -5684,30 +5704,38 @@ class MusicPlayer(QMainWindow):
         cover_shadow.setColor(QColor(0, 0, 0, 100))
         self.bottom_cover.setGraphicsEffect(cover_shadow)
         info.addWidget(self.bottom_cover)
-        labels = QVBoxLayout()
+
+        labels_box = QWidget(track_info)
+        labels_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        labels_box.setMaximumWidth(220)
+        labels = QVBoxLayout(labels_box)
         labels.setContentsMargins(0, 2, 0, 2)
         labels.setSpacing(2)
-        self.bottom_title = MarqueeLabel("Ничего не играет")
+        self.bottom_title = MarqueeLabel("Ничего не играет", labels_box)
         self.bottom_title.setObjectName("bottomTitle")
         self.bottom_title.setToolTip("Текущий трек")
-        self.bottom_artist = QPushButton("", track_info)
+        self.bottom_artist = QPushButton("", labels_box)
         self.bottom_artist.setObjectName("bottomArtistLink")
         self.bottom_artist.setFlat(True)
-        self.bottom_artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.bottom_artist.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.bottom_artist.setMaximumWidth(215)
         self.bottom_artist.clicked.connect(self.open_current_artist)
         labels.addWidget(self.bottom_title)
         labels.addWidget(self.bottom_artist)
-        info.addLayout(labels, 1)
+        info.addWidget(labels_box, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self.bottom_favorite_button = QPushButton()
         self.bottom_favorite_button.setObjectName("bottomFavorite")
         self.bottom_favorite_button.setIcon(control_icon("heart-outline", "#B3B3B3", 22))
         self.bottom_favorite_button.setIconSize(QSize(20, 20))
-        self.bottom_favorite_button.setFixedSize(34, 34)
+        self.bottom_favorite_button.setFixedSize(32, 32)
         self.bottom_favorite_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.bottom_favorite_button.setCheckable(True)
         self.bottom_favorite_button.setEnabled(False)
         self.bottom_favorite_button.setToolTip("Добавить в локальные лайки")
         info.addWidget(self.bottom_favorite_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        info.addStretch(1)
+
         self.bottom_dislike_button = QPushButton()
         self.bottom_dislike_button.setObjectName("bottomDislike")
         self.bottom_dislike_button.setIcon(control_icon("thumb-down-outline", "#B3B3B3", 22))
@@ -5718,28 +5746,38 @@ class MusicPlayer(QMainWindow):
         self.bottom_dislike_button.setToolTip("Не показывать этот трек в будущих миксах и радио")
         self.bottom_dislike_button.setParent(bar)
         self.bottom_dislike_button.hide()
-        controls.addWidget(track_info)
-        controls.addStretch(1)
+        base.addWidget(track_info, 0, Qt.AlignmentFlag.AlignVCenter)
+        base.addStretch(1)
 
         def tool_button(name, tooltip, object_name="transportButton", icon_color="#CEC3CC"):
             button = QPushButton()
             button.setObjectName(object_name)
             button.setIcon(control_icon(name, icon_color))
-            button.setIconSize(QSize(24, 24))
-            button.setFixedSize(38, 38)
+            button.setIconSize(QSize(22, 22))
+            button.setFixedSize(36, 36)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setToolTip(tooltip)
             return button
 
+        # 2. Центральная колонка Spotify: сверху 5 кнопок транспорта, прямо под ними компактный таймлайн.
         central_controls = QWidget()
-        center_row = QHBoxLayout(central_controls)
+        central_controls.setMinimumWidth(420)
+        central_controls.setMaximumWidth(600)
+        central_controls.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        center_stack = QVBoxLayout(central_controls)
+        center_stack.setContentsMargins(0, 0, 0, 0)
+        center_stack.setSpacing(4)
+
+        center_row = QHBoxLayout()
         center_row.setContentsMargins(0, 0, 0, 0)
-        center_row.setSpacing(8)
+        center_row.setSpacing(10)
+        center_row.addStretch(1)
         self.shuffle_button = tool_button("shuffle", "Перемешивание: выкл.")
         self.shuffle_button.setCheckable(True)
         self.previous_button = tool_button("previous", "Предыдущий трек")
         self.play_button = tool_button("play", "Воспроизведение / пауза", "playButton", "#FFFFFF")
-        self.play_button.setFixedSize(50, 50)
-        self.play_button.setIconSize(QSize(28, 28))
+        self.play_button.setFixedSize(42, 42)
+        self.play_button.setIconSize(QSize(24, 24))
         self.next_button = tool_button("next", "Следующий трек")
         self.repeat_button = tool_button("repeat", "Повтор: выкл.")
         self.repeat_button.setCheckable(True)
@@ -5749,30 +5787,18 @@ class MusicPlayer(QMainWindow):
             self.next_button, self.repeat_button,
         ):
             center_row.addWidget(button)
+        center_row.addStretch(1)
         self.stop_button.setParent(bar)
         self.stop_button.hide()
-        controls.addWidget(central_controls)
-        controls.addStretch(1)
-
-        right_tools = QWidget()
-        right_tools.setFixedWidth(360)
-        right_row = QHBoxLayout(right_tools)
-        right_row.setContentsMargins(0, 0, 0, 0)
-        right_row.setSpacing(8)
-        right_row.addStretch(1)
-        self.bottom_queue_button = tool_button("queue", "Показать / скрыть очередь")
-        self.menu_button = tool_button("menu", "Действия с треком и настройки")
-        self.menu_button.setIcon(QIcon())
-        self.menu_button.setText("⋯")
-        right_row.addWidget(self.bottom_queue_button)
-        right_row.addWidget(self.menu_button)
-        controls.addWidget(right_tools)
-        base.addLayout(controls)
+        center_stack.addLayout(center_row)
 
         timeline = QHBoxLayout()
-        timeline.setSpacing(10)
+        timeline.setContentsMargins(0, 0, 0, 0)
+        timeline.setSpacing(8)
         self.position_label = QLabel("0:00")
         self.position_label.setObjectName("timeText")
+        self.position_label.setMinimumWidth(32)
+        self.position_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.seek_slider = ClickSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setObjectName("seekSlider")
         self.seek_slider.setFixedHeight(16)
@@ -5781,25 +5807,45 @@ class MusicPlayer(QMainWindow):
         self.seek_slider.setToolTip("Нажми в любую точку для перемотки")
         self.duration_label = QLabel("0:00")
         self.duration_label.setObjectName("timeText")
-        volume_icon = QLabel()
-        self.volume_icon = volume_icon
-        volume_icon.setPixmap(control_icon("volume", "#C7BDC7").pixmap(20, 20))
-        self.volume_slider = ClickSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(int(round(self.volume * 100)))
-        self.volume_slider.setFixedWidth(116)
-        self.volume_value_label = QLabel(f"{int(round(self.volume * 100))}%")
-        self.volume_value_label.setObjectName("timeText")
-        self.volume_value_label.setFixedWidth(33)
-        self.volume_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.duration_label.setMinimumWidth(32)
+        self.duration_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         timeline.addWidget(self.position_label)
         timeline.addWidget(self.seek_slider, 1)
         timeline.addWidget(self.duration_label)
-        timeline.addSpacing(10)
-        timeline.addWidget(volume_icon)
-        timeline.addWidget(self.volume_slider)
-        timeline.addWidget(self.volume_value_label)
-        base.addLayout(timeline)
+        center_stack.addLayout(timeline)
+        base.addWidget(central_controls, 1, Qt.AlignmentFlag.AlignVCenter)
+        base.addStretch(1)
+
+        # 3. Правая колонка Spotify: Очередь + Громкость + Меню (выровнены по вертикали).
+        right_tools = QWidget()
+        right_tools.setFixedWidth(360)
+        right_row = QHBoxLayout(right_tools)
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(8)
+        right_row.addStretch(1)
+        self.bottom_queue_button = tool_button("queue", "Показать / скрыть очередь")
+        volume_icon = QLabel()
+        self.volume_icon = volume_icon
+        volume_icon.setPixmap(control_icon("volume", "#C7BDC7").pixmap(18, 18))
+        self.volume_slider = ClickSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(int(round(self.volume * 100)))
+        self.volume_slider.setFixedWidth(104)
+        self.volume_value_label = QLabel(f"{int(round(self.volume * 100))}%")
+        self.volume_value_label.setObjectName("timeText")
+        self.volume_value_label.setFixedWidth(32)
+        self.volume_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.menu_button = tool_button("menu", "Действия с треком и настройки")
+        self.menu_button.setIcon(QIcon())
+        self.menu_button.setText("⋯")
+        right_row.addWidget(self.bottom_queue_button)
+        right_row.addSpacing(4)
+        right_row.addWidget(volume_icon)
+        right_row.addWidget(self.volume_slider)
+        right_row.addWidget(self.volume_value_label)
+        right_row.addSpacing(4)
+        right_row.addWidget(self.menu_button)
+        base.addWidget(right_tools, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.options_menu = QMenu(self)
         self.options_menu.setObjectName("darkMenu")
@@ -5936,8 +5982,8 @@ class MusicPlayer(QMainWindow):
             QPushButton#bottomFavorite:checked:hover { background: rgba(29, 185, 84, 28); }
             QPushButton#bottomDislike:checked { background: #361F22; }
 
-            QPushButton#playButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 25px; padding: 0; }
-            QPushButton#playButton:hover { background: #2CE06B; }
+            QPushButton#playButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 21px; padding: 0; }
+            QPushButton#playButton:hover { background: #1ED760; }
             QPushButton#playButton:pressed { background: #169C46; }
 
             QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove {
@@ -5959,8 +6005,8 @@ class MusicPlayer(QMainWindow):
             QPushButton#trackArtistLink:hover { color: #FFFFFF; text-decoration: underline; }
 
             QPushButton#themeButton {
-                background: #1E242E; color: #C6D0DE; border: 1px solid #303948;
-                border-radius: 9px; font-size: 17px; padding: 3px;
+                background: #1C222C; color: #C6D0DE; border: 1px solid #2D3644;
+                border-radius: 19px; font-size: 16px; padding: 3px;
             }
             QPushButton#themeButton:hover { background: #262E3B; border-color: #5CE092; color: #FFFFFF; }
             QPushButton#accentButton {
@@ -5986,24 +6032,24 @@ class MusicPlayer(QMainWindow):
             QListWidget { background: #151921; color: #F2F5F9; border: none; border-radius: 10px; outline: 0; padding: 2px; }
             QListWidget#queueList { background: transparent; padding: 0; }
             QListWidget::item { background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 0; }
-            QListWidget::item:hover, QWidget#trackRow:hover { background: #1E2531; }
-            QListWidget::item:selected { background: #1F2B28; border: 1px solid #2D523E; }
+            QListWidget::item:hover, QWidget#trackRow:hover { background: rgba(255, 255, 255, 14); }
+            QListWidget::item:selected { background: rgba(29, 185, 84, 24); border: 1px solid rgba(92, 224, 146, 50); }
 
-            QWidget#trackRow { background: transparent; border: 1px solid transparent; border-radius: 10px; }
-            QWidget#trackRow[playing="true"] { background: #172C22; border: 1px solid #2F5D44; border-radius: 10px; }
-            QWidget#trackRow[playing="true"]:hover { background: #1C3529; border: 1px solid #3E7A59; }
+            QWidget#trackRow { background: transparent; border: 1px solid transparent; border-radius: 9px; }
+            QWidget#trackRow[playing="true"] { background: rgba(29, 185, 84, 26); border: 1px solid rgba(92, 224, 146, 52); border-radius: 9px; }
+            QWidget#trackRow[playing="true"]:hover { background: rgba(29, 185, 84, 38); border: 1px solid rgba(92, 224, 146, 78); }
             QLabel#trackTitle[playing="true"] { color: #66E099; font-weight: 800; }
             QLabel#trackIndex[playing="true"] { color: #66E099; font-weight: 900; }
             QLabel#queuePlayingBadge { background: #1DB954; color: #0C1A12; border-radius: 9px; font-size: 12px; font-weight: 700; }
 
             QSlider::groove:horizontal { background: #36404F; height: 4px; border-radius: 2px; }
-            QSlider::sub-page:horizontal { background: #5CE092; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #1DB954; border-radius: 2px; }
             QSlider::handle:horizontal { background: #F5F8FC; width: 12px; margin: -4px 0; border-radius: 6px; }
-            QSlider::handle:horizontal:hover { background: #66E099; }
+            QSlider::handle:horizontal:hover { background: #1ED760; }
             QSlider:disabled::handle:horizontal { background: #3E4858; }
-            QSlider#seekSlider::groove:horizontal { background: #36404F; height: 3px; border-radius: 1.5px; }
-            QSlider#seekSlider::sub-page:horizontal { background: #5CE092; height: 3px; border-radius: 1.5px; }
-            QSlider#seekSlider::handle:horizontal { background: #F2F6FA; width: 9px; margin: -3px 0; border-radius: 4.5px; }
+            QSlider#seekSlider::groove:horizontal { background: #36404F; height: 4px; border-radius: 2px; }
+            QSlider#seekSlider::sub-page:horizontal { background: #1DB954; height: 4px; border-radius: 2px; }
+            QSlider#seekSlider::handle:horizontal { background: #FFFFFF; width: 10px; margin: -3px 0; border-radius: 5px; }
 
             QMenu#darkMenu, QMenu {
                 background: #1A2029; color: #F4F7FA; border: 1px solid #2E3846;
@@ -6046,17 +6092,17 @@ class MusicPlayer(QMainWindow):
             QLabel#expandedTitle { color: #F7F9FC; font-size: 18px; font-weight: 800; }
             QWidget#coverPage, QLabel#expandedCover { background: transparent; border: none; }
             QFrame#sidebarDivider { background: #222A35; }
-            QFrame#searchBox { background: #1B212B; border: 1px solid #2D3746; border-radius: 16px; }
-            QFrame#searchBox[focused="true"] { border-color: #5CE092; background: #202834; }
+            QFrame#searchBox { background: #1B212B; border: 1px solid #2A3342; border-radius: 24px; }
+            QFrame#searchBox[focused="true"] { border-color: #1DB954; background: #202834; }
             QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus {
                 background: transparent; border: none; padding: 0; color: #F2F6FA; font-size: 14px;
             }
             QLabel#searchShortcut {
                 background: #252E3B; color: #A2AEBF; border: 1px solid #354152;
-                border-radius: 6px; padding: 4px 6px; font-size: 11px;
+                border-radius: 8px; padding: 4px 7px; font-size: 11px;
             }
-            QPushButton#searchSubmit { background: #5CE092; color: #0D2015; border-radius: 11px; font-weight: 700; }
-            QPushButton#searchSubmit:hover { background: #7AE8A8; }
+            QPushButton#searchSubmit { background: #1DB954; color: #09140D; border-radius: 19px; font-weight: 800; }
+            QPushButton#searchSubmit:hover { background: #1ED760; }
             QPushButton#searchSubmit:pressed { background: #43BE76; }
             QPushButton#searchSubmit:disabled { background: #26362E; color: #7E9489; }
         """
@@ -8086,7 +8132,7 @@ class MusicPlayer(QMainWindow):
         while self.home_tiles_layout.count():
             self.home_tiles_layout.takeAt(0)
         for index, card in enumerate(self.start_cards):
-            card.setFixedSize(side, 148 if horizontal else side + 28)
+            card.setFixedSize(side, 148 if horizontal else side + 50)
             self.home_tiles_layout.addWidget(card, index // columns, index % columns,
                                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         for column in range(4):
