@@ -2123,6 +2123,8 @@ class PlayerChanges(unittest.TestCase):
                  patch.object(w, 'start_stream_extraction') as extract:
                 track['source'] = source
                 w.current_track = track
+                w.player.setSource(m.QUrl.fromLocalFile(self.local_track('duration-reopen')['url']))
+                w.player.play()
                 w._network_recovery_attempts = 0
                 w.on_slot_duration(w.active_slot, 5000)
                 self.assertEqual(w.playback_duration_ms(), 10000)
@@ -2286,10 +2288,12 @@ class PlayerChanges(unittest.TestCase):
         with patch.object(w, 'start_stream_extraction') as extract, \
              patch.object(w, 'handle_track_finished') as advance:
             for attempt in range(w.MAX_STREAM_RECOVERIES):
+                w.player.setSource(m.QUrl.fromLocalFile(self.local_track('budget-reopen')['url']))
                 w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.NetworkError, 'disconnected')
                 self.assertEqual(w._network_recovery_attempts, attempt + 1)
                 w.requested_track = None
                 w._network_recovery = None
+            w.player.setSource(m.QUrl.fromLocalFile(self.local_track('budget-reopen')['url']))
             w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.NetworkError, 'disconnected again')
             self.assertEqual(extract.call_count, w.MAX_STREAM_RECOVERIES)
             self.assertFalse(w._playback_wanted)
@@ -2314,6 +2318,146 @@ class PlayerChanges(unittest.TestCase):
         self.start(self.local_track('manual-after-recovery'))
         self.assertEqual(w._network_recovery_attempts, 0)
         self.assertIsNone(w.supermix_session)
+
+    def test_demux_error_releases_both_sources_and_late_errors_cannot_flood_or_cancel_recovery(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        w.standby_key = 'standby'
+        w.players[w.idle_slot()].setSource(m.QUrl.fromLocalFile(self.local_track('prefetch-release')['url']))
+        with patch.object(w, 'start_stream_extraction') as extract, \
+             patch.object(w, 'show_toast') as toast, self.assertLogs('aurora', level='INFO') as logs:
+            w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.FormatError, 'Demuxing failed')
+            self.assertTrue(all(player.source().isEmpty() for player in w.players))
+            self.assertEqual(w._network_recovery['position'], 2600)
+            for _ in range(200):
+                w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.FormatError, 'Demuxing failed')
+                w.on_slot_status(w.active_slot, m.QMediaPlayer.MediaStatus.EndOfMedia)
+                w.on_slot_position(w.active_slot, 0)
+            extract.assert_called_once_with(track)
+            toast.assert_not_called()
+            self.assertEqual(w._last_progress_position, 2600)
+            self.assertIsNotNone(w.requested_track)
+        self.assertEqual(sum('Ошибка Qt слота' in line for line in logs.output), 1)
+
+    def test_failed_recovery_checkpoint_and_manual_play_keep_interrupted_position(self):
+        w = self.w
+        track = self.remote_playback_fixture()
+        with patch.object(w, 'start_stream_extraction'):
+            w.recover_current_stream('disconnect')
+            w.stream_error(track['url'], 'network unavailable')
+        w.save_playback_checkpoint()
+        checkpoint = json.loads(w.settings.value('playback_checkpoint_json'))
+        self.assertEqual(checkpoint['position'], 2600)
+        self.assertTrue(w.player.source().isEmpty())
+        with patch.object(w, 'play_track') as play:
+            w.toggle_playback()
+            play.assert_called_once_with(track, 0, start_position=2600)
+        w.stop_all()
+        checkpoint = json.loads(w.settings.value('playback_checkpoint_json'))
+        self.assertEqual(checkpoint['position'], 0)
+
+    def test_error_in_previous_song_does_not_cancel_the_user_selected_next_song(self):
+        w = self.w
+        self.remote_playback_fixture()
+        next_track = self.local_track('next-after-error')
+        slot = w.idle_slot()
+        with patch.object(w.players[slot], 'play'):
+            w.play_track(next_track, -1)
+            w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.FormatError, 'Demuxing failed')
+            self.assertEqual(w.requested_track['url'], next_track['url'])
+            self.assertEqual(w.pending_slot, slot)
+            self.assertTrue(w.player.source().isEmpty())
+        w.players[slot].play()
+        wait_for(lambda: w.current_track['url'] == next_track['url'] and w.requested_track is None)
+
+    def test_truncated_http_audio_recovers_on_a_new_connection_at_the_saved_position(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        w = self.w
+        track = self.remote_playback_fixture()
+        track['duration'] = 10
+        payload = Path(self.local_track('http-recovery')['url']).read_bytes()
+        w.PLAYBACK_STALL_SECONDS = 1
+        cut = threading.Event()
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args): pass
+            def do_GET(self):
+                if self.path == '/broken' and cut.is_set():
+                    self.send_error(503)
+                    return
+                value = self.headers.get('Range', 'bytes=0-').removeprefix('bytes=')
+                start, _, end = value.partition('-')
+                start = int(start or 0)
+                end = min(int(end) if end else len(payload) - 1, len(payload) - 1)
+                data = payload[start:end + 1]
+                self.send_response(206 if 'Range' in self.headers else 200)
+                self.send_header('Content-Type', 'audio/wav')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Content-Length', str(len(data)))
+                if 'Range' in self.headers:
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{len(payload)}')
+                self.end_headers()
+                try:
+                    if self.path == '/broken':
+                        self.wfile.write(data[:len(data) // 3])
+                        self.wfile.flush()
+                        self.close_connection = True
+                    else:
+                        self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        def refresh(_track):
+            w.start_pending_media(m.QUrl(base + '/full'), 'test reconnect')
+        try:
+            with patch.object(w, 'start_stream_extraction', side_effect=refresh) as extract:
+                w.requested_track = dict(track)
+                w.requested_index = 0
+                w.request_started = time.perf_counter()
+                w.start_pending_media(m.QUrl(base + '/broken'), 'test truncated HTTP')
+                wait_for(lambda: w.requested_track is None and w.player.source().path() == '/broken', seconds=8)
+                wait_for(lambda: w.player.position() >= 500)
+                initial_position = w.player.position()
+                cut.set()
+                # Windows in the supplied log reports FormatError repeatedly. Linux
+                # with a disconnected audio output may keep its clock advancing
+                # after early EOF, so inject that exact callback on real HTTP media.
+                w.on_slot_error(w.active_slot, m.QMediaPlayer.Error.FormatError, 'Demuxing failed')
+                wait_for(lambda: w.requested_track is None and w.player.source().path() == '/full', seconds=8)
+                self.assertGreater(w.player.position(), initial_position)
+                self.assertEqual(w.current_track['queue_id'], track['queue_id'])
+                self.assertEqual(extract.call_count, 1)
+                self.assertIsNone(w._network_recovery)
+        finally:
+            cut.set()
+            w.stop_all()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_soundcloud_search_and_artwork_reuse_the_stream_extractor_client_id_cache(self):
+        from yt_dlp.extractor.soundcloud import SoundcloudSearchIE
+        search = m.SearchWorker('cache test', 'soundcloud', 'relevance', limit=3)
+        with patch.object(m, 'YoutubeDL') as constructor:
+            constructor.return_value.__enter__.return_value.extract_info.return_value = {'entries': []}
+            search._fetch(3)
+            options = constructor.call_args.args[0]
+        self.assertIsNone(options['cachedir'])
+        artwork = m.TrackArtworkWorker({'source': 'soundcloud', 'url': 'https://soundcloud.com/test/song'})
+        with patch.object(m, 'YoutubeDL') as constructor:
+            constructor.return_value.__enter__.return_value.extract_info.return_value = {'thumbnail': 'https://example.invalid/cover.jpg'}
+            artwork.run()
+            self.assertIsNone(constructor.call_args.args[0]['cachedir'])
+        with patch.dict(os.environ, {'XDG_CACHE_HOME': str(self.test_path / 'extractor-cache')}):
+            with m.YoutubeDL({'quiet': True}) as seed:
+                seed.cache.store('soundcloud', 'client_id', 'A' * 32)
+            with m.YoutubeDL(options) as downloader:
+                extractor = SoundcloudSearchIE(downloader)
+                with patch.object(extractor, '_update_client_id', side_effect=AssertionError('unnecessary webpage request')):
+                    extractor._initialize_pre_login()
+                self.assertEqual(extractor._CLIENT_ID, 'A' * 32)
 
     def test_failed_recovery_does_not_retry_forever_or_skip_track(self):
         w = self.w

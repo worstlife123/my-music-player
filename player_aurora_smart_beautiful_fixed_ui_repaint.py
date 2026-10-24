@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile
+from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
     QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage,
@@ -47,6 +47,7 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
+APP_VERSION = "0.1.5"
 
 
 def yt_dlp_tls_options():
@@ -192,6 +193,8 @@ def setup_logging():
         for handler in (file_handler, console):
             handler.setFormatter(fmt)
             logger.addHandler(handler)
+    logger.info("Запуск Aurora %s; Qt %s; Python %s; platform=%s",
+                APP_VERSION, QT_VERSION_STR, sys.version.split()[0], sys.platform)
     return logger
 
 
@@ -1560,7 +1563,7 @@ class SearchWorker(QThread):
             "socket_timeout": 8 if self.paginate_all else (2 if self.source == "soundcloud" else 3),
             "retries": 0 if self.source == "soundcloud" else (1 if self.paginate_all else 0),
             "extractor_retries": 0 if self.source == "soundcloud" else (1 if self.paginate_all else 0),
-            "cachedir": False,
+            "cachedir": None if self.source == "soundcloud" else False,
             "ignoreconfig": True,
             "youtube_include_dash_manifest": False,
             "youtube_include_hls_manifest": False,
@@ -1639,6 +1642,9 @@ class SearchWorker(QThread):
                 # первые несколько результатов до завершения полной выдачи.
                 if emit_progress and not progress_sent and len(tracks) >= progress_threshold and len(tracks) < limit:
                     progress_sent = True
+                    logging.getLogger("aurora").info("Первые результаты: source=%s; count=%d; seconds=%.1f",
+                                                   self.source, len(tracks),
+                                                   time.perf_counter() - getattr(self, "_search_started_at", time.perf_counter()))
                     self.results_ready.emit(
                         [dict(item) for item in tracks],
                         f"Первые {len(tracks)} результатов готовы; загружаю остальные…"
@@ -1783,6 +1789,8 @@ class SearchWorker(QThread):
             self.results_ready.emit([], f"__SC_LIKES_DONE__:{total}")
 
     def run(self):
+        self._search_started_at = time.perf_counter()
+        logging.getLogger("aurora").info("Поиск начат: source=%s; limit=%d", self.source, self.limit)
         try:
             if self.paginate_all:
                 self._run_paginated()
@@ -1850,6 +1858,11 @@ class SearchWorker(QThread):
         except Exception as error:
             if not self._cancel_requested:
                 self.failed.emit(str(error))
+
+        finally:
+            logging.getLogger("aurora").info("Поиск завершён: source=%s; seconds=%.1f; cancelled=%s",
+                                           self.source, time.perf_counter() - self._search_started_at,
+                                           self._cancel_requested)
 
 
 class YouTubeMusicAuth:
@@ -2376,7 +2389,7 @@ class TrackArtworkWorker(QThread):
                 "socket_timeout": 6,
                 "retries": 1,
                 "extractor_retries": 1,
-                "cachedir": False,
+                "cachedir": None,
                 "ignoreconfig": True,
                 "youtube_include_dash_manifest": False,
                 "youtube_include_hls_manifest": False,
@@ -5963,10 +5976,12 @@ class MusicPlayer(QMainWindow):
         mix_state = ({"mix_id": mix.get("mix_id", ""), "anchor": mix.get("anchor", "")}
                      if isinstance(mix, dict) else None)
         position = (restored["position"] if restored is not None else
-                    self._last_progress_position if self._network_recovery is not None else self.player.position())
+                    self._last_progress_position if (self._network_recovery is not None or self.player.source().isEmpty())
+                    else self.player.position())
         current = self._session_track(self.current_track)
-        if current is not None and self.player.duration() > 0:
-            current["duration"] = self.player.duration() // 1000
+        duration = self.playback_duration_ms() if self._remote_playback() else self.player.duration()
+        if current is not None and duration > 0:
+            current["duration"] = duration / 1000
         checkpoint = {"revision": self._session_revision, "current": current,
                       "position": max(0, int(position)), "source": self.current_source,
                       "mode": (restored or {}).get("mode", self.queue_mode), "supermix": mix_state,
@@ -11023,12 +11038,29 @@ class MusicPlayer(QMainWindow):
         if time.monotonic() - self._last_progress_at >= self.PLAYBACK_STALL_SECONDS:
             self.recover_current_stream("нет данных от сервера")
 
+    def release_media_slot(self, slot):
+        """Dispose a broken demuxer and its connection before another attempt."""
+        player = self.players[slot]
+        if player.source().isEmpty():
+            return
+        host = player.source().host()
+        self.audio_outputs[slot].setVolume(0.0)
+        # stop/setSource can emit synchronous state/error callbacks. The previous
+        # position is already captured; those callbacks must not erase it or recurse.
+        with QSignalBlocker(player):
+            player.stop()
+            player.setSource(QUrl())
+        logging.getLogger("aurora").info("Освобождён источник: slot=%d; host=%s", slot, host)
+        if slot == self.active_slot:
+            self.on_slot_playback_state(slot, QMediaPlayer.PlaybackState.StoppedState)
+
     def recover_current_stream(self, reason):
         if (self._force_exit or not self._playback_wanted or not self._remote_playback()
                 or self.requested_track is not None or self.pending_slot is not None
                 or self._finish_transition_pending):
             return False
         if self._network_recovery_attempts >= self.MAX_STREAM_RECOVERIES:
+            self.release_media_slot(self.active_slot)
             self._playback_wanted = False
             self.playback_watchdog.stop()
             self.set_status("Аудиосервер недоступен. Проверь подключение и настройки «Запрета» или прокси, затем нажми ▶.")
@@ -11048,6 +11080,8 @@ class MusicPlayer(QMainWindow):
         self.stream_cache.pop(self._key(track), None)
         self.standby_key = None
         self.standby_ready = False
+        self.release_media_slot(self.active_slot)
+        self.release_media_slot(self.idle_slot())
         logging.getLogger("aurora").info("Восстановление потока: %s; позиция %d мс; попытка %d",
                                        reason, position, self._network_recovery_attempts)
         self.start_stream_extraction(track)
@@ -11093,7 +11127,7 @@ class MusicPlayer(QMainWindow):
                 logging.getLogger("aurora").info(f"[Music Player] Новый поток начал менять позицию: всего {elapsed:.1f} с; Qt: {qt_elapsed:.1f} с")
                 self.commit_switch(elapsed, qt_elapsed)
             return
-        if slot != self.active_slot:
+        if slot != self.active_slot or self.player.source().isEmpty():
             return
         if position > 0 and position != self._last_progress_position:
             self._last_progress_position = position
@@ -11153,6 +11187,8 @@ class MusicPlayer(QMainWindow):
         self.duration_label.setText(self.format_position(duration))
 
     def on_slot_status(self, slot, status):
+        if self.players[slot].source().isEmpty():
+            return
         if slot == self.pending_slot:
             if status in (QMediaPlayer.MediaStatus.LoadedMedia,
                           QMediaPlayer.MediaStatus.BufferingMedia,
@@ -11326,16 +11362,15 @@ class MusicPlayer(QMainWindow):
             QTimer.singleShot(0, self.prepare_next_track)
 
     def on_slot_error(self, slot, error, message):
-        if error == QMediaPlayer.Error.NoError:
+        if (self._force_exit or error == QMediaPlayer.Error.NoError
+                or (slot != self.pending_slot and self.players[slot].source().isEmpty())):
             return
         logging.getLogger("aurora").info(f"[Music Player] Ошибка Qt слота {slot}: {message}")
         if slot == self.pending_slot:
             self.pending_media_timer.stop()
             self.pending_slot = None
             self.pending_media_url = None
-            self.players[slot].stop()
-            self.players[slot].setSource(QUrl())
-            self.audio_outputs[slot].setVolume(0.0)
+            self.release_media_slot(slot)
             self.standby_key = None
             self.standby_ready = False
             track = self.requested_track
@@ -11381,7 +11416,12 @@ class MusicPlayer(QMainWindow):
                 self.prefetch_failed_until[self.standby_key] = time.monotonic() + 120
             self.standby_key = None
             self.standby_ready = False
-            self.players[slot].setSource(QUrl())
+            self.release_media_slot(slot)
+            return
+        self.release_media_slot(slot)
+        if self.requested_track is not None or self.pending_slot is not None:
+            # A manual selection is already loading. A dead previous source must
+            # neither cancel that request nor report the error again every frame.
             return
         if self._finish_transition_pending:
             failed_track = dict(self.requested_track or self.current_track or {})
@@ -11441,6 +11481,9 @@ class MusicPlayer(QMainWindow):
             self.player.play()
         elif self.requested_track is not None:
             self.set_status("Новый трек ещё подготавливается…")
+        elif self.current_track is not None and self.player.source().isEmpty():
+            self.play_track(self.current_track, self.current_queue_index,
+                            start_position=self._last_progress_position)
         elif 0 <= self.current_queue_index < len(self.queue_tracks):
             self.play_queue_index(self.current_queue_index)
         elif self.queue_tracks:
@@ -11463,6 +11506,7 @@ class MusicPlayer(QMainWindow):
             output.setVolume(0.0)
         self.audio_outputs[self.active_slot].setVolume(self.volume)
         self.play_button.setIcon(control_icon("play", "#FFFFFF"))
+        self._last_progress_position = 0
         self.set_status("Воспроизведение остановлено.")
         self.save_playback_checkpoint()
 
