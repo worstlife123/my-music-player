@@ -2628,10 +2628,10 @@ class ClickableLabel(QLabel):
 
 
 class ExpandedArtwork(QLabel):
-    """Крупное фото обложки, плавно раскрывающееся прямо над миниатюрой внизу без отдельного окна."""
+    """Компактное квадратное фото обложки со скруглёнными краями, раскрывающееся над миниатюрой внизу."""
     clicked = pyqtSignal()
-    MAX_WIDTH = 280
-    MAX_HEIGHT = 260
+    SQUARE_SIDE = 168
+    CORNER_RADIUS = 16.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2655,13 +2655,7 @@ class ExpandedArtwork(QLabel):
         self.setProperty("requested_image", "")
 
     def target_size(self):
-        pix = self.pixmap()
-        if pix is None or pix.isNull():
-            return QSize(220, 220)
-        dpr = pix.devicePixelRatioF() or 1.0
-        w = max(96, round(pix.width() / dpr))
-        h = max(96, round(pix.height() / dpr))
-        return QSize(w + 12, h + 12)
+        return QSize(self.SQUARE_SIDE + 12, self.SQUARE_SIDE + 12)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2678,42 +2672,54 @@ class ExpandedArtwork(QLabel):
         if self._source is None or self._source.isNull():
             return
         dpr = min(2.0, self.devicePixelRatioF())
-        key = (self._source.cacheKey(), self.MAX_WIDTH, self.MAX_HEIGHT, dpr)
+        key = (self._source.cacheKey(), self.SQUARE_SIDE, dpr)
         if key == self._scale_key:
             return
         self._scale_key = key
-        max_w = max(1, round(self.MAX_WIDTH * dpr))
-        max_h = max(1, round(self.MAX_HEIGHT * dpr))
-        scaled = self._source.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio,
+        pixels = max(1, round(self.SQUARE_SIDE * dpr))
+        scaled = self._source.scaled(pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
         scaled.setDevicePixelRatio(dpr)
         self.setPixmap(scaled)
 
     def paintEvent(self, event):
-        pix = self.pixmap()
-        if pix is None or pix.isNull():
+        src = self._source if (self._source is not None and not self._source.isNull()) else self.pixmap()
+        if src is None or src.isNull():
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        target = QRectF(self.rect()).adjusted(6.0, 4.0, -6.0, -8.0)
-        if target.width() <= 4 or target.height() <= 4:
+        avail = QRectF(self.rect()).adjusted(6.0, 4.0, -6.0, -8.0)
+        side = min(avail.width(), avail.height())
+        if side <= 4:
             painter.end()
             return
-        # Мягкая тёмная тень непосредственно под фото (без белого свечения и без QGraphicsEffect)
+        target = QRectF(
+            avail.center().x() - side / 2.0,
+            avail.center().y() - side / 2.0,
+            side,
+            side,
+        )
+        radius = min(self.CORNER_RADIUS, side * 0.22)
+        # Мягкая тёмная тень под квадратной обложкой
         painter.setPen(Qt.PenStyle.NoPen)
-        for dy, expand, alpha in ((4.0, 2.0, 32), (2.5, 1.0, 48), (1.0, 0.0, 64)):
+        for dy, expand, alpha in ((4.0, 2.0, 30), (2.5, 1.0, 46), (1.0, 0.0, 64)):
             painter.setBrush(QColor(0, 0, 0, alpha))
-            painter.drawRoundedRect(target.adjusted(-expand, dy - expand, expand, dy + expand), 13.0, 13.0)
+            painter.drawRoundedRect(target.adjusted(-expand, dy - expand, expand, dy + expand), radius + 1.0, radius + 1.0)
         clip = QPainterPath()
-        clip.addRoundedRect(target, 12.0, 12.0)
+        clip.addRoundedRect(target, radius, radius)
         painter.save()
         painter.setClipPath(clip)
-        painter.drawPixmap(target, pix, QRectF(pix.rect()))
+        # Центральный квадратный кроп (cover-fit без чёрных полос и без искажения пропорций)
+        sw = float(src.width())
+        sh = float(src.height())
+        crop_side = min(sw, sh)
+        src_rect = QRectF((sw - crop_side) / 2.0, (sh - crop_side) / 2.0, crop_side, crop_side)
+        painter.drawPixmap(target, src, src_rect)
         painter.restore()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(0, 0, 0, 80), 1.0))
-        painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), 11.5, 11.5)
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0))
+        painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), max(1.0, radius - 0.5), max(1.0, radius - 0.5))
         painter.end()
 
 

@@ -478,9 +478,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       position: fixed;
       left: 22px;
       bottom: 100px;
-      width: 248px;
-      height: 248px;
-      border-radius: 12px;
+      width: 168px;
+      height: 168px;
+      border-radius: 16px;
       z-index: 60;
       display: flex;
       flex-direction: column;
