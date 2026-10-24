@@ -2479,10 +2479,10 @@ class StreamWorker(QThread):
         extractor_args = None
         if not self.avoid_format_id and not self.track.get("is_live"):
             if source == "soundcloud" and self.audio_quality in ("auto", "economy"):
-                # Each SoundCloud transcoding costs a separate API request. AAC
-                # works in Qt with both progressive and HLS delivery. Keep all
-                # encodings for high quality, compatibility and stream recovery.
-                extractor_args = {"soundcloud": {"formats": ["http_aac", "hls_aac"]}}
+                # Keep progressive MP3 in the short lookup: choosing HLS AAC
+                # while a direct MP3 exists can make random seeking more expensive.
+                # Other encodings remain available via the full fallback.
+                extractor_args = {"soundcloud": {"formats": ["http_aac", "http_mp3", "hls_aac"]}}
             elif source == "youtube":
                 # These are current yt-dlp extractor arguments. The old
                 # youtube_include_*_manifest options no longer skip manifests.
@@ -2494,6 +2494,16 @@ class StreamWorker(QThread):
             # A muxed video must not hide an audio-only HLS fallback: downloading
             # its video would cost more bandwidth than the original audio path.
             fast_options["format"] = options["format"].removesuffix("/best")
+        elif source == "soundcloud":
+            # yt-dlp labels progressive SoundCloud URLs as "http" even when
+            # their URLs use HTTPS. Prefer them to HLS while honoring quality.
+            direct = (
+                "bestaudio[protocol=https][abr<=128]/bestaudio[protocol=http][abr<=128]/"
+                if self.audio_quality == "economy" else
+                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=http][ext=m4a]/"
+                "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=http][ext=mp3]/"
+            )
+            fast_options["format"] = direct + options["format"]
         try:
             return self._extract(fast_options)
         except Exception as error:
@@ -3881,12 +3891,12 @@ class ClickSlider(QSlider):
         position = max(0, min(span, round(position)))
         upside_down = self.invertedAppearance() if horizontal else not self.invertedAppearance()
         value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), position, span, upside_down)
-        self.sliderPressed.emit()
+        # Qt emits sliderPressed/sliderReleased when this state changes.
+        # Manual emissions here would make one click seek the stream twice.
         self.setSliderDown(True)
         self.setSliderPosition(value)
         self.setValue(value)
         self.setSliderDown(False)
-        self.sliderReleased.emit()
         event.accept()
 
 

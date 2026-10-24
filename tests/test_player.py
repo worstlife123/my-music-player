@@ -2299,6 +2299,108 @@ class PlayerChanges(unittest.TestCase):
             self.assertEqual(base.alpha(), 255)
             self.assertTrue(base.lightness() < 100 if theme == 'dark' else base.lightness() > 180)
 
+    def test_timeline_click_seeks_once_in_main_and_mini_players(self):
+        w = self.w
+        w.show_mini_player()
+        app.processEvents()
+        for name, slider in (('main', w.seek_slider), ('mini', w.mini_player.seek_slider)):
+            slider.setRange(0, 180000)
+            slider.setEnabled(True)
+            pressed, released = QSignalSpy(slider.sliderPressed), QSignalSpy(slider.sliderReleased)
+            with self.subTest(window=name), \
+                 patch.object(w.player, 'isSeekable', return_value=True), \
+                 patch.object(w.player, 'setPosition') as seek:
+                QTest.mouseClick(slider, m.Qt.MouseButton.LeftButton,
+                                 pos=m.QPoint(slider.width() * 3 // 4, slider.height() // 2))
+                seek.assert_called_once()
+                self.assertGreater(seek.call_args.args[0], 120000)
+                self.assertLess(seek.call_args.args[0], 160000)
+                self.assertEqual(len(pressed), 1)
+                self.assertEqual(len(released), 1)
+
+    def test_timeline_handle_drag_seeks_only_after_release(self):
+        w = self.w
+        slider = w.seek_slider
+        slider.setRange(0, 180000)
+        slider.setValue(60000)
+        slider.setEnabled(True)
+        option = m.QStyleOptionSlider()
+        slider.initStyleOption(option)
+        handle = slider.style().subControlRect(m.QStyle.ComplexControl.CC_Slider, option,
+                                               m.QStyle.SubControl.SC_SliderHandle, slider)
+        target = m.QPoint(slider.width() * 3 // 4, slider.height() // 2)
+        with patch.object(w.player, 'isSeekable', return_value=True), \
+             patch.object(w.player, 'setPosition') as seek:
+            QTest.mousePress(slider, m.Qt.MouseButton.LeftButton, pos=handle.center())
+            self.assertTrue(w.is_seeking)
+            QTest.mouseMove(slider, target)
+            seek.assert_not_called()
+            QTest.mouseRelease(slider, m.Qt.MouseButton.LeftButton, pos=target)
+            seek.assert_called_once()
+            self.assertFalse(w.is_seeking)
+
+    def test_soundcloud_http_seek_keeps_source_and_resumes_at_requested_position(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        w = self.w
+        for method in ('pump_artwork_workers', 'prepare_next_track', 'ensure_following_track_prepared'):
+            fixture = patch.object(w, method)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        payload = Path(self.local_track('http-seek')['url']).read_bytes()
+        requests = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                requests.append(self.headers.get('Range', ''))
+                value = self.headers.get('Range', 'bytes=0-').removeprefix('bytes=')
+                start, _, end = value.partition('-')
+                start = int(start or 0)
+                end = min(int(end) if end else len(payload) - 1, len(payload) - 1)
+                data = payload[start:end + 1]
+                self.send_response(206 if 'Range' in self.headers else 200)
+                self.send_header('Content-Type', 'audio/wav')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Content-Length', str(len(data)))
+                if 'Range' in self.headers:
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{len(payload)}')
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        source = m.QUrl(f'http://127.0.0.1:{server.server_port}/audio.wav')
+        track = {'source': 'soundcloud', 'url': 'https://soundcloud.com/test/seek',
+                 'title': 'HTTP seek', 'duration': 10}
+        try:
+            with patch.object(w, 'start_stream_extraction', side_effect=lambda _track:
+                              w.stream_ready(track['url'], source.toString(), 'HTTP seek', 0)):
+                self.start(track)
+            wait_for(lambda: w.player.isSeekable() and w.player.position() >= 100)
+            self.assertTrue(requests)
+            for fraction in (.7, .3):
+                slider = w.seek_slider
+                with patch.object(w, 'start_stream_extraction') as extract, \
+                     patch.object(w.player, 'setPosition', wraps=w.player.setPosition) as seek:
+                    QTest.mouseClick(slider, m.Qt.MouseButton.LeftButton,
+                                     pos=m.QPoint(round(slider.width() * fraction), slider.height() // 2))
+                    seek.assert_called_once()
+                    target = seek.call_args.args[0]
+                    wait_for(lambda: target + 50 <= w.player.position() < target + 2000)
+                    self.assertEqual(w.player.source(), source)
+                    self.assertEqual(w.current_track['url'], track['url'])
+                    extract.assert_not_called()
+        finally:
+            w.stop_all()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_saved_session_is_visible_in_mini_without_starting_playback(self):
         self.saved_local_session()
         with self.reopened_player() as w:
@@ -2949,7 +3051,7 @@ class StreamLoading(unittest.TestCase):
                                      [{'url': 'https://example.invalid/cover.webp'}])
                     self.assertEqual(extractor._extract_thumbnails({}), [])
 
-    def test_soundcloud_auto_resolves_two_transcodings_instead_of_six(self):
+    def test_soundcloud_auto_resolves_three_transcodings_instead_of_six(self):
         info, full_calls, fast_calls = self.soundcloud_info(), [], []
         self.extract_soundcloud({'quiet': True}, info, full_calls)
         worker = m.StreamWorker(self.track())
@@ -2961,10 +3063,12 @@ class StreamLoading(unittest.TestCase):
         self.assertEqual(len(failed), 0)
         self.assertIn('aac', ready[0][0])
         self.assertEqual(len(full_calls), 6)
-        self.assertEqual(len(fast_calls), 2)
+        self.assertEqual(len(fast_calls), 3)
 
-    def test_soundcloud_mp3_only_track_falls_back_and_still_plays(self):
+    def test_soundcloud_hls_mp3_only_track_falls_back_and_still_plays(self):
         info, calls = self.soundcloud_info(codecs=('mp3',)), []
+        info['media']['transcodings'] = [t for t in info['media']['transcodings']
+                                         if t['format']['protocol'] == 'hls']
         worker = m.StreamWorker(self.track())
         ready, failed = QSignalSpy(worker.stream_ready), QSignalSpy(worker.failed)
         with patch.object(worker, '_extract', side_effect=lambda opts:
@@ -2974,6 +3078,40 @@ class StreamLoading(unittest.TestCase):
         self.assertEqual(len(failed), 0)
         self.assertIn('mp3', ready[0][0])
         self.assertEqual(extract.call_count, 2)
+
+    def test_soundcloud_direct_mp3_is_preferred_to_hls_aac(self):
+        info = self.soundcloud_info()
+        info['media']['transcodings'] = [t for t in info['media']['transcodings'] if
+            (t['preset'].startswith('aac') and t['format']['protocol'] == 'hls') or
+            (t['preset'].startswith('mp3') and t['format']['protocol'] == 'progressive')]
+        for quality in ('auto', 'economy'):
+            worker = m.StreamWorker(self.track(), audio_quality=quality)
+            metadata, failed = QSignalSpy(worker.metadata_ready), QSignalSpy(worker.failed)
+            calls = []
+            with self.subTest(quality=quality), \
+                 patch.object(worker, '_extract', side_effect=lambda opts:
+                              self.extract_soundcloud(opts, info, calls)) as extract:
+                worker.run()
+                self.assertEqual(len(failed), 0)
+                self.assertEqual(metadata[0][0]['protocol'], 'http')
+                self.assertIn('mp3', metadata[0][0]['format_id'])
+                extract.assert_called_once()
+
+    def test_soundcloud_economy_keeps_bitrate_limit_when_direct_mp3_is_larger(self):
+        info = self.soundcloud_info()
+        info['media']['transcodings'] = [t for t in info['media']['transcodings'] if
+            (t['preset'].startswith('aac') and t['format']['protocol'] == 'hls') or
+            (t['preset'].startswith('mp3') and t['format']['protocol'] == 'progressive')]
+        for transcoding in info['media']['transcodings']:
+            if transcoding['preset'].startswith('mp3'):
+                transcoding['preset'] = 'mp3_192k'
+        worker = m.StreamWorker(self.track(), audio_quality='economy')
+        metadata = QSignalSpy(worker.metadata_ready)
+        with patch.object(worker, '_extract', side_effect=lambda opts:
+                          self.extract_soundcloud(opts, info, [])):
+            worker.run()
+        self.assertEqual(metadata[0][0]['protocol'], 'm3u8_native')
+        self.assertIn('aac', metadata[0][0]['format_id'])
 
     def test_youtube_hls_only_track_uses_full_fallback(self):
         worker = m.StreamWorker(self.track('youtube'))
