@@ -3125,6 +3125,151 @@ class MarqueeLabel(QLabel):
         painter.end()
 
 
+class TrackIndexIndicator(QLabel):
+    """Отрисовывает плавный круговой спиннер при загрузке и 3-полосный эквалайзер при игре без перестроения layout."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._loading = False
+        self._current = False
+        self._playing = False
+        self._phase = 0
+
+    def set_state(self, *, loading=False, current=False, playing=False, phase=0):
+        self._loading = bool(loading)
+        self._current = bool(current)
+        self._playing = bool(playing)
+        self._phase = int(phase)
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._loading and not self._current:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        accent = QColor("#1DB954")
+
+        if self._loading:
+            size = min(self.width(), self.height()) - 6.0
+            size = max(12.0, min(15.0, size))
+            cx = self.width() / 2.0
+            cy = self.height() / 2.0
+            rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
+
+            ring_pen = QPen(QColor(29, 185, 84, 48), 1.8)
+            ring_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(ring_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(rect)
+
+            arc_pen = QPen(accent, 2.0)
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc_pen)
+            start_angle = int((-(self._phase * 16) % 360) * 16)
+            span_angle = 110 * 16
+            painter.drawArc(rect, start_angle, span_angle)
+            painter.end()
+            return
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(accent)
+        bar_w = 2.6
+        gap = 2.1
+        total_w = 3 * bar_w + 2 * gap
+        start_x = (self.width() - total_w) / 2.0
+        max_h = 13.0
+        min_h = 3.2
+        base_y = (self.height() + max_h) / 2.0
+
+        if self._playing:
+            t = self._phase * 0.34
+            levels = (
+                0.52 + 0.46 * math.sin(t),
+                0.55 + 0.43 * math.sin(t * 1.28 + 1.85),
+                0.50 + 0.48 * math.sin(t * 0.92 + 3.55),
+            )
+        else:
+            levels = (0.38, 0.68, 0.48)
+
+        for idx, level in enumerate(levels):
+            clamped = max(0.0, min(1.0, level))
+            h = min_h + (max_h - min_h) * clamped
+            x = start_x + idx * (bar_w + gap)
+            y = base_y - h
+            painter.drawRoundedRect(QRectF(x, y, bar_w, h), 1.2, 1.2)
+        painter.end()
+
+
+class CompactNowPlayingBadge(QLabel):
+    """Мини-бейдж на обложке компактной строки (очередь и «Недавно слушал»): спиннер или эквалайзер."""
+
+    def __init__(self, text="♫", parent=None):
+        super().__init__(text, parent)
+        self._loading = False
+        self._current = False
+        self._playing = False
+        self._phase = 0
+
+    def set_state(self, *, loading=False, current=False, playing=False, phase=0):
+        self._loading = bool(loading)
+        self._current = bool(current)
+        self._playing = bool(playing)
+        self._phase = int(phase)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(12, 16, 22, 215))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0), 5.0, 5.0)
+        accent = QColor("#1DB954")
+
+        if self._loading:
+            size = 10.5
+            cx = self.width() / 2.0
+            cy = self.height() / 2.0
+            rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
+            ring_pen = QPen(QColor(29, 185, 84, 55), 1.5)
+            painter.setPen(ring_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(rect)
+            arc_pen = QPen(accent, 1.7)
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc_pen)
+            start_angle = int((-(self._phase * 16) % 360) * 16)
+            painter.drawArc(rect, start_angle, 110 * 16)
+            painter.end()
+            return
+
+        painter.setBrush(accent)
+        bar_w = 2.0
+        gap = 1.6
+        total_w = 3 * bar_w + 2 * gap
+        start_x = (self.width() - total_w) / 2.0
+        max_h = 9.5
+        min_h = 2.6
+        base_y = (self.height() + max_h) / 2.0
+        if self._playing:
+            t = self._phase * 0.34
+            levels = (
+                0.52 + 0.46 * math.sin(t),
+                0.55 + 0.43 * math.sin(t * 1.28 + 1.85),
+                0.50 + 0.48 * math.sin(t * 0.92 + 3.55),
+            )
+        else:
+            levels = (0.38, 0.68, 0.48)
+        for idx, level in enumerate(levels):
+            clamped = max(0.0, min(1.0, level))
+            h = min_h + (max_h - min_h) * clamped
+            x = start_x + idx * (bar_w + gap)
+            y = base_y - h
+            painter.drawRoundedRect(QRectF(x, y, bar_w, h), 0.9, 0.9)
+        painter.end()
+
+
 class TrackRow(QWidget):
     """Строка трека в стиле Spotify: номер, обложка, название, источник и действия."""
     play_requested = pyqtSignal(object)
@@ -3144,7 +3289,7 @@ class TrackRow(QWidget):
         self._original_index = str(index) if index else "•"
         self._eq_phase = 0
         self._eq_timer = QTimer(self)
-        self._eq_timer.setInterval(320)
+        self._eq_timer.setInterval(45)
         self._eq_timer.timeout.connect(self._animate_equalizer)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -3153,10 +3298,10 @@ class TrackRow(QWidget):
         layout.setSpacing(10 if compact else 12)
 
         if not compact:
-            self.index_label = QLabel(self._original_index)
+            self.index_label = TrackIndexIndicator(self._original_index)
             self.index_label.setObjectName("trackIndex")
             self.index_label.setProperty("playing", False)
-            self.index_label.setFixedWidth(22)
+            self.index_label.setFixedSize(22, 22)
             self.index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.index_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             layout.addWidget(self.index_label)
@@ -3180,21 +3325,16 @@ class TrackRow(QWidget):
         self.title_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.title_label.clicked.connect(lambda: self.play_requested.emit(dict(self.track)))
         display_artist = self.track.get("artist_display") or self.track.get("artist", "")
-        if compact:
-            self.artist_label = QLabel(display_artist)
-            self.artist_label.setObjectName("trackArtist")
-            self.artist_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        else:
-            self.artist_label = QPushButton(display_artist)
-            self.artist_label.setObjectName("trackArtistLink")
-            self.artist_label.setFlat(True)
-            self.artist_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            self.artist_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.artist_label.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.artist_label.setToolTip("Открыть профиль исполнителя")
-            self.artist_label.clicked.connect(
-                lambda checked=False: self.artist_requested.emit(dict(self.track))
-            )
+        self.artist_label = QPushButton(display_artist)
+        self.artist_label.setObjectName("trackArtistLink")
+        self.artist_label.setFlat(True)
+        self.artist_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.artist_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.artist_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.artist_label.setToolTip("Открыть профиль исполнителя")
+        self.artist_label.clicked.connect(
+            lambda checked=False: self.artist_requested.emit(dict(self.track))
+        )
         self.artist_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.artist_label.setMinimumHeight(17)
         text_column.addWidget(self.title_label)
@@ -3212,7 +3352,7 @@ class TrackRow(QWidget):
             self.remove_button.setProperty("revealed", False)
             layout.addWidget(self.remove_button)
             self.remove_button.setVisible(removable)
-            self.now_playing = QLabel("♫", self.thumbnail_label)
+            self.now_playing = CompactNowPlayingBadge("♫", self.thumbnail_label)
             self.now_playing.setObjectName("queuePlayingBadge")
             self.now_playing.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.now_playing.setGeometry(22, 22, 18, 18)
@@ -3253,80 +3393,103 @@ class TrackRow(QWidget):
             layout.addWidget(self.play_button)
             layout.addWidget(self.favorite_button)
 
+    def _sync_indicator_state(self):
+        needs_timer = bool(self._loading or (self._is_current and self._is_playing))
+        if self.compact:
+            if hasattr(self, "now_playing"):
+                self.now_playing.setVisible(bool(self._is_current or self._loading))
+                self.now_playing.set_state(
+                    loading=self._loading,
+                    current=self._is_current,
+                    playing=self._is_playing,
+                    phase=self._eq_phase,
+                )
+        elif hasattr(self, "index_label"):
+            if self._loading:
+                target_text = "⏳"
+            elif self._is_current:
+                target_text = "♫"
+            else:
+                target_text = self._original_index
+            if self.index_label.text() != target_text:
+                self.index_label.setText(target_text)
+            self.index_label.set_state(
+                loading=self._loading,
+                current=self._is_current,
+                playing=self._is_playing,
+                phase=self._eq_phase,
+            )
+        if needs_timer and self.isVisible():
+            if not self._eq_timer.isActive():
+                self._eq_timer.start()
+        else:
+            self._eq_timer.stop()
+
     def set_playing(self, current, animate=None):
         """Текущая строка остаётся выделенной и на паузе; эквалайзер движется только при Play."""
         current = bool(current)
         if animate is None:
             animate = current
         animate = bool(animate and current)
-        if self.compact:
-            if self._is_current == current:
-                return
-            self._is_current = current
-            self.now_playing.setVisible(current)
-            self.setProperty("playing", current)
-            self.title_label.setProperty("playing", current)
-            for widget in (self, self.title_label):
-                widget.style().unpolish(widget)
-                widget.style().polish(widget)
-                widget.update()
-            return
         current_changed = self._is_current != current
         animation_changed = self._is_playing != animate
         if not current_changed and not animation_changed:
             return
         self._is_current = current
         self._is_playing = animate
-        self.setProperty("playing", current)
-        self.title_label.setProperty("playing", current)
-        self.index_label.setProperty("playing", current)
-        for widget in (self, self.title_label, self.index_label):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
-            widget.update()
-        if self._loading:
-            self._eq_timer.stop()
-            self.index_label.setText("⏳")
-            return
-        if animate:
-            if current_changed or not self._eq_timer.isActive():
-                self._eq_phase = 0
-                self._animate_equalizer()
-            self._eq_timer.start()
-        else:
-            self._eq_timer.stop()
-            if current:
-                self.index_label.setText("♫")
-            else:
-                self.index_label.setText(self._original_index)
+        if current_changed:
+            self.setProperty("playing", current)
+            self.title_label.setProperty("playing", current)
+            widgets = [self, self.title_label]
+            if not self.compact and hasattr(self, "index_label"):
+                self.index_label.setProperty("playing", current)
+                widgets.append(self.index_label)
+            for widget in widgets:
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()
+        if (current_changed or animation_changed) and animate and not self._loading:
+            self._eq_phase = 0
+        self._sync_indicator_state()
 
     def set_loading(self, loading: bool):
-        """Показывает, что выбранный трек ещё подготавливается к запуску."""
-        self._loading = bool(loading)
-        if self.compact or not hasattr(self, "index_label"):
+        """Показывает плавный спиннер, пока выбранный трек подготавливается к запуску."""
+        new_loading = bool(loading)
+        if self._loading == new_loading:
             return
-        if self._loading:
-            self._eq_timer.stop()
-            self.index_label.setText("⏳")
-            return
-        if self._is_current:
-            self.index_label.setText("♫")
-            if self._is_playing:
-                self._eq_phase = 0
-                self._animate_equalizer()
-                self._eq_timer.start()
-            else:
-                self._eq_timer.stop()
-        else:
-            self._eq_timer.stop()
-            self.index_label.setText(self._original_index)
+        self._loading = new_loading
+        self._eq_phase = 0
+        self._sync_indicator_state()
 
     def _animate_equalizer(self):
-        if not self._is_playing or self.compact or self._loading:
+        if not (self._loading or (self._is_current and self._is_playing)):
+            self._eq_timer.stop()
             return
-        frames = ("▂▄▆", "▅▂▇", "▆▃▅", "♫")
-        self.index_label.setText(frames[self._eq_phase % len(frames)])
-        self._eq_phase += 1
+        self._eq_phase = (self._eq_phase + 1) % 3600
+        if self.compact:
+            if hasattr(self, "now_playing"):
+                self.now_playing.set_state(
+                    loading=self._loading,
+                    current=self._is_current,
+                    playing=self._is_playing,
+                    phase=self._eq_phase,
+                )
+        elif hasattr(self, "index_label"):
+            self.index_label.set_state(
+                loading=self._loading,
+                current=self._is_current,
+                playing=self._is_playing,
+                phase=self._eq_phase,
+            )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if (self._loading or (self._is_current and self._is_playing)) and not self._eq_timer.isActive():
+            self._eq_timer.start()
+
+    def hideEvent(self, event):
+        self._eq_timer.stop()
+        super().hideEvent(event)
 
     def _reveal_queue_action(self, revealed):
         if self.compact and self.removable:
@@ -3344,7 +3507,7 @@ class TrackRow(QWidget):
 
     def mousePressEvent(self, event):
         # Кнопки действий должны обрабатывать нажатие самостоятельно:
-        # иначе клик по Play/лайку/удалению может запустить строку повторно.
+        # иначе клик по Play/лайку/удалению/автору может запустить строку повторно.
         if event.button() == Qt.MouseButton.LeftButton:
             child = self.childAt(event.position().toPoint())
             action_buttons = tuple(
@@ -3352,6 +3515,7 @@ class TrackRow(QWidget):
                     getattr(self, "play_button", None),
                     getattr(self, "favorite_button", None),
                     getattr(self, "remove_button", None),
+                    getattr(self, "artist_label", None),
                 ) if button is not None
             )
             if child is None:
@@ -8415,7 +8579,10 @@ class MusicPlayer(QMainWindow):
                 or track.get("source") not in ("youtube", "soundcloud", "local")):
             return None
         # Persist only public catalog metadata, never resolved streams or auth data.
-        fields = ("source", "url", "title", "artist", "artist_display", "thumbnail", "video_id")
+        fields = (
+            "source", "url", "title", "artist", "artist_display",
+            "profile_artist_name", "artist_url", "thumbnail", "video_id"
+        )
         return {key: str(track[key]) for key in fields if track.get(key)}
 
     def load_recent_tracks(self):
@@ -8477,10 +8644,34 @@ class MusicPlayer(QMainWindow):
                 widget.deleteLater()
         self.recent_heading.setText(heading if tracks else "Недавно слушал")
         self.recent_rows = []
+        current = self.current_track if isinstance(self.current_track, dict) else None
+        current_url = str((current or {}).get("url") or "")
+        current_source = str((current or {}).get("source") or "")
+        is_actually_playing = bool(
+            hasattr(self, "player")
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        requested = self.requested_track if isinstance(self.requested_track, dict) else None
+        requested_url = str((requested or {}).get("url") or "")
+        requested_source = str((requested or {}).get("source") or "")
         for track in tracks:
             row = TrackRow(track, compact=True, removable=False, parent=self.recent_rows_widget)
             row.setFixedHeight(64)
             row.play_requested.connect(lambda selected: self.add_to_queue(selected, True))
+            row.artist_requested.connect(
+                lambda artist_data, src=track.get("source"): self.search_artist_name(artist_data, src)
+            )
+            matches_current = bool(
+                current_url and str(track.get("url") or "") == current_url
+                and str(track.get("source") or "") == current_source
+            )
+            matches_loading = bool(
+                requested_url and str(track.get("url") or "") == requested_url
+                and str(track.get("source") or "") == requested_source
+            )
+            row.set_playing(matches_current, animate=(matches_current and is_actually_playing))
+            if matches_loading:
+                row.set_loading(True)
             self.request_image(track.get("thumbnail", ""), row.thumbnail_label)
             self.recent_rows.append(row)
             self.recent_rows_layout.addWidget(row)
@@ -10471,6 +10662,9 @@ class MusicPlayer(QMainWindow):
         self.search_input.setText(artist_name)
         self.sort_mode = "relevance"
         self.artist_popular_label.setText("Треки исполнителя")
+        if hasattr(self, "view_stack") and hasattr(self, "browse_page"):
+            if self.view_stack.currentWidget() is not self.browse_page:
+                self.fade_to_page(self.browse_page)
         self.start_search()
 
     def start_radio(self, track, artist_context=None):
@@ -11216,9 +11410,20 @@ class MusicPlayer(QMainWindow):
         row.play_requested.connect(
             lambda _track, u=uid: self.play_queue_index(self.index_for_uid(u))
         )
+        row.artist_requested.connect(
+            lambda artist_data, src=queued.get("source"): self.search_artist_name(artist_data, src)
+        )
         self.set_pixmap_safe(row.thumbnail_label, self.fallback_cover)
         current_uid = (self.current_track or {}).get("queue_id")
-        row.set_playing(bool(uid and uid == current_uid))
+        is_actually_playing = bool(
+            hasattr(self, "player")
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        matches_current = bool(uid and uid == current_uid)
+        row.set_playing(matches_current, animate=(matches_current and is_actually_playing))
+        requested_uid = (self.requested_track or {}).get("queue_id")
+        if bool(uid and uid == requested_uid):
+            row.set_loading(True)
         return row
 
     def refresh_queue_list(self):
@@ -11346,6 +11551,12 @@ class MusicPlayer(QMainWindow):
                     row = list_widget.itemWidget(list_widget.item(row_index))
                     if not isinstance(row, TrackRow):
                         continue
+                    row_track = row.track
+                    if (str(row_track.get("url") or "") == target_url
+                            and str(row_track.get("source") or "") == target_source):
+                        row.set_loading(True)
+            for row in getattr(self, "recent_rows", []):
+                if isinstance(row, TrackRow):
                     row_track = row.track
                     if (str(row_track.get("url") or "") == target_url
                             and str(row_track.get("source") or "") == target_source):
@@ -11508,6 +11719,9 @@ class MusicPlayer(QMainWindow):
                 row = list_widget.itemWidget(list_widget.item(index))
                 if isinstance(row, TrackRow) and getattr(row, "_loading", False):
                     row.set_loading(False)
+        for row in getattr(self, "recent_rows", []):
+            if isinstance(row, TrackRow) and getattr(row, "_loading", False):
+                row.set_loading(False)
 
     def cancel_pending_request(self, cancel_supermix=True):
         """Отменяем запуск неактуального трека, оставляя текущий звук."""
