@@ -1740,9 +1740,9 @@ class SearchWorker(QThread):
             # а не каждый раз останавливаться на первых 100 элементах.
             "playliststart": max(1, int(playlist_start)),
             "playlistend": max(1, int(playlist_start)) + int(limit) - 1,
-            "socket_timeout": 8 if self.paginate_all else (2 if self.source == "soundcloud" else 3),
-            "retries": 0 if self.source == "soundcloud" else (1 if self.paginate_all else 0),
-            "extractor_retries": 0 if self.source == "soundcloud" else (1 if self.paginate_all else 0),
+            "socket_timeout": 8 if self.paginate_all else (6 if self.source == "soundcloud" else 5),
+            "retries": 1,
+            "extractor_retries": 1,
             "cachedir": None if self.source == "soundcloud" else False,
             "ignoreconfig": True,
             "youtube_include_dash_manifest": False,
@@ -2450,10 +2450,24 @@ class StreamWorker(QThread):
         # ВАЖНО: сначала извлекаем публичный трек БЕЗ cookies. Иначе любая
         # неверная настройка Firefox/Chrome ломает даже обычные публичные миксы.
         format_options = {
-            "auto": "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https]/bestaudio/best",
-            "high": "bestaudio[abr>=192]/bestaudio/best",
-            "economy": "bestaudio[abr<=128]/bestaudio/best",
-            "compatibility": "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best",
+            "auto": (
+                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/"
+                "bestaudio[protocol=https]/bestaudio[protocol=http]/"
+                "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+            ),
+            "high": (
+                "bestaudio[protocol=https][abr>=192]/bestaudio[protocol=https]/"
+                "bestaudio[abr>=192]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+            ),
+            "economy": (
+                "bestaudio[protocol=https][abr<=128]/bestaudio[protocol=https]/"
+                "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+            ),
+            "compatibility": (
+                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/"
+                "bestaudio[protocol=https]/bestaudio[protocol=http]/"
+                "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+            ),
         }
         selector = format_options.get(self.audio_quality, format_options["auto"])
         if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
@@ -2465,11 +2479,16 @@ class StreamWorker(QThread):
             "format": selector,
             "quiet": True,
             "no_warnings": True,
+            "skip_download": True,
             "noplaylist": True,
-            "socket_timeout": 12,
+            "socket_timeout": 7,
             "retries": 1,
             "extractor_retries": 1,
+            "cachedir": None,
             "ignoreconfig": True,
+            "youtube_include_dash_manifest": False,
+            "youtube_include_hls_manifest": False,
+            "no_color": True,
         }
         try:
             try:
@@ -2601,13 +2620,30 @@ class TrackArtworkWorker(QThread):
             artist = info.get("artist") or info.get("uploader") or info.get("channel") or ""
             if isinstance(artist, dict):
                 artist = artist.get("username") or artist.get("name") or ""
+            stream_url = ""
+            formats = [
+                f for f in (info.get("formats") or [])
+                if isinstance(f, dict) and f.get("url") and f.get("acodec") not in (None, "none")
+            ]
+            if formats:
+                preferred = (
+                    [f for f in formats if f.get("protocol") in ("https", "http") and f.get("ext") in ("m4a", "mp3")]
+                    or [f for f in formats if f.get("protocol") in ("https", "http")]
+                    or [f for f in formats if f.get("ext") in ("m4a", "mp3")]
+                    or formats
+                )
+                stream_url = str(preferred[-1].get("url") or "")
+            if not stream_url and isinstance(info.get("url"), str):
+                stream_url = info["url"]
             data = {
                 "thumbnail": normalize_artwork_url(thumbnail),
                 "artist": str(artist or ""),
                 "duration": info.get("duration") or 0,
                 "title": info.get("title") or self.track.get("title") or "",
             }
-            if not data["thumbnail"]:
+            if stream_url:
+                data["stream_url"] = stream_url
+            if not data["thumbnail"] and not stream_url:
                 raise RuntimeError("В метаданных SoundCloud нет обложки")
             self.metadata_ready.emit(url, data)
         except Exception as error:
@@ -5185,10 +5221,10 @@ class MusicPlayer(QMainWindow):
         self.auto_play_generation = -1
         self.start_cards = []
 
-        # Прямые ссылки временные и могут истекать; сохраняем их на 8 минут.
+        # Прямые ссылки временные и могут истекать; сохраняем их на 15 минут.
         self.stream_cache = {}
         self._stream_details = OrderedDict()
-        self.stream_cache_ttl = 8 * 60
+        self.stream_cache_ttl = 15 * 60
         self._stream_workers = set()
         self.prefetch_worker = None
         self.prefetch_target = None
@@ -11102,6 +11138,9 @@ class MusicPlayer(QMainWindow):
         self.pump_artwork_workers()
 
     def pump_artwork_workers(self):
+        # Не конкурируем с активным извлечением аудиопотока выбранного трека.
+        if self.requested_track is not None or self.stream_worker is not None:
+            return
         while len(self.artwork_workers) < self.artwork_max_workers and self.artwork_backlog:
             track = self.artwork_backlog.popleft()
             url = str(track.get("url") or "")
@@ -11122,6 +11161,15 @@ class MusicPlayer(QMainWindow):
     def on_track_artwork_metadata(self, url, metadata):
         url = str(url or "")
         updates = dict(metadata or {})
+        stream_url = str(updates.pop("stream_url", "") or "")
+        if stream_url and url:
+            self.save_stream(url, stream_url, str(updates.get("title") or ""))
+            if (self.requested_track is not None
+                    and self._key(self.requested_track) == url
+                    and self.pending_slot is None):
+                if self.stream_worker is not None:
+                    self.stream_worker.cancel()
+                self.start_pending_media(QUrl(stream_url), "предзагрузка метаданных")
         if updates.get("thumbnail"):
             updates["thumbnail"] = normalize_artwork_url(updates["thumbnail"])
         found = False
@@ -11680,7 +11728,7 @@ class MusicPlayer(QMainWindow):
             "url": stream_url, "title": title, "saved": time.monotonic()
         }
         # Простой ограниченный кэш, чтобы память не росла без конца.
-        if len(self.stream_cache) > 50:
+        if len(self.stream_cache) > 150:
             oldest = min(self.stream_cache, key=lambda k: self.stream_cache[k]["saved"])
             self.stream_cache.pop(oldest, None)
 
@@ -11747,6 +11795,7 @@ class MusicPlayer(QMainWindow):
             self.standby_key = None
             self.standby_ready = False
         self._clear_loading_indicators()
+        QTimer.singleShot(0, self.pump_artwork_workers)
 
     def prepare_next_track(self):
         """Находим следующую песню и прогреваем её вторым QMediaPlayer.
@@ -11783,8 +11832,11 @@ class MusicPlayer(QMainWindow):
             return
 
         self.prefetch_target = key
-        worker = StreamWorker(track, self, audio_quality=self.audio_quality,
-                              **(self.youtube_auth_kwargs() if track.get("source") == "youtube" else {}))
+        auth_kwargs = (
+            self.youtube_auth_kwargs() if track.get("source") == "youtube"
+            else (self.soundcloud_auth_kwargs() if track.get("source") == "soundcloud" else {})
+        )
+        worker = StreamWorker(track, self, audio_quality=self.audio_quality, **auth_kwargs)
         self.prefetch_worker = worker
         worker.metadata_ready.connect(lambda data, k=key, w=worker:
                                       self.accept_stream_metadata(k, data) if not w._cancel_requested else None)
@@ -11862,8 +11914,12 @@ class MusicPlayer(QMainWindow):
         self.stream_target = key
         self.set_status("Получаю ссылку на новый трек, предыдущий пока играет…")
         avoid_format = self._stream_details.get(key, {}).get("format_id", "") if self._network_recovery is not None else ""
+        auth_kwargs = (
+            self.youtube_auth_kwargs() if track.get("source") == "youtube"
+            else (self.soundcloud_auth_kwargs() if track.get("source") == "soundcloud" else {})
+        )
         worker = StreamWorker(track, self, audio_quality=self.audio_quality, avoid_format_id=avoid_format,
-                              **(self.youtube_auth_kwargs() if track.get("source") == "youtube" else {}))
+                              **auth_kwargs)
         self.stream_worker = worker
         self._stream_workers.add(worker)
         key = self.stream_target
@@ -12050,6 +12106,8 @@ class MusicPlayer(QMainWindow):
                 pass
             else:
                 self.start_stream_extraction(self.requested_track)
+        else:
+            QTimer.singleShot(0, self.pump_artwork_workers)
 
     def start_pending_media(self, media_url, origin):
         """Начинаем новый трек без звука, ожидая фактического движения позиции.
@@ -12401,6 +12459,7 @@ class MusicPlayer(QMainWindow):
         self.update_playing_row_highlight()
         QTimer.singleShot(0, self.ensure_following_track_prepared)
         QTimer.singleShot(0, self.prepare_next_track)
+        QTimer.singleShot(0, self.pump_artwork_workers)
         self.set_status(f"Играет: {title}")
         self.save_playback_checkpoint()
 
