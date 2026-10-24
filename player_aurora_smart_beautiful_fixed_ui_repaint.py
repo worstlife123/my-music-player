@@ -320,76 +320,82 @@ def style_dialog_for_theme(dialog, object_name, theme):
     dialog.setAutoFillBackground(True)
     palette = dialog.palette()
     if theme == "light":
-        palette.setColor(QPalette.ColorRole.Window, QColor("#F5F5F7"))
-        palette.setColor(QPalette.ColorRole.WindowText, QColor("#222222"))
+        palette.setColor(QPalette.ColorRole.Window, QColor("#F3F6FA"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#18202A"))
         palette.setColor(QPalette.ColorRole.Base, QColor("#FFFFFF"))
-        palette.setColor(QPalette.ColorRole.Text, QColor("#222222"))
-        palette.setColor(QPalette.ColorRole.Button, QColor("#E8E8EE"))
-        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#222222"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#18202A"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#EBF0F5"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#18202A"))
         dialog.setPalette(palette)
         dialog.setStyleSheet("""
-            QDialog { background: #F5F5F7; color: #222222; }
-            QDialog QWidget { color: #222222; }
-            QDialog QLabel { color: #222222; background: transparent; }
-            QDialog QLabel#settingsTitle { color: #202027; font-size: 22pt; font-weight: 800; }
-            QDialog QLabel#settingsHint, QDialog QLabel#mutedText { color: #626270; }
+            QDialog { background: #F3F6FA; color: #18202A; }
+            QDialog QWidget { color: #18202A; }
+            QDialog QLabel { color: #18202A; background: transparent; }
+            QDialog QLabel#settingsTitle { color: #141C26; font-size: 22pt; font-weight: 800; }
+            QDialog QLabel#settingsHint, QDialog QLabel#mutedText { color: #5C697C; }
             QDialog QLineEdit, QDialog QComboBox {
-                background: #FFFFFF; color: #222222; border: 1px solid #D2D2DA;
-                border-radius: 9px; padding: 8px 10px; min-height: 20px;
-                selection-background-color: #1DB954; selection-color: #101010;
+                background: #FFFFFF; color: #18202A; border: 1px solid #D5DEE8;
+                border-radius: 10px; padding: 8px 12px; min-height: 20px;
+                selection-background-color: #1DB954; selection-color: #FFFFFF;
+            }
+            QDialog QLineEdit:focus, QDialog QComboBox:focus {
+                border: 1px solid #23834D; background: #FFFFFF;
             }
             QDialog QComboBox QAbstractItemView {
-                background: #FFFFFF; color: #222222; selection-background-color: #E1F4E7;
-                selection-color: #16883D; border: 1px solid #D2D2DA;
+                background: #FFFFFF; color: #18202A; selection-background-color: #E3F3E9;
+                selection-color: #167942; border: 1px solid #D5DEE8;
             }
             QDialog QPushButton {
-                background: #E8E8EE; color: #24242B; border: 1px solid #D5D5DE;
-                border-radius: 9px; padding: 9px 14px;
+                background: #EBF0F5; color: #1C2633; border: 1px solid #D5DEE8;
+                border-radius: 10px; padding: 9px 15px; font-weight: 600;
             }
-            QDialog QPushButton:hover { background: #FFFFFF; border-color: #1DB954; }
+            QDialog QPushButton:hover { background: #FFFFFF; border-color: #23834D; }
             QDialog QPushButton#accentButton {
-                background: #1DB954; color: #101010; border: none; font-weight: 800;
+                background: #1DB954; color: #FFFFFF; border: none; font-weight: 800;
             }
             QDialog QPushButton#accentButton:hover { background: #16883D; color: #FFFFFF; }
-            QMessageBox { background: #F5F5F7; color: #222222; }
-            QMessageBox QLabel { color: #222222; min-width: 280px; }
-            QMessageBox QPushButton { background: #E8E8EE; color: #222222; }
+            QMessageBox { background: #F3F6FA; color: #18202A; }
+            QMessageBox QLabel { color: #18202A; min-width: 280px; }
+            QMessageBox QPushButton { background: #EBF0F5; color: #18202A; }
         """)
     else:
-        palette.setColor(QPalette.ColorRole.Window, QColor("#181818"))
-        palette.setColor(QPalette.ColorRole.WindowText, QColor("#F5F5F5"))
-        palette.setColor(QPalette.ColorRole.Base, QColor("#242424"))
-        palette.setColor(QPalette.ColorRole.Text, QColor("#F5F5F5"))
-        palette.setColor(QPalette.ColorRole.Button, QColor("#282828"))
+        palette.setColor(QPalette.ColorRole.Window, QColor("#10141B"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#F2F5F9"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#181E27"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#F2F5F9"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#1E2530"))
         palette.setColor(QPalette.ColorRole.ButtonText, QColor("#FFFFFF"))
         dialog.setPalette(palette)
         dialog.setStyleSheet("""
-            QDialog { background: #181818; color: #F5F5F5; }
-            QDialog QWidget { color: #F5F5F5; }
-            QDialog QLabel { color: #F5F5F5; background: transparent; }
+            QDialog { background: #10141B; color: #F2F5F9; }
+            QDialog QWidget { color: #F2F5F9; }
+            QDialog QLabel { color: #F2F5F9; background: transparent; }
             QDialog QLabel#settingsTitle { color: #FFFFFF; font-size: 22pt; font-weight: 800; }
-            QDialog QLabel#settingsHint, QDialog QLabel#mutedText { color: #B3B3B3; }
+            QDialog QLabel#settingsHint, QDialog QLabel#mutedText { color: #9DA9BA; }
             QDialog QLineEdit, QDialog QComboBox {
-                background: #242424; color: #FFFFFF; border: 1px solid #3A3A3A;
-                border-radius: 9px; padding: 8px 10px; min-height: 20px;
-                selection-background-color: #1DB954; selection-color: #101010;
+                background: #181E27; color: #FFFFFF; border: 1px solid #2C3544;
+                border-radius: 10px; padding: 8px 12px; min-height: 20px;
+                selection-background-color: #1DB954; selection-color: #0D1A12;
+            }
+            QDialog QLineEdit:focus, QDialog QComboBox:focus {
+                border: 1px solid #5AD48D; background: #1D2430;
             }
             QDialog QComboBox QAbstractItemView {
-                background: #242424; color: #FFFFFF; selection-background-color: #1DB954;
-                selection-color: #101010; border: 1px solid #3A3A3A;
+                background: #181E27; color: #FFFFFF; selection-background-color: #21382B;
+                selection-color: #66E099; border: 1px solid #2C3544;
             }
             QDialog QPushButton {
-                background: #282828; color: #F5F5F5; border: 1px solid #3A3A3A;
-                border-radius: 9px; padding: 9px 14px;
+                background: #1E2530; color: #F2F5F9; border: 1px solid #2E3846;
+                border-radius: 10px; padding: 9px 15px; font-weight: 600;
             }
-            QDialog QPushButton:hover { background: #333333; border-color: #1DB954; }
+            QDialog QPushButton:hover { background: #262F3D; border-color: #5AD48D; }
             QDialog QPushButton#accentButton {
-                background: #1DB954; color: #101010; border: none; font-weight: 800;
+                background: #1DB954; color: #0D1912; border: none; font-weight: 800;
             }
-            QDialog QPushButton#accentButton:hover { background: #1ED760; }
-            QMessageBox { background: #181818; color: #FFFFFF; }
+            QDialog QPushButton#accentButton:hover { background: #38DC73; }
+            QMessageBox { background: #10141B; color: #FFFFFF; }
             QMessageBox QLabel { color: #FFFFFF; min-width: 280px; }
-            QMessageBox QPushButton { background: #282828; color: #FFFFFF; }
+            QMessageBox QPushButton { background: #1E2530; color: #FFFFFF; }
         """)
 
 
@@ -850,46 +856,61 @@ class SpotifyPlaylistCard(QPushButton):
         clip.addRoundedRect(rect, 24, 24)
         painter.setClipPath(clip)
         colors = {
-            "likes": ("#352684", "#AD65EF"),
-            "soundcloud-likes": ("#FD5C26", "#712657"),
-            "supermix": ("#EC412B", "#F5AF45"),
-            "shuffle": ("#123959", "#29CEBA"),
+            "likes": ("#2B1B72", "#673AB7", "#B866F5"),
+            "soundcloud-likes": ("#FF5824", "#C92D51", "#5E1E52"),
+            "supermix": ("#E83828", "#F27127", "#F7B733"),
+            "shuffle": ("#0E3352", "#147A85", "#2CE0C3"),
         }
-        first, last = colors.get(style, colors["likes"])
+        first, middle, last = colors.get(style, colors["likes"])
         gradient = QLinearGradient(0, 0, size, size)
-        gradient.setColorAt(0, QColor(first))
-        gradient.setColorAt(1, QColor(last))
+        gradient.setColorAt(0.0, QColor(first))
+        gradient.setColorAt(0.52, QColor(middle))
+        gradient.setColorAt(1.0, QColor(last))
         painter.fillRect(rect, gradient)
         painter.setPen(Qt.PenStyle.NoPen)
-        glow = QRadialGradient(QPointF(300, 50), 330)
-        glow.setColorAt(0, QColor(255, 255, 255, 100))
-        glow.setColorAt(1, QColor(255, 255, 255, 0))
+        glow = QRadialGradient(QPointF(305, 52), 320)
+        glow.setColorAt(0.0, QColor(255, 255, 255, 115))
+        glow.setColorAt(0.55, QColor(255, 255, 255, 26))
+        glow.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.fillRect(rect, glow)
+        bottom_glow = QRadialGradient(QPointF(60, 336), 240)
+        bottom_glow.setColorAt(0.0, QColor(0, 0, 0, 75))
+        bottom_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(rect, bottom_glow)
 
         if style == "supermix":
             painter.setBrush(Qt.BrushStyle.NoBrush)
             for index in range(9):
-                painter.setPen(QPen(QColor(80, 13, 40, 130), 11))
+                painter.setPen(QPen(QColor(72, 12, 38, 125 - index * 9), 10))
                 radius = 46 + index * 31
                 painter.drawEllipse(QPointF(340, 45), radius, radius)
-            draw_vector_icon(painter, "supermix", QRectF(100, 96, 184, 184), "#FFF5E8")
+            painter.setBrush(QColor(255, 255, 255, 24))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(192, 188), 108, 108)
+            draw_vector_icon(painter, "supermix", QRectF(100, 96, 184, 184), "#FFF8EE")
         elif style == "shuffle":
             painter.save()
             painter.translate(190, 190)
             painter.rotate(-28)
             for index in range(7):
-                shade = QColor("#B8FFE8") if index % 2 == 0 else QColor("#117C87")
-                shade.setAlpha(125)
+                shade = QColor("#B8FFE8") if index % 2 == 0 else QColor("#0F6D78")
+                shade.setAlpha(115)
                 painter.setBrush(shade)
                 painter.drawRoundedRect(QRectF(-280, -230 + index * 67, 560, 37), 18, 18)
             painter.restore()
+            painter.setBrush(QColor(9, 34, 48, 70))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(192, 188), 108, 108)
             draw_vector_icon(painter, "headphones", QRectF(100, 96, 184, 184), "#FFFFFF")
         else:
-            painter.setBrush(QColor(255, 255, 255, 16))
-            for center, radius in ((QPointF(25, 370), 180), (QPointF(340, 25), 126)):
+            painter.setBrush(QColor(255, 255, 255, 20))
+            for center, radius in ((QPointF(25, 370), 185), (QPointF(340, 25), 132), (QPointF(192, 186), 104)):
                 painter.drawEllipse(center, radius, radius)
             draw_vector_icon(painter, "heart", QRectF(102, 92, 180, 180), "#FFFFFF")
 
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 42), 2))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 23, 23)
         painter.end()
         return image
 
@@ -900,17 +921,27 @@ class SpotifyPlaylistCard(QPushButton):
             painter.setOpacity(0.6)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         path = QPainterPath()
-        path.addRoundedRect(bounds, 14, 14)
+        path.addRoundedRect(bounds, 16, 16)
         light = getattr(self.window(), "theme", "dark") == "light"
-        background = ("#EAEFF4" if self._hover > 0 else "#F4F5F7") if light else ("#272B33" if self._hover > 0 else "#1D2026")
-        painter.fillPath(path, QColor(background))
-        painter.setPen(QPen(QColor(255, 255, 255, int(15 + 32 * self._hover)), 1))
+        if light:
+            bg_start = QColor("#EBF1F6" if self._hover > 0 else "#F4F7FA")
+            bg_end = QColor("#E2EAF2" if self._hover > 0 else "#EDF2F7")
+            border_color = QColor("#278454" if self._hover > 0 else "#D9E1EB")
+        else:
+            bg_start = QColor("#232A35" if self._hover > 0 else "#191E26")
+            bg_end = QColor("#1B212A" if self._hover > 0 else "#141820")
+            border_color = QColor(90, 212, 141, 125) if self._hover > 0 else QColor(255, 255, 255, 22)
+        card_grad = QLinearGradient(bounds.topLeft(), bounds.bottomRight())
+        card_grad.setColorAt(0.0, bg_start)
+        card_grad.setColorAt(1.0, bg_end)
+        painter.fillPath(path, card_grad)
+        painter.setPen(QPen(border_color, 1.2 if self._hover > 0 else 1.0))
         painter.drawPath(path)
-        side = min(112.0, bounds.height() - 28)
+        side = min(114.0, bounds.height() - 26)
         cover = QRectF(bounds.left() + 14, bounds.center().y() - side / 2, side, side)
         artwork = self._cover_pixmap if self._cover_pixmap is not None and not self._cover_pixmap.isNull() else self._artwork
         cover_path = QPainterPath()
-        cover_path.addRoundedRect(cover, 8, 8)
+        cover_path.addRoundedRect(cover, 11, 11)
         painter.save()
         painter.setClipPath(cover_path)
         scaled = self._cover_for_size(artwork, side)
@@ -918,19 +949,33 @@ class SpotifyPlaylistCard(QPushButton):
         crop = QRectF((scaled.width() - pixels) / 2, (scaled.height() - pixels) / 2, pixels, pixels)
         painter.drawPixmap(cover, scaled, crop)
         painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        painter.drawRoundedRect(cover, 11, 11)
+
         left = cover.right() + 22
-        width = max(24.0, bounds.right() - left - 74)
+        width = max(24.0, bounds.right() - left - 76)
         title_font = QFont(self.font().family(), 15, QFont.Weight.Bold)
         painter.setFont(title_font)
-        painter.setPen(QColor("#18202A" if light else "#FFFFFF"))
-        painter.drawText(QRectF(left, bounds.center().y() - 16, width, 32),
+        painter.setPen(QColor("#141C26" if light else "#F7F9FC"))
+        has_subtitle = bool(str(self.subtitle or "").strip())
+        title_y = bounds.center().y() - (24 if has_subtitle else 16)
+        painter.drawText(QRectF(left, title_y, width, 28),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(width)))
-        button = QRectF(bounds.right() - 56, bounds.center().y() - 20, 40, 40)
+        if has_subtitle:
+            sub_font = QFont(self.font().family(), 10, QFont.Weight.Medium)
+            painter.setFont(sub_font)
+            painter.setPen(QColor("#5C697C" if light else "#9BA7B8"))
+            painter.drawText(QRectF(left, title_y + 26, width, 22),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             QFontMetrics(sub_font).elidedText(self.subtitle, Qt.TextElideMode.ElideRight, int(width)))
+        button = QRectF(bounds.right() - 56, bounds.center().y() - 21, 42, 42)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#FFFFFF"))
+        painter.setBrush(QColor("#1ED760" if self._hover > 0 else ("#1DB954" if light else "#FFFFFF")))
         painter.drawEllipse(button)
-        draw_vector_icon(painter, self.action_icon, button.adjusted(11, 11, -11, -11), "#171719")
+        icon_fg = "#FFFFFF" if (light and self._hover <= 0) else "#0E1712"
+        draw_vector_icon(painter, self.action_icon, button.adjusted(11, 11, -11, -11), icon_fg)
         painter.end()
 
     def _paint_tile(self):
@@ -941,11 +986,16 @@ class SpotifyPlaylistCard(QPushButton):
             painter.setOpacity(0.55)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         active = self.playback_state in ("playing", "paused", "waiting")
-        border = ("#278454" if light else "#48CB83") if active else ("#DDE1E6" if light else "#30343C")
-        painter.setPen(QPen(QColor(border), 1.5 if active else 1))
-        background = ("#E5F4EB" if light else "#193026") if active else (
-            ("#EBEEF2" if self._hover > 0 else "#F4F5F7") if light else
-            ("#272B33" if self._hover > 0 else "#1D2026"))
+        if active:
+            border = "#23834D" if light else "#48CB83"
+            background = "#E4F4EA" if light else "#172D23"
+        elif self._hover > 0:
+            border = "#C5D2E0" if light else "#384354"
+            background = "#EBF0F6" if light else "#212732"
+        else:
+            border = "#DCE3EC" if light else "#252C37"
+            background = "#F5F8FB" if light else "#181C24"
+        painter.setPen(QPen(QColor(border), 1.5 if active else 1.0))
         painter.setBrush(QColor(background))
         painter.drawRoundedRect(bounds, 16, 16)
         side = self.width() - 28
@@ -953,26 +1003,37 @@ class SpotifyPlaylistCard(QPushButton):
         artwork = self._cover_pixmap if self._cover_pixmap is not None else self._artwork
         if artwork is not None and not artwork.isNull():
             path = QPainterPath()
-            path.addRoundedRect(cover, 10, 10)
+            path.addRoundedRect(cover, 12, 12)
             painter.save()
             painter.setClipPath(path)
             scaled = self._cover_for_size(artwork, side)
             pixels = side * scaled.devicePixelRatioF()
             crop = QRectF((scaled.width() - pixels) / 2, (scaled.height() - pixels) / 2, pixels, pixels)
             painter.drawPixmap(cover, scaled, crop)
+            if active or self._hover > 0:
+                vignette = QLinearGradient(cover.topLeft(), cover.bottomLeft())
+                vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
+                vignette.setColorAt(0.65, QColor(0, 0, 0, 12))
+                vignette.setColorAt(1.0, QColor(0, 0, 0, 72))
+                painter.fillRect(cover, vignette)
             painter.restore()
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
+            painter.drawRoundedRect(cover, 12, 12)
         self._paint_playback_badge(painter, cover)
         # Active Supermix controls the running session instead of starting another one.
-        button = QRectF(cover.right() - 43, cover.bottom() - 43, 35, 35)
+        button = QRectF(cover.right() - 44, cover.bottom() - 44, 36, 36)
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 65))
+        painter.drawEllipse(button.translated(0, 2))
         painter.setBrush(QColor("#1ED760" if active or self._hover > 0 else "#FFFFFF"))
         painter.drawEllipse(button)
         action = "pause" if self.playback_state == "playing" else self.action_icon
-        draw_vector_icon(painter, action, button.adjusted(10, 10, -10, -10), "#11161A")
+        draw_vector_icon(painter, action, button.adjusted(10, 10, -10, -10), "#0E1512")
         title_font = QFont(self.font().family(), 11, QFont.Weight.Bold)
         painter.setFont(title_font)
-        painter.setPen(QColor(("#237B4A" if light else "#82E8AC") if active else
-                              ("#18202A" if light else "#F5F7FA")))
+        painter.setPen(QColor(("#1F7A46" if light else "#7CE6A6") if active else
+                              ("#16202C" if light else "#F4F7FA")))
         painter.drawText(QRectF(14, cover.bottom() + 10, side, 24), Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(side)))
         painter.end()
@@ -2745,13 +2806,13 @@ class AnimatedNavButton(QPushButton):
     def set_theme(self, theme):
         self._theme = "light" if theme == "light" else "dark"
         if self._theme == "light":
-            self._base_color = QColor("#555555")
-            self._hover_color = QColor("#111111")
-            self._active_color = QColor("#16883D")
+            self._base_color = QColor("#546275")
+            self._hover_color = QColor("#141C26")
+            self._active_color = QColor("#167A40")
         else:
-            self._base_color = QColor("#B3B3B3")
+            self._base_color = QColor("#A2AEBF")
             self._hover_color = QColor("#FFFFFF")
-            self._active_color = QColor("#1DB954")
+            self._active_color = QColor("#5CE092")
         self._animate_color(self._active_color if self.isChecked() else
                             (self._hover_color if self.underMouse() else self._base_color))
         self.update()
@@ -2784,26 +2845,28 @@ class AnimatedNavButton(QPushButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(1, 1, -1, -1)
         if self.isChecked() or self.underMouse() or self.isDown():
-            painter.setPen(Qt.PenStyle.NoPen)
             if self._theme == "light":
-                background = QColor("#E4F3E9" if self.isChecked() else ("#DFE7EF" if self.isDown() else "#EFF3F7"))
+                background = QColor("#E2F3E8" if self.isChecked() else ("#DCE5EE" if self.isDown() else "#EDF2F7"))
+                border = QColor("#B7DEC5" if self.isChecked() else "#D7E0EA")
             else:
-                background = QColor("#1C3028" if self.isChecked() else ("#29323D" if self.isDown() else "#1B222B"))
+                background = QColor("#182C24" if self.isChecked() else ("#252E3B" if self.isDown() else "#19202A"))
+                border = QColor("#2D5742" if self.isChecked() else "#283241")
+            painter.setPen(QPen(border, 1))
             painter.setBrush(background)
-            painter.drawRoundedRect(rect, 9, 9)
+            painter.drawRoundedRect(rect, 11, 11)
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#1DB954"))
-            painter.drawRoundedRect(rect.left(), rect.top() + 9, 3, max(12, rect.height() - 18), 1.5, 1.5)
+            painter.drawRoundedRect(rect.left() + 1, rect.top() + 11, 3.5, max(12, rect.height() - 22), 1.75, 1.75)
         painter.setPen(self._text_color)
-        icon_rect = QRectF(rect.center().x() - 18 if self._collapsed else rect.left() + 10,
+        icon_rect = QRectF(rect.center().x() - 18 if self._collapsed else rect.left() + 11,
                            rect.center().y() - 18, 36, 36)
         painter.drawPixmap(icon_rect, self._service_artwork, QRectF(0, 0, 80, 80))
         if not self._collapsed:
-            text_rect = QRect(rect.left() + 57, rect.top(), max(0, rect.width() - 64), rect.height())
+            text_rect = QRect(rect.left() + 58, rect.top(), max(0, rect.width() - 65), rect.height())
             nav_font = QFont(self.font())
             nav_font.setPixelSize(13)
-            nav_font.setWeight(QFont.Weight.DemiBold if self.isChecked() else QFont.Weight.Medium)
+            nav_font.setWeight(QFont.Weight.Bold if self.isChecked() else QFont.Weight.Medium)
             painter.setFont(nav_font)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._nav_title)
         painter.end()
@@ -3325,23 +3388,29 @@ class ClickSlider(QSlider):
         light = getattr(self.window(), "theme", "dark") == "light"
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rail = QRectF(5, self.height() / 2 - 1.5, max(1, self.width() - 10), 3)
+        rail = QRectF(6, self.height() / 2 - 2.0, max(1, self.width() - 12), 4.0)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#CBD4DF" if light else "#424C5B"))
-        painter.drawRoundedRect(rail, 1.5, 1.5)
+        painter.setBrush(QColor("#CFD8E3" if light else "#323B48"))
+        painter.drawRoundedRect(rail, 2.0, 2.0)
         position = QStyle.sliderPositionFromValue(self.minimum(), self.maximum(), self.value(),
                                                  int(rail.width()), option.upsideDown)
         if self.isEnabled():
-            color = QColor("#278454" if light else "#68D696")
+            color = QColor("#21834C" if light else "#5CE092")
             painter.setBrush(color)
             progress = QRectF(rail)
             if option.upsideDown:
                 progress.setLeft(rail.left() + position)
             else:
                 progress.setWidth(position)
-            painter.drawRoundedRect(progress, 1.5, 1.5)
-            painter.setBrush(color if light else QColor("#F2F6FA"))
-            painter.drawEllipse(QPointF(rail.left() + position, rail.center().y()), 4.5, 4.5)
+            painter.drawRoundedRect(progress, 2.0, 2.0)
+            thumb_center = QPointF(rail.left() + position, rail.center().y())
+            if self.underMouse() or self.isSliderDown():
+                halo = QColor(color)
+                halo.setAlpha(55)
+                painter.setBrush(halo)
+                painter.drawEllipse(thumb_center, 7.0, 7.0)
+            painter.setBrush(color if light else QColor("#F5F8FC"))
+            painter.drawEllipse(thumb_center, 4.8, 4.8)
         painter.end()
 
     def mousePressEvent(self, event):
@@ -3390,21 +3459,21 @@ class MenuChoice(QPushButton):
         self.menu_popup.setObjectName("settingsDarkMenu")
         self.menu_popup.setStyleSheet("""
             QMenu {
-                background: #282828; color: #FFFFFF;
-                border: 1px solid #3B3B3B; padding: 7px;
+                background: #1A2029; color: #F4F7FA;
+                border: 1px solid #2F3947; border-radius: 10px; padding: 6px;
             }
             QMenu::item {
-                padding: 11px 24px 11px 13px; border: none;
+                padding: 10px 22px 10px 13px; border: none;
                 margin: 2px 1px; border-radius: 8px;
                 background: transparent;
             }
-            QMenu::item:selected { background: #3A3A3A; color: #1ED760; }
+            QMenu::item:selected { background: #23382D; color: #66E099; }
             QMenu::separator { height: 0px; }
         """)
         palette = self.menu_popup.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor('#282828'))
-        palette.setColor(QPalette.ColorRole.Base, QColor('#282828'))
-        palette.setColor(QPalette.ColorRole.Text, QColor('#FFFFFF'))
+        palette.setColor(QPalette.ColorRole.Window, QColor('#1A2029'))
+        palette.setColor(QPalette.ColorRole.Base, QColor('#1A2029'))
+        palette.setColor(QPalette.ColorRole.Text, QColor('#F4F7FA'))
         self.menu_popup.setPalette(palette)
         for title, value in self.options:
             action = self.menu_popup.addAction(title)
@@ -3842,101 +3911,109 @@ class SettingsDialog(QDialog):
         root.addLayout(buttons)
 
         self.setStyleSheet("""
-            /* Делаем фон диалога сплошным, убираем чёрные поля Windows. */
+            /* Делаем фон диалога сплошным в единой палитре Aurora. */
             QDialog#settingsDialog {
-                background-color: #121212;
-                color: #F6F0F7;
+                background-color: #0E1217;
+                color: #F2F5F9;
             }
-            QWidget { color: #F3EEF5; }
+            QWidget { color: #F2F5F9; }
             QLabel, QTabWidget#settingsTabs { background: transparent; }
             QWidget#settingsGeneral,
             QWidget#settingsPlayback,
-            QWidget#settingsServices {
-                background-color: #181818;
+            QWidget#settingsServices,
+            QWidget#settingsBackground {
+                background-color: #151A22;
             }
-            QLabel#wallpaperPreview { background: #20242B; border-radius: 10px; color: #AEB6C3; }
-            QWidget#settingsBackground { background: #181818; }
-            QLabel#settingsTitle { font-size: 24px; font-weight: 800; color: #FFF8FA; }
-            QLabel#settingsHint { color: #AFA4B9; font-size: 10pt; }
-            QLabel#settingsGroup { color: #1DB954; font-size: 10pt; font-weight: 800; }
-            QLabel#settingsField { font-size: 10pt; color: #DAD0E0; }
+            QLabel#wallpaperPreview {
+                background: #1C222D; border: 1px solid #2A3342;
+                border-radius: 12px; color: #9DA9BA;
+            }
+            QLabel#settingsTitle { font-size: 24px; font-weight: 800; color: #FFFFFF; }
+            QLabel#settingsHint { color: #9AA6B8; font-size: 10pt; }
+            QLabel#settingsGroup { color: #5CE092; font-size: 9.5pt; font-weight: 800; letter-spacing: 0.8px; }
+            QLabel#settingsField { font-size: 10pt; color: #DDE4EE; font-weight: 500; }
             QTabWidget::pane {
-                border: 1px solid #333333;
-                background: #181818; border-radius: 12px;
+                border: 1px solid #252E3B;
+                background: #151A22; border-radius: 14px;
             }
             QTabBar { background: transparent; }
             QTabBar::tab {
-                background: transparent; color: #B3B3B3;
-                border: none; padding: 11px 18px; margin-right: 6px;
+                background: transparent; color: #9AA6B8;
+                border: none; padding: 10px 18px; margin-right: 6px;
+                border-radius: 9px; font-weight: 600;
             }
-            QTabBar::tab:hover { color: #FFFFFF; }
+            QTabBar::tab:hover { color: #FFFFFF; background: #1B222C; }
             QTabBar::tab:selected {
-                background: #282828; color: #1DB954;
+                background: #1E352A; color: #66E099;
                 border-radius: 9px; font-weight: 700;
             }
             QPushButton#settingsPicker {
-                text-align: left; background: #242424;
-                border: 1px solid #3A3A3A; border-radius: 10px;
-                color: #FFFFFF; padding: 9px 12px; font-weight: 650;
+                text-align: left; background: #1C232E;
+                border: 1px solid #2E3846; border-radius: 10px;
+                color: #F4F7FA; padding: 9px 13px; font-weight: 650;
             }
             QPushButton#settingsPicker:hover {
-                background: #303030; border-color: #1DB954;
+                background: #232C3A; border-color: #5CE092;
             }
             QPushButton#settingsPicker::menu-indicator { image: none; width: 0; }
-            QCheckBox { spacing: 10px; color: #E9E0ED; }
+            QCheckBox { spacing: 10px; color: #E3E9F2; }
             QCheckBox::indicator {
                 width: 18px; height: 18px;
-                background: #282828; border: 1px solid #666666;
+                background: #1C232E; border: 1px solid #455163;
                 border-radius: 5px;
             }
             QCheckBox::indicator:checked {
                 background: #1DB954; border: 1px solid #1DB954;
             }
             QSlider::groove:horizontal {
-                height: 6px; background: #535353; border-radius: 3px;
+                height: 5px; background: #323B48; border-radius: 2.5px;
             }
-            QSlider::sub-page:horizontal { background: #1DB954; border-radius: 3px; }
+            QSlider::sub-page:horizontal { background: #5CE092; border-radius: 2.5px; }
             QSlider::handle:horizontal {
-                background: #1ED760; width: 16px;
-                margin: -6px 0; border-radius: 8px;
+                background: #F5F8FC; width: 14px;
+                margin: -5px 0; border-radius: 7px;
             }
             QPushButton#settingsCancel, QPushButton#settingsSave {
-                border: none; border-radius: 10px;
-                padding: 12px 20px; font-weight: 700;
-                background: #282828; color: #FFFFFF;
+                border: 1px solid #2E3846; border-radius: 10px;
+                padding: 11px 22px; font-weight: 700;
+                background: #1C232E; color: #F2F5F9;
             }
-            QPushButton#settingsSave { background: #1DB954; color: #25160F; }
-            QPushButton#settingsCancel:hover { background: #333333; }
-            QPushButton#settingsSave:hover { background: #1ED760; }
+            QPushButton#settingsSave { background: #1DB954; color: #0C1911; border: none; }
+            QPushButton#settingsCancel:hover { background: #252E3C; border-color: #465366; }
+            QPushButton#settingsSave:hover { background: #36DC72; }
         """)
         if player.theme == "light":
             self.setStyleSheet(self.styleSheet() + """
-                QDialog#settingsDialog { background: #F5F5F7; color: #202027; }
-                QWidget { color: #25252C; }
+                QDialog#settingsDialog { background: #F2F5F9; color: #18202A; }
+                QWidget { color: #18202A; }
                 QWidget#settingsGeneral, QWidget#settingsPlayback, QWidget#settingsServices,
-                QTabWidget#settingsTabs::pane { background: #FFFFFF; border-color: #DADAE2; }
-                QWidget#settingsBackground { background: #FFFFFF; }
-                QLabel#wallpaperPreview { background: #E9EDF2; color: #526075; }
-                QLabel#settingsTitle { color: #202027; }
-                QLabel#settingsHint { color: #666675; }
-                QLabel#settingsGroup { color: #16883D; }
-                QLabel#settingsField { color: #393943; }
-                QTabWidget::pane { border-color: #DADAE2; background: #FFFFFF; }
-                QTabBar::tab { color: #656574; }
-                QTabBar::tab:selected { background: #E1F4E7; color: #16883D; }
-                QPushButton#settingsPicker { background: #F4F4F7; border-color: #D7D6E0; color: #24242B; }
-                QPushButton#settingsPicker:hover { background: #FFFFFF; border-color: #1DB954; }
-                QCheckBox { color: #30303A; }
-                QCheckBox::indicator { background: #FFFFFF; border-color: #BDBDC9; }
-                QSlider::groove:horizontal { background: #D5D5DE; }
-                QSlider::sub-page:horizontal { background: #1DB954; }
-                QSlider::handle:horizontal { background: #1DB954; }
-                QPushButton#settingsCancel { background: #E8E8EE; color: #30303A; }
-                QPushButton#settingsCancel:hover { background: #DCDCE5; }
+                QWidget#settingsBackground, QTabWidget#settingsTabs::pane {
+                    background: #FFFFFF; border-color: #D8E0EA;
+                }
+                QLabel#wallpaperPreview { background: #EAF0F6; border-color: #D5DEE8; color: #58667A; }
+                QLabel#settingsTitle { color: #141C26; }
+                QLabel#settingsHint { color: #5E6B7E; }
+                QLabel#settingsGroup { color: #187941; }
+                QLabel#settingsField { color: #263242; }
+                QTabWidget::pane { border-color: #D8E0EA; background: #FFFFFF; }
+                QTabBar::tab { color: #5E6B7E; }
+                QTabBar::tab:hover { background: #E9EFF6; color: #141C26; }
+                QTabBar::tab:selected { background: #E1F3E8; color: #167A40; }
+                QPushButton#settingsPicker { background: #F4F7FA; border-color: #D4DCE7; color: #18202A; }
+                QPushButton#settingsPicker:hover { background: #FFFFFF; border-color: #21834C; }
+                QCheckBox { color: #222E3D; }
+                QCheckBox::indicator { background: #FFFFFF; border-color: #B8C4D4; }
+                QSlider::groove:horizontal { background: #CFD8E3; }
+                QSlider::sub-page:horizontal { background: #21834C; }
+                QSlider::handle:horizontal { background: #21834C; }
+                QPushButton#settingsCancel { background: #E7EDF4; color: #222E3D; border-color: #D0DAE6; }
+                QPushButton#settingsCancel:hover { background: #DCE5F0; }
+                QPushButton#settingsSave { background: #1DB954; color: #FFFFFF; }
+                QPushButton#settingsSave:hover { background: #189E47; }
             """)
-            light_menu = """QMenu { background: #FFFFFF; color: #24242B; border: 1px solid #D7D6E0; padding: 6px; }
-                QMenu::item { padding: 10px 20px; border: none; border-radius: 6px; }
-                QMenu::item:selected { background: #E1F4E7; color: #16883D; }"""
+            light_menu = """QMenu { background: #FFFFFF; color: #18202A; border: 1px solid #D5DEE8; border-radius: 10px; padding: 6px; }
+                QMenu::item { padding: 10px 20px; border: none; border-radius: 7px; }
+                QMenu::item:selected { background: #E2F3E8; color: #167A40; }"""
             for popup in self.findChildren(QMenu):
                 popup.setStyleSheet(light_menu)
 
@@ -4049,7 +4126,10 @@ class Toast(QLabel):
         super().__init__(parent)
         self.setWordWrap(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setStyleSheet("background: rgba(30,30,35,235); color: white; border-radius: 10px; padding: 12px;")
+        self.setStyleSheet(
+            "background: rgba(18, 23, 31, 242); color: #F4F7FA; "
+            "border: 1px solid rgba(92, 224, 146, 95); border-radius: 12px; padding: 12px 15px; font-weight: 600;"
+        )
         self.opacity = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity)
         self.animation = QPropertyAnimation(self.opacity, b"opacity", self)
@@ -4165,16 +4245,23 @@ class PlayerBar(QFrame):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 14, 14)
         painter.setClipPath(path)
+        light = getattr(self.window(), "theme", "dark") == "light"
         color = QColor(self.accent)
-        color.setAlpha(22 if getattr(self.window(), "theme", "dark") == "light" else 48)
-        gradient = QLinearGradient(0, 0, min(600, self.width()), self.height())
-        gradient.setColorAt(0, color)
+        color.setAlpha(26 if light else 56)
+        gradient = QLinearGradient(0, 0, min(680, self.width()), self.height())
+        gradient.setColorAt(0.0, color)
+        mid = QColor(self.accent)
+        mid.setAlpha(10 if light else 22)
+        gradient.setColorAt(0.55, mid)
         color.setAlpha(0)
-        gradient.setColorAt(1, color)
+        gradient.setColorAt(1.0, color)
         painter.fillRect(self.rect(), gradient)
+        painter.setPen(QPen(QColor(255, 255, 255, 90 if light else 18), 1))
+        painter.drawLine(14, 1, max(14, self.width() - 14), 1)
         painter.end()
 
 
@@ -4217,7 +4304,7 @@ class MiniPlayer(PlayerBar):
         self.cover.setFixedSize(56, 56)
         info.addWidget(self.cover)
         text = QVBoxLayout()
-        self.title_label = QLabel()
+        self.title_label = MarqueeLabel()
         self.title_label.setObjectName("miniTitle")
         self.artist_label = QLabel()
         self.artist_label.setObjectName("miniArtist")
@@ -4286,29 +4373,32 @@ class MiniPlayer(PlayerBar):
         path = QPainterPath()
         path.addRoundedRect(bounds, 14, 14)
         light = self.theme == "light"
-        painter.fillPath(path, QColor("#FFFFFF" if light else "#171B21"))
+        painter.fillPath(path, QColor("#FFFFFF" if light else "#151921"))
         gradient = QLinearGradient(0, 0, self.width(), self.height())
         accent = QColor(self.accent)
-        accent.setAlpha(22 if light else 48)
-        gradient.setColorAt(0, accent)
+        accent.setAlpha(24 if light else 52)
+        gradient.setColorAt(0.0, accent)
+        accent_mid = QColor(self.accent)
+        accent_mid.setAlpha(8 if light else 18)
+        gradient.setColorAt(0.6, accent_mid)
         accent.setAlpha(0)
-        gradient.setColorAt(1, accent)
+        gradient.setColorAt(1.0, accent)
         painter.fillPath(path, gradient)
-        painter.setPen(QPen(QColor("#D8DFE8" if light else "#303946"), 1))
+        painter.setPen(QPen(QColor("#D5DEE8" if light else "#2D3644"), 1))
         painter.drawPath(path)
         painter.end()
 
     def apply_theme(self):
         self.theme = self.owner.theme
         light = self.theme == "light"
-        background, foreground, muted = ("#FFFFFF", "#18202A", "#626C7B") if light else ("#171B21", "#F5F7FA", "#AAB4C3")
+        background, foreground, muted = ("#FFFFFF", "#18202A", "#606D80") if light else ("#151921", "#F5F7FA", "#A6B1C2")
         self.setStyleSheet(f"""
-            QFrame#miniPlayer {{ background: {background}; border: 1px solid {'#D8DFE8' if light else '#303946'}; border-radius: 14px; }}
+            QFrame#miniPlayer {{ background: {background}; border: 1px solid {'#D5DEE8' if light else '#2D3644'}; border-radius: 14px; }}
             QLabel {{ color: {foreground}; background: transparent; border: none; }}
             QLabel#miniTitle {{ font-size: 14px; font-weight: 700; }}
             QLabel#miniStatus, QLabel#miniArtist {{ color: {muted}; font-size: 11px; }}
             QPushButton {{ background: transparent; color: {foreground}; border: none; border-radius: 8px; padding: 0; }}
-            QPushButton:hover {{ background: {'#E9F0EC' if light else '#2B3430'}; }}
+            QPushButton:hover {{ background: {'#E8F1EC' if light else '#252F38'}; }}
             QPushButton#miniPlay {{ background: #1DB954; border-radius: 20px; }}
             QPushButton#miniPlay:hover {{ background: #1ED760; }}
         """)
@@ -4319,10 +4409,12 @@ class MiniPlayer(PlayerBar):
     def sync_from_player(self):
         w = self.owner
         track = w.current_track or w.requested_track or {}
-        for label, full in ((self.title_label, track.get("title") or "Ничего не играет"),
-                            (self.artist_label, track.get("artist_display") or track.get("artist") or "Выбери трек в полном плеере")):
-            label.setText(label.fontMetrics().elidedText(full, Qt.TextElideMode.ElideRight, max(60, label.width())))
-            label.setToolTip(full)
+        full_title = str(track.get("title") or "Ничего не играет")
+        self.title_label.setText(full_title)
+        self.title_label.setToolTip(full_title)
+        full_artist = str(track.get("artist_display") or track.get("artist") or "Выбери трек в полном плеере")
+        self.artist_label.setText(self.artist_label.fontMetrics().elidedText(full_artist, Qt.TextElideMode.ElideRight, max(60, self.artist_label.width())))
+        self.artist_label.setToolTip(full_artist)
         playing = w.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         self.play_button.setIcon(control_icon("pause" if playing else "play", "#FFFFFF", 24))
         status = ("Загрузка…" if w.requested_track is not None else "Продолжить прослушивание" if w._restored_playback else
@@ -5667,316 +5759,380 @@ class MusicPlayer(QMainWindow):
     # ---------------------------------------------------------
 
     def apply_styles(self):
-        """Spotify-inspired palette: matte black, graphite panels, Spotify green."""
-        # Диалоги ошибок тоже тёмные: белый текст больше не будет на белом фоне.
+        """Aurora Slate & Emerald palette: cohesive dark/light surfaces and glassmorphic wallpaper support."""
         dark_styles = r"""
-            QMainWindow, QWidget#root { background: #121212; }
-            QWidget { color: #F5F5F5; font-size: 14px; }
+            QMainWindow, QWidget#root { background: #0B0D10; }
+            QWidget { color: #F2F5F9; font-size: 14px; }
             QLabel { background: transparent; border: none; }
 
-            QFrame#sidebar { background: #181818; border: none; border-radius: 8px; }
-            QFrame#queuePanel { background: #181818; border: none; border-radius: 8px; }
-            QFrame#centerPanel { background: #181818; border: none; border-radius: 8px; }
-            QFrame#playerBar { background: #181818; border: none; border-radius: 8px; }
+            QFrame#sidebar, QFrame#queuePanel {
+                background: #11141A;
+                border: 1px solid #1C222B;
+                border-radius: 15px;
+            }
+            QFrame#centerPanel {
+                background: #151921;
+                border: 1px solid #1F2631;
+                border-radius: 15px;
+            }
+            QFrame#playerBar {
+                background: #161B23;
+                border: 1px solid #252D3A;
+                border-radius: 15px;
+            }
 
-            QLabel#bottomCover, QLabel#rowCover { background: #282828; border-radius: 6px; }
+            QLabel#bottomCover, QLabel#rowCover { background: #202631; border-radius: 8px; }
             QLabel#bottomArtist, QLabel#mutedText, QLabel#trackArtist, QLabel#statusText,
-            QLabel#durationText, QLabel#sourceText, QLabel#artistMeta { color: #A7A7A7; }
-            QLabel#bottomTitle, QLabel#pageTitle, QLabel#trackTitle, QLabel#queueTitle { color: #FFFFFF; font-weight: 700; }
+            QLabel#durationText, QLabel#sourceText, QLabel#artistMeta { color: #9DA8B8; font-size: 12px; }
+            QLabel#bottomTitle, QLabel#pageTitle, QLabel#trackTitle, QLabel#queueTitle { color: #F7F9FC; font-weight: 700; }
 
-            QWidget#trackRow[playing="true"] { background: rgba(29, 185, 84, 0.15); border: 1px solid #1DB954; border-radius: 8px; }
-            QLabel#trackTitle[playing="true"] { color: #1DB954; font-weight: 800; }
-            QLabel#trackIndex[playing="true"] { color: #1DB954; font-weight: 900; }
-            QLabel#pageTitle { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
-            QLabel#queueTitle { font-size: 17px; }
-            QLabel#eyebrow { color: #A7A7A7; font-size: 9pt; font-weight: 700; letter-spacing: 1px; }
-            QLabel#timeText { color: #A7A7A7; font-size: 9pt; }
-            QLabel#trackIndex, QLabel#tableHeaderText { color: #A7A7A7; font-size: 9pt; }
+            QLabel#pageTitle { font-size: 27px; font-weight: 800; letter-spacing: -0.5px; }
+            QLabel#sectionTitle { font-size: 18px; font-weight: 700; color: #F4F7FA; }
+            QLabel#queueTitle { font-size: 17px; font-weight: 700; }
+            QLabel#bottomTitle { font-size: 15px; font-weight: 700; }
+            QLabel#trackTitle { font-size: 14px; font-weight: 600; }
+            QLabel#eyebrow { color: #8290A2; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
+            QLabel#timeText { color: #9DA8B8; font-size: 11px; }
+            QLabel#trackIndex, QLabel#tableHeaderText { color: #8C98AA; font-size: 9.5pt; }
+            QLabel#recentEmpty {
+                color: #9DA8B8; font-size: 13px; padding: 18px;
+                background: #1A2029; border: 1px solid #252E3B; border-radius: 13px;
+            }
+            QLabel#connectionBadge { color: #9DA8B8; font-size: 11px; padding: 6px; }
+            QLabel#connectionBadge[connected="true"] { color: #66E099; }
 
-            QFrame#artistHeader { background: #232323; border: none; border-radius: 12px; }
-            QLabel#artistAvatar { background: #282828; border-radius: 62px; }
-            QLabel#artistVerified { color: #1DB954; font-size: 9pt; font-weight: 800; letter-spacing: 1px; }
-            QPushButton#artistNameLink { color: #FFFFFF; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 27pt; font-weight: 800; }
-            QPushButton#artistNameLink:hover { color: #1DB954; background: transparent; }
-            QLabel#artistPopular { color: #FFFFFF; font-size: 11pt; font-weight: 700; }
+            QFrame#artistHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1E2938, stop:1 #161B23);
+                border: 1px solid #283241;
+                border-radius: 16px;
+            }
+            QLabel#artistAvatar { background: #222936; border-radius: 62px; }
+            QLabel#artistVerified { color: #5CE092; font-size: 9pt; font-weight: 800; letter-spacing: 1px; }
+            QPushButton#artistNameLink {
+                color: #FFFFFF; background: transparent; border: none;
+                text-align: left; padding: 0; margin: 0; font-size: 27pt; font-weight: 800;
+            }
+            QPushButton#artistNameLink:hover { color: #66E099; background: transparent; }
+            QLabel#artistPopular { color: #F4F7FA; font-size: 11pt; font-weight: 700; }
 
-            QPushButton#artistShuffleButton { background: #1DB954; color: #101010; border: none; border-radius: 17px; padding: 5px 14px; font-weight: 800; min-height: 30px; }
-            QPushButton#artistShuffleButton:hover { background: #1ED760; }
-            QPushButton#artistMixButton { background: #232323; color: #F5F5F5; border: 1px solid #3E3E3E; border-radius: 17px; padding: 5px 14px; font-weight: 700; min-height: 30px; }
-            QPushButton#artistMixButton:hover { background: #2A2A2A; border-color: #1DB954; color: #1DB954; }
+            QPushButton#artistShuffleButton {
+                background: #1DB954; color: #0C1810; border: none;
+                border-radius: 17px; padding: 6px 16px; font-weight: 800; min-height: 30px;
+            }
+            QPushButton#artistShuffleButton:hover { background: #34DC70; }
+            QPushButton#artistMixButton {
+                background: #1E2531; color: #F2F5F9; border: 1px solid #323D4E;
+                border-radius: 17px; padding: 6px 16px; font-weight: 700; min-height: 30px;
+            }
+            QPushButton#artistMixButton:hover { background: #263040; border-color: #5CE092; color: #66E099; }
 
-            QFrame#tableHeader { background: transparent; border-bottom: 1px solid #2A2A2A; }
-            QFrame#likesAccountCard { background: #232323; border: none; border-radius: 12px; }
-            QLabel#likesAccountIcon { color: #1DB954; background: #1A2E22; border: none; border-radius: 12px; font-size: 24px; font-weight: 800; }
+            QFrame#tableHeader { background: transparent; border-bottom: 1px solid #232B37; }
+            QFrame#likesAccountCard { background: #1B212B; border: 1px solid #27303E; border-radius: 12px; }
+            QLabel#likesAccountIcon {
+                color: #5CE092; background: #182E23; border: 1px solid #2A523D;
+                border-radius: 12px; font-size: 24px; font-weight: 800;
+            }
 
-            QScrollArea#startCardsScroll { background: #181818; border: none; }
-            QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport { background: #181818; border: none; }
-            QWidget#startCardsWidget { background: #181818; border: none; }
-            QScrollBar:vertical { background: #121212; width: 9px; margin: 2px; border: none; }
-            QScrollBar::handle:vertical { background: #4D4D4D; min-height: 28px; border-radius: 4px; }
-            QScrollBar::handle:vertical:hover { background: #A7A7A7; }
+            QScrollArea#startCardsScroll,
+            QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
+            QWidget#startCardsWidget { background: #151921; border: none; }
+            QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; border: none; }
+            QScrollBar::handle:vertical { background: #3E4859; min-height: 28px; border-radius: 3.5px; }
+            QScrollBar::handle:vertical:hover { background: #66E099; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 
             QLabel#startSectionTitle { color: #FFFFFF; font-size: 17pt; font-weight: 800; padding: 2px 0; }
-            QPushButton#addPlaylistCard { background: #181818; color: #A7A7A7; border: 1px dashed #4D4D4D; border-radius: 12px; font-size: 13pt; font-weight: 700; padding: 18px; }
-            QPushButton#addPlaylistCard:hover { background: #232323; color: #FFFFFF; border: 1px dashed #1DB954; }
+            QPushButton#addPlaylistCard {
+                background: #181E27; color: #9DA8B8; border: 1px dashed #3A4454;
+                border-radius: 14px; font-size: 13pt; font-weight: 700; padding: 18px;
+            }
+            QPushButton#addPlaylistCard:hover {
+                background: #1F2733; color: #FFFFFF; border: 1px dashed #5CE092;
+            }
 
-            QPushButton { background: transparent; color: #F5F5F5; border: none; border-radius: 8px; padding: 7px 10px; }
-            QPushButton:hover { background: #232323; }
-            QPushButton#navButton { color: #A7A7A7; text-align: left; padding: 0; border: none; background: transparent; }
-            QPushButton#iconButton, QPushButton#transportButton { background: transparent; color: #A7A7A7; border-radius: 8px; padding: 4px; }
-            QPushButton#iconButton:hover, QPushButton#transportButton:hover { background: #232323; color: #1DB954; }
-            QPushButton#transportButton:checked { color: #1DB954; background: #232323; }
+            QPushButton { background: transparent; color: #F2F5F9; border: none; border-radius: 9px; padding: 7px 10px; }
+            QPushButton:hover { background: #202733; }
+            QPushButton#navButton { color: #9DA8B8; text-align: left; padding: 0; border: none; background: transparent; }
+            QPushButton#sidebarSettings { color: #A2AEBF; text-align: left; padding: 12px 10px; border-radius: 10px; font-weight: 600; }
+            QPushButton#sidebarSettings:hover { background: #1B222C; color: #FFFFFF; }
+            QPushButton#iconButton, QPushButton#transportButton {
+                background: transparent; color: #C6D0DE; border-radius: 9px; padding: 4px; font-size: 24px;
+            }
+            QPushButton#iconButton:hover, QPushButton#transportButton:hover { background: #212936; color: #5CE092; }
+            QPushButton#transportButton:checked { color: #5CE092; background: #1B2E26; }
+            QPushButton#transportButton::menu-indicator, QPushButton#themeButton::menu-indicator { image: none; width: 0; }
 
-            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 6px; padding: 2px; }
-            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #232323; }
-            QPushButton#bottomFavorite:checked { background: #1A2E22; }
-            QPushButton#bottomDislike:checked { background: #361F1F; }
+            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 8px; padding: 2px; }
+            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #222A36; }
+            QPushButton#bottomFavorite:checked { background: #1A3025; }
+            QPushButton#bottomDislike:checked { background: #361F22; }
 
             QPushButton#playButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 25px; padding: 0; }
-            QPushButton#playButton:hover { background: #1ED760; }
+            QPushButton#playButton:hover { background: #2CE06B; }
             QPushButton#playButton:pressed { background: #169C46; }
 
-            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove { background: #232323; color: #A7A7A7; border-radius: 8px; font-size: 13px; padding: 2px; font-weight: 700; }
-            QPushButton#rowPlay:hover { background: #1DB954; color: #121212; }
-            QPushButton#rowFavorite { font-size: 21px; color: #A7A7A7; }
-            QPushButton#rowFavorite:checked { color: #1DB954; background: #1A2E22; }
-            QPushButton#rowFavorite:hover, QPushButton#rowRemove:hover { background: #2A2A2A; color: #1ED760; }
+            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove {
+                background: #1F2632; color: #A2AEBF; border-radius: 8px;
+                font-size: 13px; padding: 2px; font-weight: 700;
+            }
+            QPushButton#rowPlay:hover { background: #1DB954; color: #0D1912; }
+            QPushButton#rowFavorite { font-size: 21px; color: #A2AEBF; }
+            QPushButton#rowFavorite:checked { color: #5CE092; background: #193025; }
+            QPushButton#rowFavorite:hover { background: #283241; color: #66E099; }
+            QPushButton#rowRemove { background: transparent; color: transparent; }
+            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #2B3442; color: #F2F5F9; }
+            QPushButton#rowRemove:hover { background: #384456; color: #FFFFFF; }
 
-            QPushButton#trackArtistLink { color: #A7A7A7; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 9pt; font-weight: 500; }
+            QPushButton#trackArtistLink {
+                color: #9DA8B8; background: transparent; border: none;
+                text-align: left; padding: 0; margin: 0; font-size: 9pt; font-weight: 500;
+            }
             QPushButton#trackArtistLink:hover { color: #FFFFFF; text-decoration: underline; }
 
-            QPushButton#themeButton { background: #232323; color: #1DB954; border: 1px solid #3E3E3E; border-radius: 8px; font-size: 17px; padding: 3px; }
-            QPushButton#themeButton:hover { background: #2A2A2A; border-color: #1DB954; }
-            QPushButton#accentButton { background: #1DB954; color: #101010; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 800; }
-            QPushButton#accentButton:hover { background: #1ED760; }
-            QPushButton#textButton { color: #1DB954; background: transparent; font-size: 9pt; padding: 5px; }
-            QPushButton#textButton:hover { color: #1ED760; background: #232323; }
-            QPushButton#filterButton { color: #F5F5F5; background: #232323; border: 1px solid #3E3E3E; text-align: left; }
-            QPushButton#filterButton:hover { border: 1px solid #1DB954; background: #2A2A2A; }
-            QPushButton:disabled { background: #232323; color: #6A6A6A; }
+            QPushButton#themeButton {
+                background: #1E242E; color: #C6D0DE; border: 1px solid #303948;
+                border-radius: 9px; font-size: 17px; padding: 3px;
+            }
+            QPushButton#themeButton:hover { background: #262E3B; border-color: #5CE092; color: #FFFFFF; }
+            QPushButton#accentButton {
+                background: #1DB954; color: #0C1810; border: none;
+                border-radius: 10px; padding: 10px 18px; font-weight: 800;
+            }
+            QPushButton#accentButton:hover { background: #2FE06D; }
+            QPushButton#textButton { color: #5CE092; background: transparent; font-size: 9.5pt; font-weight: 600; padding: 5px 8px; }
+            QPushButton#textButton:hover { color: #7AE8A8; background: #1E2631; }
+            QPushButton#filterButton {
+                color: #F2F5F9; background: #1E242E; border: 1px solid #303948;
+                border-radius: 10px; padding: 8px 12px; text-align: left;
+            }
+            QPushButton#filterButton:hover { border: 1px solid #5CE092; background: #252D3A; }
+            QPushButton:disabled { background: #1B2029; color: #5D6777; }
 
-            QLineEdit { background: #232323; color: #FFFFFF; border: 1px solid #3E3E3E; border-radius: 8px; padding: 10px 13px; selection-background-color: #1DB954; }
-            QLineEdit:hover, QLineEdit:focus { border: 1px solid #1DB954; background: #2A2A2A; }
+            QLineEdit {
+                background: #1C222C; color: #FFFFFF; border: 1px solid #303948;
+                border-radius: 11px; padding: 10px 14px; selection-background-color: #1DB954;
+            }
+            QLineEdit:hover, QLineEdit:focus { border: 1px solid #5CE092; background: #212834; }
 
-            QListWidget { background: #121212; color: #F5F5F5; border: none; border-radius: 8px; outline: 0; padding: 4px; }
-            QListWidget::item { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0; }
-            QListWidget::item:hover { background: #232323; }
-            QListWidget::item:selected { background: #232323; border: 1px solid #1DB954; }
+            QListWidget { background: #151921; color: #F2F5F9; border: none; border-radius: 10px; outline: 0; padding: 2px; }
+            QListWidget#queueList { background: transparent; padding: 0; }
+            QListWidget::item { background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 0; }
+            QListWidget::item:hover, QWidget#trackRow:hover { background: #1E2531; }
+            QListWidget::item:selected { background: #1F2B28; border: 1px solid #2D523E; }
 
-            QWidget#trackRow { background: transparent; border: none; border-radius: 8px; }
-            QWidget#trackRow:hover { background: #232323; }
-            QWidget#trackRow[playing="true"]:hover { background: rgba(29, 185, 84, 0.25); border: 1px solid #1DB954; }
+            QWidget#trackRow { background: transparent; border: 1px solid transparent; border-radius: 10px; }
+            QWidget#trackRow[playing="true"] { background: #172C22; border: 1px solid #2F5D44; border-radius: 10px; }
+            QWidget#trackRow[playing="true"]:hover { background: #1C3529; border: 1px solid #3E7A59; }
+            QLabel#trackTitle[playing="true"] { color: #66E099; font-weight: 800; }
+            QLabel#trackIndex[playing="true"] { color: #66E099; font-weight: 900; }
+            QLabel#queuePlayingBadge { background: #1DB954; color: #0C1A12; border-radius: 9px; font-size: 12px; font-weight: 700; }
 
-            QSlider::groove:horizontal { background: #4D4D4D; height: 4px; border-radius: 2px; }
-            QSlider::sub-page:horizontal { background: #1DB954; border-radius: 2px; }
-            QSlider::handle:horizontal { background: #FFFFFF; width: 12px; margin: -4px 0; border-radius: 6px; }
-            QSlider::handle:horizontal:hover { background: #1ED760; }
-            QSlider:disabled::handle:horizontal { background: #4D4D4D; }
+            QSlider::groove:horizontal { background: #36404F; height: 4px; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #5CE092; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #F5F8FC; width: 12px; margin: -4px 0; border-radius: 6px; }
+            QSlider::handle:horizontal:hover { background: #66E099; }
+            QSlider:disabled::handle:horizontal { background: #3E4858; }
+            QSlider#seekSlider::groove:horizontal { background: #36404F; height: 3px; border-radius: 1.5px; }
+            QSlider#seekSlider::sub-page:horizontal { background: #5CE092; height: 3px; border-radius: 1.5px; }
+            QSlider#seekSlider::handle:horizontal { background: #F2F6FA; width: 9px; margin: -3px 0; border-radius: 4.5px; }
 
-            QMenu#darkMenu, QMenu { background: #232323; color: #FFFFFF; border: 1px solid #3E3E3E; padding: 7px; border-radius: 8px; }
-            QMenu#darkMenu::item, QMenu::item { background: transparent; color: #FFFFFF; padding: 10px 22px 10px 14px; border: none; margin: 1px; border-radius: 6px; }
-            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #3E3E3E; color: #1DB954; }
-            QMenu#darkMenu::separator, QMenu::separator { height: 1px; background: #3E3E3E; margin: 5px 10px; }
+            QMenu#darkMenu, QMenu {
+                background: #1A2029; color: #F4F7FA; border: 1px solid #2E3846;
+                padding: 7px; border-radius: 10px;
+            }
+            QMenu#darkMenu::item, QMenu::item {
+                background: transparent; color: #F4F7FA; padding: 10px 22px 10px 14px;
+                border: none; margin: 1px; border-radius: 7px;
+            }
+            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #23372C; color: #66E099; }
+            QMenu#darkMenu::separator, QMenu::separator { height: 1px; background: #2B3442; margin: 5px 10px; }
 
-            QTabWidget::pane { border: 1px solid #2A2A2A; background: #181818; border-radius: 8px; }
-            QTabBar::tab { background: #232323; color: #A7A7A7; padding: 10px 16px; border-radius: 6px; margin-right: 4px; border: none; }
-            QTabBar::tab:selected { background: #1DB954; color: #101010; font-weight: 700; }
-            QTabBar::tab:hover:!selected { background: #2A2A2A; color: #FFFFFF; }
+            QTabWidget::pane { border: none; background: transparent; }
+            QTabBar::tab {
+                background: transparent; color: #9DA8B8; padding: 12px 14px;
+                margin-right: 12px; border-radius: 0; border-bottom: 2px solid transparent; font-weight: 600;
+            }
+            QTabBar::tab:selected { background: transparent; color: #F7F9FC; border-bottom: 2px solid #1DB954; font-weight: 700; }
+            QTabBar::tab:hover:!selected { background: #1D2430; color: #FFFFFF; border-radius: 8px; }
 
             QCheckBox { spacing: 9px; }
             QCheckBox::indicator { width: 17px; height: 17px; }
             QCheckBox::indicator:checked { background: #1DB954; border: 1px solid #1DB954; border-radius: 4px; }
-            QCheckBox::indicator:unchecked { background: #232323; border: 1px solid #4D4D4D; border-radius: 4px; }
+            QCheckBox::indicator:unchecked { background: #1C232E; border: 1px solid #455163; border-radius: 4px; }
 
-            QFrame#radioCard { background: #181818; border: 1px solid #3E3E3E; border-radius: 24px; }
-            QLabel#radioBrand { color: #1DB954; font-size: 10pt; font-weight: 800; letter-spacing: 2px; }
+            QFrame#radioCard { background: #151A22; border: 1px solid #2E3846; border-radius: 24px; }
+            QLabel#radioBrand { color: #5CE092; font-size: 10pt; font-weight: 800; letter-spacing: 2px; }
             QLabel#radioTrackTitle { color: #FFFFFF; font-size: 15pt; font-weight: 800; }
-            QLabel#radioStatus { color: #A7A7A7; font-size: 10pt; }
+            QLabel#radioStatus { color: #9DA8B8; font-size: 10pt; }
+
+            QPushButton#bottomArtistLink, QPushButton#expandedArtist {
+                background: transparent; border: none; padding: 0;
+                color: #A2AEBF; font-size: 12px; text-align: left;
+            }
+            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled {
+                color: #FFFFFF; text-decoration: underline;
+            }
+            QPushButton#expandedArtist { font-size: 16px; text-align: center; padding: 4px; }
+            QLabel#expandedTitle { color: #F7F9FC; font-size: 23px; font-weight: 700; }
+            QFrame#coverPage { background: rgba(17, 22, 29, 195); border: 1px solid #252E3C; border-radius: 14px; }
+            QFrame#sidebarDivider { background: #222A35; }
+            QFrame#searchBox { background: #1B212B; border: 1px solid #2D3746; border-radius: 16px; }
+            QFrame#searchBox[focused="true"] { border-color: #5CE092; background: #202834; }
+            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus {
+                background: transparent; border: none; padding: 0; color: #F2F6FA; font-size: 14px;
+            }
+            QLabel#searchShortcut {
+                background: #252E3B; color: #A2AEBF; border: 1px solid #354152;
+                border-radius: 6px; padding: 4px 6px; font-size: 11px;
+            }
+            QPushButton#searchSubmit { background: #5CE092; color: #0D2015; border-radius: 11px; font-weight: 700; }
+            QPushButton#searchSubmit:hover { background: #7AE8A8; }
+            QPushButton#searchSubmit:pressed { background: #43BE76; }
+            QPushButton#searchSubmit:disabled { background: #26362E; color: #7E9489; }
         """
         light_styles = r"""
-            QMainWindow, QWidget#root { background: #F5F5F7; }
-            QWidget { color: #222222; }
-            QMessageBox { background: #F5F5F7; color: #222222; }
-            QMessageBox QLabel { background: transparent; color: #222222; min-width: 280px; }
-            QMessageBox QPushButton { background: #E7E7EB; color: #222222; border: 1px solid #D0D0D5; border-radius: 8px; padding: 7px 18px; min-width: 72px; }
-            QMessageBox QPushButton:hover { background: #DDEFE2; border-color: #1DB954; }
-            QFrame#sidebar, QFrame#queuePanel, QFrame#playerBar, QFrame#centerPanel { background: #FFFFFF; border-color: #DDDDDD; }
-            QFrame#artistHeader { background: #FFFFFF; border-color: #DDDDDD; }
-            QLabel#artistAvatar { background: #EEEEEE; }
-            QPushButton#artistShuffleButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 17px; padding: 5px 14px; font-weight: 800; min-height: 30px; }
-            QPushButton#artistShuffleButton:hover { background: #16883D; }
-            QPushButton#artistMixButton { background: #EEEEEE; color: #222222; border: 1px solid #D7D7D7; border-radius: 17px; padding: 5px 14px; font-weight: 700; min-height: 30px; }
-            QPushButton#artistMixButton:hover { background: #E1F4E7; border-color: #1DB954; color: #16883D; }
-            QFrame#likesAccountCard { background: #FFFFFF; border-color: #DDDDDD; }
-            QLabel#likesAccountIcon { color: #16883D; background: #E1F4E7; border-color: #1DB954; }
-            QPushButton#startCard { color: #FFFFFF; }
-            QScrollArea#startCardsScroll { background: #F5F5F7; border: none; }
-            QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport { background: #F5F5F7; border: none; }
-            QWidget#startCardsWidget { background: #F5F5F7; border: none; }
-            QScrollBar:vertical { background: #F5F5F7; width: 9px; margin: 2px; border: none; }
-            QScrollBar::handle:vertical { background: #C5C5C5; min-height: 28px; border-radius: 4px; }
-            QScrollBar::handle:vertical:hover { background: #1DB954; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-            QLabel#startSectionTitle { color: #181818; font-size: 17pt; font-weight: 800; padding: 2px 0; }
-            QPushButton#addPlaylistCard { background: #FFFFFF; color: #555555; border: 1px dashed #BBBBBB; border-radius: 16px; font-size: 13pt; font-weight: 700; padding: 18px; }
-            QPushButton#addPlaylistCard:hover { background: #E1F4E7; color: #16883D; border: 1px dashed #1DB954; }
-            QLabel#pageTitle, QLabel#trackTitle, QLabel#bottomTitle, QLabel#queueTitle { color: #181818; }
-            QPushButton#artistNameLink { color: #181818; background: transparent; border: none; text-align: left; padding: 0; margin: 0; font-size: 27pt; font-weight: 800; }
-            QPushButton#artistNameLink:hover { color: #16883D; background: transparent; }
-            QLabel#mutedText, QLabel#bottomArtist, QLabel#trackArtist, QLabel#durationText, QLabel#sourceText, QLabel#artistMeta { color: #555555; }
-            QLabel#artistVerified, QLabel#artistPopular { color: #16883D; }
-            QLabel#trackIndex, QLabel#tableHeaderText { color: #666666; }
-            QWidget#trackRow[playing="true"] { background: #E1F4E7; border: 1px solid #1DB954; border-radius: 10px; }
-            QWidget#trackRow[playing="true"]:hover { background: #D7F0DF; border: 1px solid #1DB954; }
-            QLabel#trackTitle[playing="true"] { color: #16883D; font-weight: 800; }
-            QLabel#trackIndex[playing="true"] { color: #16883D; font-weight: 900; }
-            QPushButton#navButton { color: #555555; }
-            QPushButton#navButton:hover, QWidget#trackRow:hover, QListWidget::item:hover { background: #EEEEEE; color: #111111; }
-            QPushButton#navButton:checked { background: #E1F4E7; color: #16883D; border-left: 3px solid #1DB954; }
-            QPushButton#playButton, QPushButton#accentButton { background: #1DB954; color: #FFFFFF; }
-            QPushButton#playButton:hover, QPushButton#accentButton:hover { background: #16883D; }
-            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 8px; padding: 2px; }
-            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #EEEEEE; }
-            QPushButton#bottomFavorite:checked { background: #E1F4E7; }
-            QPushButton#bottomDislike:checked { background: #F5E5E5; }
-            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove, QPushButton#filterButton, QPushButton#themeButton { background: #EEEEEE; color: #333333; border-color: #D7D7D7; }
-            QPushButton#rowFavorite:checked { color: #16883D; background: #E1F4E7; }
-            QPushButton#trackArtistLink { color: #555555; }
-            QPushButton#trackArtistLink:hover, QPushButton#textButton { color: #16883D; }
-            QLineEdit, QListWidget { background: #FFFFFF; color: #222222; border-color: #D7D7D7; }
-            QListWidget::item:selected { background: #E1F4E7; border-color: #1DB954; }
-            QSlider::groove:horizontal { background: #D2D2D2; }
-            QSlider::sub-page:horizontal { background: #1DB954; }
-            QSlider::handle:horizontal { background: #1DB954; }
-            QMenu#darkMenu, QMenu { background: #FFFFFF; color: #222222; border-color: #DDDDDD; }
-            QMenu#darkMenu::item, QMenu::item { color: #222222; }
-            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #E1F4E7; color: #16883D; }
-            QFrame#radioCard { background: #FFFFFF; border-color: #DDDDDD; }
-            QLabel#radioTrackTitle { color: #181818; }
-            QLabel#radioStatus { color: #555555; }
-            QDialog#settingsDialog { background: #F5F5F7; }
-        """
-        dark_styles += r"""
-            QMainWindow, QWidget#root { background: #0B0D10; }
-            QFrame#sidebar, QFrame#queuePanel { background: #111318; border-radius: 14px; }
-            QFrame#centerPanel { background: #16191F; border-radius: 14px; }
-            QFrame#playerBar { background: #171B21; border: 1px solid #252B34; border-radius: 14px; }
-            QLabel#pageTitle { font-size: 27px; font-weight: 800; }
-            QLabel#sectionTitle { font-size: 18px; font-weight: 700; color: #F4F6F9; }
-            QLabel#bottomTitle { font-size: 15px; font-weight: 700; }
-            QLabel#bottomArtist, QLabel#trackArtist, QLabel#mutedText, QLabel#statusText { color: #ADB6C5; font-size: 12px; }
-            QLabel#trackTitle { font-size: 14px; font-weight: 600; }
-            QLabel#recentEmpty { color: #A4AFBE; font-size: 13px; padding: 18px; background: #1C2027; border-radius: 12px; }
-            QLabel#eyebrow { color: #8591A3; font-size: 10px; letter-spacing: 1.2px; }
-            QLabel#timeText { color: #A4AFBE; font-size: 11px; }
-            QLabel#connectionBadge { color: #ADB6C5; font-size: 11px; padding: 6px; }
-            QLabel#connectionBadge[connected="true"] { color: #69D99B; }
-            QPushButton#sidebarSettings { color: #ADB6C5; text-align: left; padding: 12px 8px; }
-            QPushButton#sidebarSettings:hover { background: #1F242D; color: #FFFFFF; }
-            QLineEdit { background: #1E222A; border: 1px solid #343B48; border-radius: 11px; padding: 10px 14px; }
-            QLineEdit:focus { background: #222832; border-color: #64C78B; }
-            QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
-            QWidget#startCardsWidget { background: #16191F; }
-            QListWidget { background: #16191F; border: none; padding: 2px; }
-            QListWidget#queueList { background: transparent; padding: 0; }
-            QListWidget::item:selected { background: #242D30; border: 1px solid transparent; }
-            QListWidget::item:hover, QWidget#trackRow:hover { background: #232A34; }
-            QWidget#trackRow[playing="true"] { background: #1A3026; border: 1px solid #315B44; border-radius: 10px; }
-            QLabel#trackTitle[playing="true"] { color: #6BE09D; }
-            QLabel#queuePlayingBadge { background: #1DB954; color: #0C1A12; border-radius: 9px; font-size: 12px; font-weight: 700; }
-            QPushButton#rowRemove { background: transparent; color: transparent; }
-            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #303845; color: #F2F5F8; }
-            QPushButton#rowRemove:hover { background: #3C4656; color: #FFFFFF; }
-            QPushButton#themeButton { background: #21262F; color: #C6D0DE; border: 1px solid #343B48; }
-            QPushButton#filterButton { background: #222832; border: 1px solid #343B48; padding: 8px 12px; }
-            QPushButton#transportButton { color: #C6D0DE; font-size: 24px; }
-            QPushButton#transportButton::menu-indicator, QPushButton#themeButton::menu-indicator { image: none; width: 0; }
-            QTabWidget::pane { border: none; background: transparent; }
-            QTabBar::tab { background: transparent; color: #A4AFBE; padding: 12px 14px; margin-right: 12px; border-radius: 0; border-bottom: 2px solid transparent; }
-            QTabBar::tab:selected { background: transparent; color: #F4F6F9; border-bottom: 2px solid #1DB954; }
-            QTabBar::tab:hover:!selected { background: #222832; color: #FFFFFF; }
-            QSlider#seekSlider::groove:horizontal { background: #414A58; height: 3px; border-radius: 1px; }
-            QSlider#seekSlider::sub-page:horizontal { background: #68D696; height: 3px; border-radius: 1px; }
-            QSlider#seekSlider::handle:horizontal { background: #F2F6FA; width: 9px; margin: -3px 0; border-radius: 4px; }
-            QFrame#likesAccountCard { background: #1E242D; border-radius: 10px; }
-            QScrollBar:vertical { background: transparent; width: 7px; }
-            QScrollBar::handle:vertical { background: #485263; border-radius: 3px; }
-        """
-        light_styles += r"""
             QMainWindow, QWidget#root { background: #E9EDF2; }
-            QFrame#sidebar, QFrame#queuePanel, QFrame#centerPanel { background: #FFFFFF; }
-            QFrame#playerBar { background: #FAFCFD; border-color: #DCE2E9; }
-            QLabel#sectionTitle, QLabel#bottomTitle { color: #18202A; }
-            QLabel#bottomArtist, QLabel#trackArtist, QLabel#mutedText, QLabel#statusText { color: #606D80; }
-            QLabel#connectionBadge { color: #606D80; }
-            QLabel#connectionBadge[connected="true"] { color: #237B4A; }
-            QLabel#recentEmpty { background: #F1F4F7; color: #606D80; }
-            QPushButton#sidebarSettings { color: #5E6B7D; }
-            QPushButton#sidebarSettings:hover { background: #EAF0F5; color: #17202C; }
-            QLineEdit { background: #F3F5F8; color: #17202C; border-color: #D8DFE8; }
-            QLineEdit:focus { background: #FFFFFF; border-color: #278454; }
-            QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
-            QWidget#startCardsWidget, QListWidget { background: #FFFFFF; }
-            QListWidget::item:hover, QWidget#trackRow:hover { background: #EFF3F7; }
-            QListWidget::item:selected { background: #E5F2EA; }
-            QWidget#trackRow[playing="true"] { background: #E4F3E9; border-color: #B4D7C1; }
-            QLabel#trackTitle[playing="true"] { color: #237B4A; }
+            QWidget { color: #18202A; }
+            QMessageBox { background: #F3F6FA; color: #18202A; }
+            QMessageBox QLabel { background: transparent; color: #18202A; min-width: 280px; }
+            QMessageBox QPushButton {
+                background: #E8EEF5; color: #18202A; border: 1px solid #CFD8E3;
+                border-radius: 9px; padding: 7px 18px; min-width: 72px;
+            }
+            QMessageBox QPushButton:hover { background: #E0F2E7; border-color: #21834C; }
+
+            QFrame#sidebar, QFrame#queuePanel, QFrame#centerPanel {
+                background: #FFFFFF; border: 1px solid #DCE3EC;
+            }
+            QFrame#playerBar { background: #FAFCFE; border: 1px solid #D6DEE8; }
+            QLabel#bottomCover, QLabel#rowCover { background: #E9EEF4; border-radius: 8px; }
+
+            QFrame#artistHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #EBF3F9, stop:1 #FFFFFF);
+                border: 1px solid #D8E1EC;
+            }
+            QLabel#artistAvatar { background: #E9EEF4; }
+            QPushButton#artistShuffleButton {
+                background: #1DB954; color: #FFFFFF; border: none;
+                border-radius: 17px; padding: 6px 16px; font-weight: 800; min-height: 30px;
+            }
+            QPushButton#artistShuffleButton:hover { background: #16883D; }
+            QPushButton#artistMixButton {
+                background: #EEF2F7; color: #18202A; border: 1px solid #D4DCE7;
+                border-radius: 17px; padding: 6px 16px; font-weight: 700; min-height: 30px;
+            }
+            QPushButton#artistMixButton:hover { background: #E1F3E8; border-color: #21834C; color: #167A40; }
+
+            QFrame#tableHeader { border-bottom: 1px solid #E2E8F0; }
+            QFrame#likesAccountCard { background: #F4F7FA; border: 1px solid #DCE3EC; }
+            QLabel#likesAccountIcon { color: #167A40; background: #E1F3E8; border: 1px solid #B5DFC5; }
+            QPushButton#startCard { color: #FFFFFF; }
+            QScrollArea#startCardsScroll,
+            QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
+            QWidget#startCardsWidget, QListWidget { background: #FFFFFF; border: none; }
+            QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; border: none; }
+            QScrollBar::handle:vertical { background: #C2CDD9; min-height: 28px; border-radius: 3.5px; }
+            QScrollBar::handle:vertical:hover { background: #21834C; }
+
+            QLabel#startSectionTitle, QLabel#sectionTitle, QLabel#pageTitle,
+            QLabel#trackTitle, QLabel#bottomTitle, QLabel#queueTitle { color: #141C26; }
+            QPushButton#artistNameLink { color: #141C26; }
+            QPushButton#artistNameLink:hover { color: #167A40; background: transparent; }
+            QLabel#mutedText, QLabel#bottomArtist, QLabel#trackArtist, QLabel#statusText,
+            QLabel#durationText, QLabel#sourceText, QLabel#artistMeta, QLabel#timeText { color: #5C697C; }
+            QLabel#artistVerified, QLabel#artistPopular { color: #167A40; }
+            QLabel#trackIndex, QLabel#tableHeaderText { color: #647285; }
+            QLabel#connectionBadge { color: #5C697C; }
+            QLabel#connectionBadge[connected="true"] { color: #187941; }
+            QLabel#recentEmpty { background: #F2F5F9; border-color: #DCE3EC; color: #5C697C; }
+
+            QPushButton#addPlaylistCard {
+                background: #F6F8FB; color: #546275; border: 1px dashed #BDC9D7;
+            }
+            QPushButton#addPlaylistCard:hover {
+                background: #E4F4EA; color: #167A40; border: 1px dashed #21834C;
+            }
+
+            QWidget#trackRow[playing="true"] { background: #E3F3E9; border: 1px solid #9FD4B3; border-radius: 10px; }
+            QWidget#trackRow[playing="true"]:hover { background: #D8EFE1; border: 1px solid #7BC497; }
+            QLabel#trackTitle[playing="true"] { color: #167A40; font-weight: 800; }
+            QLabel#trackIndex[playing="true"] { color: #167A40; font-weight: 900; }
+
+            QPushButton#navButton { color: #546275; }
+            QPushButton#sidebarSettings { color: #546275; }
+            QPushButton#sidebarSettings:hover { background: #EBF0F6; color: #141C26; }
+            QWidget#trackRow:hover, QListWidget::item:hover { background: #EFF3F8; color: #141C26; }
+            QListWidget::item:selected { background: #E4F3EA; border: 1px solid #A8D8BA; }
+
+            QPushButton#playButton, QPushButton#accentButton { background: #1DB954; color: #FFFFFF; }
+            QPushButton#playButton:hover, QPushButton#accentButton:hover { background: #179443; }
+            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #EBF0F6; }
+            QPushButton#bottomFavorite:checked { background: #E1F3E8; }
+            QPushButton#bottomDislike:checked { background: #F7E6E6; }
+
+            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove,
+            QPushButton#filterButton, QPushButton#themeButton {
+                background: #EFF3F7; color: #263342; border-color: #D5DEE8;
+            }
+            QPushButton#rowFavorite:checked { color: #167A40; background: #E1F3E8; }
             QPushButton#rowRemove { background: transparent; color: transparent; }
-            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #E3E9F0; color: #273342; }
-            QPushButton#filterButton, QPushButton#themeButton { background: #EFF2F6; color: #293648; border-color: #D8DFE8; }
-            QPushButton#transportButton { color: #526075; }
-            QTabBar::tab { background: transparent; color: #606D80; }
-            QTabBar::tab:selected { background: transparent; color: #18202A; border-bottom-color: #278454; }
-            QTabBar::tab:hover:!selected { background: #EFF3F7; color: #18202A; }
-            QFrame#likesAccountCard { background: #F4F7FA; }
-            QSlider#seekSlider::groove:horizontal { background: #D4DBE5; }
-            QSlider#seekSlider::sub-page:horizontal { background: #278454; }
-            QSlider#seekSlider::handle:horizontal { background: #278454; }
-        """
-        dark_styles += r"""
-            QPushButton#bottomArtistLink, QPushButton#expandedArtist { background: transparent; border: none; padding: 0; color: #ADB6C5; font-size: 12px; text-align: left; }
-            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #FFFFFF; text-decoration: underline; }
-            QPushButton#expandedArtist { font-size: 16px; text-align: center; padding: 4px; }
-            QLabel#expandedTitle { color: #F4F6F9; font-size: 23px; font-weight: 700; }
-            QFrame#coverPage { background: rgba(19, 24, 31, 180); border-radius: 12px; }
-            QFrame#sidebarDivider { background: #252D37; }
-            QFrame#searchBox { background: #1E242D; border: 1px solid #303A48; border-radius: 16px; }
-            QFrame#searchBox[focused="true"] { border-color: #66CD94; background: #222B35; }
-            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { background: transparent; border: none; padding: 0; color: #EDF2F7; font-size: 14px; }
-            QLabel#searchShortcut { background: #29333F; color: #A8B4C4; border: 1px solid #3A4554; border-radius: 5px; padding: 4px 6px; font-size: 11px; }
-            QPushButton#searchSubmit { background: #67D99A; color: #10251A; border-radius: 11px; font-weight: 600; }
-            QPushButton#searchSubmit:hover { background: #83E5AF; }
-            QPushButton#searchSubmit:pressed { background: #4BBE7E; }
-            QPushButton#searchSubmit:disabled { background: #2A3C33; color: #899F93; }
-        """
-        light_styles += r"""
-            QPushButton#bottomArtistLink, QPushButton#expandedArtist { color: #606D80; }
-            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #18202A; }
-            QLabel#expandedTitle { color: #18202A; }
-            QFrame#coverPage { background: rgba(245, 248, 251, 210); }
-            QFrame#sidebarDivider { background: #E0E6ED; }
-            QFrame#searchBox { background: #F2F5F8; border-color: #D8E0EA; }
-            QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #278454; }
-            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { color: #1C2938; }
-            QLabel#searchShortcut { background: #E7EDF3; color: #627085; border-color: #D7E0E9; }
-            QPushButton#searchSubmit { background: #23834D; color: #FFFFFF; }
-            QPushButton#searchSubmit:hover { background: #2B965B; }
-            QPushButton#searchSubmit:pressed { background: #1B6A3D; }
-            QPushButton#searchSubmit:disabled { background: #DEE8E2; color: #7A8E81; }
+            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #E1E8F0; color: #243140; }
+            QPushButton#transportButton { color: #4E5C6E; }
+            QPushButton#transportButton:hover, QPushButton#iconButton:hover { background: #EBF0F6; color: #167A40; }
+            QPushButton#transportButton:checked { background: #E1F3E8; color: #167A40; }
+            QPushButton#trackArtistLink { color: #5C697C; }
+            QPushButton#trackArtistLink:hover, QPushButton#textButton { color: #167A40; }
+            QPushButton#textButton:hover { background: #EBF0F6; }
+
+            QLineEdit { background: #F3F6FA; color: #141C26; border-color: #D5DEE8; }
+            QLineEdit:focus { background: #FFFFFF; border-color: #21834C; }
+            QSlider::groove:horizontal, QSlider#seekSlider::groove:horizontal { background: #CFD8E3; }
+            QSlider::sub-page:horizontal, QSlider#seekSlider::sub-page:horizontal { background: #21834C; }
+            QSlider::handle:horizontal, QSlider#seekSlider::handle:horizontal { background: #21834C; }
+
+            QTabBar::tab { background: transparent; color: #5C697C; }
+            QTabBar::tab:selected { background: transparent; color: #141C26; border-bottom-color: #21834C; }
+            QTabBar::tab:hover:!selected { background: #EFF3F8; color: #141C26; }
+
+            QMenu#darkMenu, QMenu { background: #FFFFFF; color: #18202A; border-color: #D5DEE8; }
+            QMenu#darkMenu::item, QMenu::item { color: #18202A; }
+            QMenu#darkMenu::item:selected, QMenu::item:selected { background: #E2F3E8; color: #167A40; }
+
+            QFrame#radioCard { background: #FFFFFF; border-color: #D5DEE8; }
+            QLabel#radioTrackTitle { color: #141C26; }
+            QLabel#radioStatus { color: #5C697C; }
+            QDialog#settingsDialog { background: #F2F5F9; }
+
+            QPushButton#bottomArtistLink, QPushButton#expandedArtist { color: #5C697C; }
+            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #141C26; }
+            QLabel#expandedTitle { color: #141C26; }
+            QFrame#coverPage { background: rgba(246, 249, 252, 220); border: 1px solid #D8E1EC; }
+            QFrame#sidebarDivider { background: #DFE6EE; }
+            QFrame#searchBox { background: #F2F5F9; border-color: #D6DFE9; }
+            QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #21834C; }
+            QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { color: #162230; }
+            QLabel#searchShortcut { background: #E6ECF3; color: #5E6C80; border-color: #D4DEE8; }
+            QPushButton#searchSubmit { background: #21834C; color: #FFFFFF; }
+            QPushButton#searchSubmit:hover { background: #29995A; }
+            QPushButton#searchSubmit:pressed { background: #196B3D; }
+            QPushButton#searchSubmit:disabled { background: #DCE6E0; color: #788C80; }
         """
         if self.backdrop.has_wallpaper:
             dark_styles += r"""
-                QFrame#sidebar, QFrame#queuePanel { background: rgba(12, 16, 23, 205); }
-                QFrame#centerPanel { background: rgba(17, 22, 30, 180); }
-                QFrame#playerBar { background: rgba(18, 24, 32, 220); }
+                QFrame#sidebar, QFrame#queuePanel { background: rgba(14, 18, 25, 205); border-color: rgba(255, 255, 255, 24); }
+                QFrame#centerPanel { background: rgba(18, 23, 31, 182); border-color: rgba(255, 255, 255, 22); }
+                QFrame#playerBar { background: rgba(18, 24, 33, 224); border-color: rgba(255, 255, 255, 28); }
+                QFrame#searchBox { background: rgba(24, 30, 40, 210); }
+                QFrame#likesAccountCard, QLabel#recentEmpty { background: rgba(24, 30, 40, 190); }
                 QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
                 QWidget#startCardsWidget, QListWidget { background: transparent; }
             """
             light_styles += r"""
-                QFrame#sidebar, QFrame#queuePanel { background: rgba(251, 253, 255, 220); }
-                QFrame#centerPanel { background: rgba(251, 253, 255, 205); }
-                QFrame#playerBar { background: rgba(251, 253, 255, 235); }
+                QFrame#sidebar, QFrame#queuePanel { background: rgba(252, 254, 255, 222); border-color: rgba(210, 220, 232, 190); }
+                QFrame#centerPanel { background: rgba(252, 254, 255, 206); border-color: rgba(210, 220, 232, 180); }
+                QFrame#playerBar { background: rgba(252, 254, 255, 236); border-color: rgba(205, 216, 228, 210); }
+                QFrame#searchBox { background: rgba(244, 247, 251, 220); }
+                QFrame#likesAccountCard, QLabel#recentEmpty { background: rgba(246, 249, 252, 205); }
                 QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
                 QWidget#startCardsWidget, QListWidget { background: transparent; }
             """
@@ -5997,7 +6153,7 @@ class MusicPlayer(QMainWindow):
         if hasattr(self, "artist_header"):
             self.artist_header.setStyleSheet("")
             avatar_url = self.artist_avatar.property("requested_image") if hasattr(self, "artist_avatar") else ""
-            if self.theme == "dark" and avatar_url in getattr(self, "pixmap_cache", {}):
+            if avatar_url in getattr(self, "pixmap_cache", {}):
                 pixmap = self.pixmap_cache[avatar_url]
                 if pixmap is not None:
                     self._apply_artist_header_color(pixmap)
@@ -6008,9 +6164,9 @@ class MusicPlayer(QMainWindow):
             if menu is None:
                 continue
             if self.theme == "dark":
-                menu.setStyleSheet("QMenu{background:#282828;color:#fff;border:1px solid #3b3b3b;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;} QMenu::item:selected{background:#3a3a3a;color:#1DB954;}")
+                menu.setStyleSheet("QMenu{background:#1A2029;color:#F4F7FA;border:1px solid #2E3846;border-radius:10px;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;} QMenu::item:selected{background:#23372C;color:#66E099;}")
             else:
-                menu.setStyleSheet("QMenu{background:#fff;color:#222;border:1px solid #ddd;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;} QMenu::item:selected{background:#e1f4e7;color:#16883d;}")
+                menu.setStyleSheet("QMenu{background:#FFFFFF;color:#18202A;border:1px solid #D5DEE8;border-radius:10px;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;} QMenu::item:selected{background:#E2F3E8;color:#167A40;}")
 
     # ---------------------------------------------------------
     # Все сигналы.
@@ -8164,15 +8320,26 @@ class MusicPlayer(QMainWindow):
         return QColor(red // count, green // count, blue // count) if count else QColor("#1DB954")
 
     def _apply_artist_header_color(self, pixmap):
-        if self.theme != "dark":
-            self.artist_header.setStyleSheet("")
+        base = self.dominant_color(pixmap)
+        if self.theme == "light":
+            soft = SpotifyPlaylistCard._blend(base, QColor("#FFFFFF"), 0.78)
+            mid = SpotifyPlaylistCard._blend(base, QColor("#F5F8FC"), 0.90)
+            border = SpotifyPlaylistCard._blend(base, QColor("#D5DEE8"), 0.65)
+            self.artist_header.setStyleSheet(
+                "QFrame#artistHeader { background: qlineargradient("
+                "x1:0, y1:0, x2:1, y2:1, "
+                f"stop:0 {soft.name()}, stop:0.55 {mid.name()}, stop:1 #FFFFFF); "
+                f"border: 1px solid {border.name()}; border-radius: 16px; }}"
+            )
             return
-        color = self.dominant_color(pixmap).lighter(140)
+        color = base.lighter(135)
+        mid = SpotifyPlaylistCard._blend(color, QColor("#18202B"), 0.55)
+        border = SpotifyPlaylistCard._blend(color, QColor("#2A3444"), 0.65)
         self.artist_header.setStyleSheet(
             "QFrame#artistHeader { background: qlineargradient("
             "x1:0, y1:0, x2:1, y2:1, "
-            f"stop:0 {color.name()}, stop:1 #1E1E1E); "
-            "border: 1px solid #2A2A2A; border-radius: 16px; }"
+            f"stop:0 {color.name()}, stop:0.55 {mid.name()}, stop:1 #161B23); "
+            f"border: 1px solid {border.name()}; border-radius: 16px; }}"
         )
 
     def update_artist_profile(self, artist, tracks, source):
@@ -8192,7 +8359,7 @@ class MusicPlayer(QMainWindow):
         avatar = next((track.get("profile_artist_thumbnail") or track.get("artist_thumbnail") or track.get("thumbnail")
                        for track in tracks if track.get("profile_artist_thumbnail") or track.get("artist_thumbnail") or track.get("thumbnail")), "")
         self.artist_header.setStyleSheet("")
-        if self.theme == "dark" and avatar in self.pixmap_cache:
+        if avatar in self.pixmap_cache:
             cached_avatar = self.pixmap_cache[avatar]
             if cached_avatar is not None:
                 self._apply_artist_header_color(cached_avatar)
