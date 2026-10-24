@@ -2634,8 +2634,8 @@ class ExpandedArtwork(QLabel):
         self._source = None
         self._scale_key = None
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(120, 120)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.setMinimumSize(240, 220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_artwork(self, pixmap):
         self._source = pixmap
@@ -2666,6 +2666,32 @@ class ExpandedArtwork(QLabel):
                                      Qt.TransformationMode.SmoothTransformation)
         scaled.setDevicePixelRatio(dpr)
         self.setPixmap(scaled)
+
+    def paintEvent(self, event):
+        pix = self.pixmap()
+        if pix is None or pix.isNull():
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        dpr = pix.devicePixelRatioF() or 1.0
+        w = pix.width() / dpr
+        h = pix.height() / dpr
+        target = QRectF((self.width() - w) / 2.0, (self.height() - h) / 2.0, w, h)
+        # Soft drop shadow under the rounded cover
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 85))
+        painter.drawRoundedRect(target.translated(0, 5), 14, 14)
+        clip = QPainterPath()
+        clip.addRoundedRect(target, 14, 14)
+        painter.save()
+        painter.setClipPath(clip)
+        painter.drawPixmap(target, pix, QRectF(pix.rect()))
+        painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.0))
+        painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), 13.5, 13.5)
+        painter.end()
 
 
 def read_wallpaper_image(path):
@@ -4267,6 +4293,105 @@ class PlayerBar(QFrame):
         painter.end()
 
 
+class CoverPopupPage(PlayerBar):
+    """Компактное всплывающее окно обложки поверх приглушённого экрана с плавной анимацией."""
+    close_requested = pyqtSignal()
+
+    CARD_WIDTH = 384
+    CARD_HEIGHT = 436
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._backdrop_pixmap = QPixmap()
+        self._popup_progress = 1.0
+        self.card = PlayerBar(self)
+        self.card.setObjectName("coverCard")
+        self.card.resize(self.CARD_WIDTH, self.CARD_HEIGHT)
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(38)
+        shadow.setOffset(0, 14)
+        shadow.setColor(QColor(0, 0, 0, 145))
+        self.card.setGraphicsEffect(shadow)
+
+        self._popup_animation = QVariantAnimation(self)
+        self._popup_animation.setDuration(270)
+        self._popup_animation.setEasingCurve(QEasingCurve.Type.OutBack)
+        self._popup_animation.valueChanged.connect(self._on_popup_progress)
+
+    def set_cover_accent(self, pixmap):
+        super().set_cover_accent(pixmap)
+        self.card.set_cover_accent(pixmap)
+
+    def set_backdrop(self, pixmap):
+        self._backdrop_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else QPixmap()
+        self.update()
+
+    def clear_backdrop(self):
+        self._backdrop_pixmap = QPixmap()
+
+    def _on_popup_progress(self, value):
+        self._popup_progress = float(value)
+        self._position_card()
+        self.update()
+
+    def animate_open(self):
+        self._popup_animation.stop()
+        self._popup_progress = 0.0
+        self._position_card()
+        self._popup_animation.setStartValue(0.0)
+        self._popup_animation.setEndValue(1.0)
+        self._popup_animation.start()
+
+    def _position_card(self):
+        avail_w = max(260, self.width() - 32)
+        avail_h = max(300, self.height() - 32)
+        target_w = min(self.CARD_WIDTH, avail_w)
+        target_h = min(self.CARD_HEIGHT, avail_h)
+        target_x = (self.width() - target_w) / 2.0
+        target_y = (self.height() - target_h) / 2.0
+        t = self._popup_progress
+        # Плавный вылет снизу-слева (от миниатюры обложки) с лёгким пружинящим раскрытием
+        start_x = max(16.0, target_x - 42.0)
+        start_y = target_y + 44.0
+        x = round(start_x + (target_x - start_x) * t)
+        y = round(start_y + (target_y - start_y) * t)
+        self.card.setGeometry(x, y, int(target_w), int(target_h))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_card()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self.card.geometry().contains(event.position().toPoint()):
+                self.close_requested.emit()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), 15, 15)
+        painter.setClipPath(path)
+        if not self._backdrop_pixmap.isNull():
+            painter.drawPixmap(rect, self._backdrop_pixmap)
+        light = getattr(self.window(), "theme", "dark") == "light"
+        veil_alpha = int((165 if light else 185) * max(0.35, min(1.0, self._popup_progress)))
+        painter.fillRect(rect, QColor(230, 236, 244, veil_alpha) if light else QColor(8, 11, 16, veil_alpha))
+        glow_center = QPointF(self.card.geometry().center())
+        glow = QRadialGradient(glow_center, max(220.0, self.card.width() * 0.85))
+        accent = QColor(self.accent)
+        accent.setAlpha(int((42 if light else 85) * max(0.2, min(1.0, self._popup_progress))))
+        glow.setColorAt(0.0, accent)
+        accent.setAlpha(0)
+        glow.setColorAt(1.0, accent)
+        painter.fillRect(rect, glow)
+        painter.end()
+
+
 class MiniPlayer(PlayerBar):
     """A second view of the existing players; it owns no audio or network workers."""
     def __init__(self, player):
@@ -5489,32 +5614,39 @@ class MusicPlayer(QMainWindow):
         return self.queue_panel
 
     def create_cover_page(self):
-        self.cover_page = PlayerBar()
+        self.cover_page = CoverPopupPage()
         self.cover_page.setObjectName("coverPage")
-        layout = QVBoxLayout(self.cover_page)
-        layout.setContentsMargins(20, 12, 20, 20)
-        layout.setSpacing(12)
+        self.cover_page.close_requested.connect(self.close_cover_view)
+        self.cover_card = self.cover_page.card
+        layout = QVBoxLayout(self.cover_card)
+        layout.setContentsMargins(22, 16, 22, 20)
+        layout.setSpacing(10)
         header = QHBoxLayout()
-        self.cover_back_button = QPushButton("‹", self.cover_page)
-        self.cover_back_button.setObjectName("backButton")
-        self.cover_back_button.setFixedSize(38, 36)
-        self.cover_back_button.setToolTip("Вернуться к списку треков")
+        header.setContentsMargins(0, 0, 0, 0)
+        badge = QLabel("СЕЙЧАС ИГРАЕТ", self.cover_card)
+        badge.setObjectName("eyebrow")
+        header.addWidget(badge)
+        header.addStretch(1)
+        self.cover_back_button = QPushButton("×", self.cover_card)
+        self.cover_back_button.setObjectName("coverCloseButton")
+        self.cover_back_button.setFixedSize(32, 32)
+        self.cover_back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cover_back_button.setToolTip("Закрыть окно обложки (Esc)")
         self.cover_back_button.setAccessibleName("Закрыть крупную обложку")
         self.cover_back_button.clicked.connect(self.close_cover_view)
         header.addWidget(self.cover_back_button)
-        header.addStretch(1)
         layout.addLayout(header)
-        self.expanded_cover = ExpandedArtwork(self.cover_page)
+        self.expanded_cover = ExpandedArtwork(self.cover_card)
         self.expanded_cover.setObjectName("expandedCover")
         layout.addWidget(self.expanded_cover, 1)
-        self.expanded_title = QLabel("", self.cover_page)
+        self.expanded_title = QLabel("", self.cover_card)
         self.expanded_title.setObjectName("expandedTitle")
         self.expanded_title.setTextFormat(Qt.TextFormat.PlainText)
         self.expanded_title.setWordWrap(True)
         self.expanded_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.expanded_title.setMaximumHeight(76)
+        self.expanded_title.setMaximumHeight(54)
         layout.addWidget(self.expanded_title)
-        self.expanded_artist = QPushButton("", self.cover_page)
+        self.expanded_artist = QPushButton("", self.cover_card)
         self.expanded_artist.setObjectName("expandedArtist")
         self.expanded_artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.expanded_artist.setFlat(True)
@@ -5569,12 +5701,18 @@ class MusicPlayer(QMainWindow):
         if not self.current_track or not self.current_track.get("url"):
             return
         self._cover_return_page = self.view_stack.currentWidget()
+        if self._cover_return_page is not None and self.isVisible():
+            self.cover_page.set_backdrop(self._cover_return_page.grab())
+        else:
+            self.cover_page.clear_backdrop()
         # No extra window or media player; browsing state and playback stay live.
         self.fade_to_page(self.cover_page)
+        self.cover_page.animate_open()
         self.refresh_current_track_views()
 
     def close_cover_view(self):
         if self.view_stack.currentWidget() is self.cover_page:
+            self.cover_page.clear_backdrop()
             page = self._cover_return_page
             if page not in (self.browse_page, self.likes_page):
                 page = self.last_library_page
@@ -5974,9 +6112,22 @@ class MusicPlayer(QMainWindow):
             QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled {
                 color: #FFFFFF; text-decoration: underline;
             }
-            QPushButton#expandedArtist { font-size: 16px; text-align: center; padding: 4px; }
-            QLabel#expandedTitle { color: #F7F9FC; font-size: 23px; font-weight: 700; }
-            QFrame#coverPage { background: rgba(17, 22, 29, 195); border: 1px solid #252E3C; border-radius: 14px; }
+            QPushButton#expandedArtist { font-size: 14px; text-align: center; padding: 3px 8px; border-radius: 8px; }
+            QPushButton#expandedArtist:hover:enabled { background: rgba(255, 255, 255, 14); }
+            QLabel#expandedTitle { color: #F7F9FC; font-size: 18px; font-weight: 800; }
+            QFrame#coverPage { background: transparent; border: none; }
+            QFrame#coverCard {
+                background: rgba(22, 27, 36, 246);
+                border: 1px solid #303B4B;
+                border-radius: 22px;
+            }
+            QPushButton#coverCloseButton {
+                background: #222B37; color: #C6D0DE; border: 1px solid #323E4F;
+                border-radius: 16px; font-size: 18px; font-weight: 700; padding: 0;
+            }
+            QPushButton#coverCloseButton:hover {
+                background: #2D3847; color: #FFFFFF; border-color: #5CE092;
+            }
             QFrame#sidebarDivider { background: #222A35; }
             QFrame#searchBox { background: #1B212B; border: 1px solid #2D3746; border-radius: 16px; }
             QFrame#searchBox[focused="true"] { border-color: #5CE092; background: #202834; }
@@ -6107,8 +6258,21 @@ class MusicPlayer(QMainWindow):
 
             QPushButton#bottomArtistLink, QPushButton#expandedArtist { color: #5C697C; }
             QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #141C26; }
+            QPushButton#expandedArtist:hover:enabled { background: rgba(20, 28, 38, 12); }
             QLabel#expandedTitle { color: #141C26; }
-            QFrame#coverPage { background: rgba(246, 249, 252, 220); border: 1px solid #D8E1EC; }
+            QFrame#coverPage { background: transparent; border: none; }
+            QFrame#coverCard {
+                background: rgba(255, 255, 255, 248);
+                border: 1px solid #D5DEE8;
+                border-radius: 22px;
+            }
+            QPushButton#coverCloseButton {
+                background: #EFF3F8; color: #364558; border: 1px solid #D5DEE8;
+                border-radius: 16px; font-size: 18px; font-weight: 700; padding: 0;
+            }
+            QPushButton#coverCloseButton:hover {
+                background: #E2F3E8; color: #167A40; border-color: #21834C;
+            }
             QFrame#sidebarDivider { background: #DFE6EE; }
             QFrame#searchBox { background: #F2F5F9; border-color: #D6DFE9; }
             QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #21834C; }

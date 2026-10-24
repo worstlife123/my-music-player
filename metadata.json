@@ -1,0 +1,5 @@
+{
+  "name": "Aurora Music Player",
+  "description": "Smart desktop music player built with PyQt6 featuring dynamic ambient lighting, Spotify-style cards, and an animated compact cover modal.",
+  "requestFramePermissions": []
+}

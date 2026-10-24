@@ -1,0 +1,10 @@
+{
+  "name": "aurora-music-player",
+  "private": true,
+  "version": "1.2.4",
+  "scripts": {
+    "dev": "python3 tools/web_preview.py",
+    "build": "python3 -c \"import ast; ast.parse(open('player_aurora_smart_beautiful_fixed_ui_repaint.py', encoding='utf-8').read())\"",
+    "lint": "python3 -c \"import ast; ast.parse(open('player_aurora_smart_beautiful_fixed_ui_repaint.py', encoding='utf-8').read())\""
+  }
+}
