@@ -471,115 +471,36 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     /* ======================================================================
-       COMPACT FLOATING COVER POPUP MODAL (CoverPopupPage / #coverCard)
-       Matches player_aurora_smart_beautiful_fixed_ui_repaint.py
+       DIRECT BOTTOM-LEFT EXPANDING COVER PHOTO (#expandedCover)
+       No modal window, no card frame, no backdrop dimming or white glow
        ====================================================================== */
-    .cover-popup-overlay {
-      position: absolute;
-      inset: 0;
-      z-index: 30;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(6, 6, 10, 0.56);
-      backdrop-filter: blur(5px);
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.22s ease;
-    }
-
-    body.light-theme .cover-popup-overlay {
-      background: rgba(15, 23, 42, 0.36);
-    }
-
-    .cover-popup-overlay.open {
-      opacity: 1;
-      pointer-events: auto;
-    }
-
-    .cover-ambient-glow {
-      position: absolute;
-      width: 520px;
-      height: 520px;
-      border-radius: 50%;
-      background: radial-gradient(circle, var(--cover-glow, rgba(124, 58, 237, 0.34)) 0%, transparent 70%);
-      pointer-events: none;
-      transition: background 0.3s ease;
-    }
-
-    /* 384 x 436 px compact modal card with OutBack spring animation from bottom-left */
-    .cover-card {
-      width: 384px;
-      height: 436px;
-      background: var(--bg-popup);
-      border: 1px solid var(--border-popup);
-      border-radius: 22px;
-      padding: 16px 22px 22px;
+    .expanded-artwork {
+      position: fixed;
+      left: 22px;
+      bottom: 100px;
+      width: 248px;
+      height: 248px;
+      border-radius: 12px;
+      z-index: 60;
       display: flex;
       flex-direction: column;
       align-items: center;
-      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
-      position: relative;
-      z-index: 2;
-      transform: translate(-240px, 155px) scale(0.72);
+      justify-content: center;
+      color: #ffffff;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      cursor: pointer;
+      transform-origin: bottom left;
+      transform: translate(0, 82px) scale(0.24);
       opacity: 0;
-      transition: transform 0.27s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+      pointer-events: none;
+      transition: transform 0.21s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.16s ease;
     }
 
-    .cover-popup-overlay.open .cover-card {
+    .expanded-artwork.open {
       transform: translate(0, 0) scale(1);
       opacity: 1;
-    }
-
-    .cover-card-top {
-      width: 100%;
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 6px;
-    }
-
-    .cover-close-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.07);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--text-sub);
-      font-size: 16px;
-      font-weight: 700;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.16s ease;
-    }
-
-    body.light-theme .cover-close-btn {
-      background: rgba(15, 23, 42, 0.05);
-      border-color: rgba(15, 23, 42, 0.08);
-    }
-
-    .cover-close-btn:hover {
-      background: rgba(239, 68, 68, 0.85);
-      border-color: rgba(239, 68, 68, 0.95);
-      color: #ffffff;
-    }
-
-    /* ExpandedArtwork 288x288 with 14px rounded corners, inner border & soft shadow */
-    .expanded-artwork {
-      width: 288px;
-      height: 288px;
-      border-radius: 14px;
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: #ffffff;
-      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.42);
-      border: 1px solid rgba(255, 255, 255, 0.16);
-      overflow: hidden;
-      margin-bottom: 16px;
+      pointer-events: auto;
     }
 
     .expanded-artwork-badge {
@@ -596,34 +517,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       padding: 4px 10px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.28);
-      backdrop-filter: blur(6px);
-    }
-
-    .expanded-title {
-      font-size: 17px;
-      font-weight: 700;
-      color: var(--text-main);
-      text-align: center;
-      max-width: 336px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-bottom: 4px;
-    }
-
-    .expanded-artist {
-      font-size: 13.5px;
-      font-weight: 600;
-      color: var(--text-sub);
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      transition: color 0.15s ease;
-    }
-
-    .expanded-artist:hover {
-      color: #8b5cf6;
-      text-decoration: underline;
     }
 
     /* Bottom PlayerBar */
@@ -852,7 +745,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       <div class="sidebar-footer">
         <div class="hint-badge">
-          💡 <strong>Новое окно обложки:</strong> нажмите на обложку трека в левом нижнем углу, чтобы открыть компактное окно <strong>384×436</strong> с анимацией <code>OutBack</code>.
+          💡 <strong>Раскрытие обложки:</strong> нажмите на фото трека в левом нижнем углу — фото плавно расширится прямо внизу без новых окон и без свечения.
         </div>
       </div>
     </aside>
@@ -892,20 +785,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div class="track-list" id="trackList"></div>
       </div>
 
-      <!-- COMPACT FLOATING COVER POPUP (CoverPopupPage / #coverCard) -->
-      <div class="cover-popup-overlay" id="coverPopupOverlay" onclick="handleOverlayClick(event)">
-        <div class="cover-ambient-glow" id="coverAmbientGlow"></div>
-        <div class="cover-card" id="coverCard" role="dialog" aria-modal="true">
-          <div class="cover-card-top">
-            <button class="cover-close-btn" id="coverBackButton" onclick="closeCoverPopup()" title="Закрыть (Esc)">✕</button>
-          </div>
-          <div class="expanded-artwork" id="expandedCover">
-            <div class="expanded-artwork-badge" id="expandedBadge">AU</div>
-            <div class="expanded-artwork-sub">288×288 • 14px radius</div>
-          </div>
-          <div class="expanded-title" id="expandedTitle">Midnight City Lights</div>
-          <button class="expanded-artist" id="expandedArtist" onclick="openArtistFromPopup()">Aurora Synth</button>
-        </div>
+      <!-- DIRECT BOTTOM-LEFT EXPANDING COVER PHOTO (#expandedCover) -->
+      <div class="expanded-artwork" id="expandedCover" onclick="closeCoverPopup()" title="Свернуть обложку (Esc)">
+        <div class="expanded-artwork-badge" id="expandedBadge">AU</div>
+        <div class="expanded-artwork-sub">Нажмите, чтобы свернуть</div>
       </div>
     </main>
   </div>
@@ -1060,13 +943,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       document.getElementById("bottomArtist").textContent = t.artist;
       document.getElementById("totalTime").textContent = t.duration;
 
-      // Sync compact cover popup card
+      // Sync bottom-left expanding cover photo
       const expCover = document.getElementById("expandedCover");
       expCover.style.background = t.gradient;
       document.getElementById("expandedBadge").textContent = t.initials;
-      document.getElementById("expandedTitle").textContent = t.title;
-      document.getElementById("expandedArtist").textContent = t.artist;
-      document.getElementById("coverAmbientGlow").style.setProperty("--cover-glow", t.glow);
       renderTracks();
     }
 
@@ -1100,18 +980,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     function toggleCoverPopup() {
-      const overlay = document.getElementById("coverPopupOverlay");
-      overlay.classList.toggle("open");
+      const expCover = document.getElementById("expandedCover");
+      expCover.classList.toggle("open");
     }
 
     function closeCoverPopup() {
-      document.getElementById("coverPopupOverlay").classList.remove("open");
-    }
-
-    function handleOverlayClick(e) {
-      if (e.target.id === "coverPopupOverlay") {
-        closeCoverPopup();
-      }
+      document.getElementById("expandedCover").classList.remove("open");
     }
 
     function openArtistFromPopup() {

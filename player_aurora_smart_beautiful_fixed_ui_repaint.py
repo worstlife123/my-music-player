@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
-    QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
+    QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 
 
@@ -2628,19 +2628,25 @@ class ClickableLabel(QLabel):
 
 
 class ExpandedArtwork(QLabel):
-    """Keep one full-size cover; resize it only when the view or source changes."""
+    """Крупное фото обложки, плавно раскрывающееся прямо над миниатюрой внизу без отдельного окна."""
+    clicked = pyqtSignal()
+    MAX_WIDTH = 280
+    MAX_HEIGHT = 260
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._source = None
         self._scale_key = None
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(240, 220)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Свернуть обложку (Esc)")
 
     def set_artwork(self, pixmap):
         self._source = pixmap
         self._scale_key = None
         self._render_cover()
+        self.update()
 
     def clear_artwork(self):
         self._source = None
@@ -2648,21 +2654,37 @@ class ExpandedArtwork(QLabel):
         self.clear()
         self.setProperty("requested_image", "")
 
+    def target_size(self):
+        pix = self.pixmap()
+        if pix is None or pix.isNull():
+            return QSize(220, 220)
+        dpr = pix.devicePixelRatioF() or 1.0
+        w = max(96, round(pix.width() / dpr))
+        h = max(96, round(pix.height() / dpr))
+        return QSize(w + 12, h + 12)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._render_cover()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def _render_cover(self):
         if self._source is None or self._source.isNull():
             return
-        side = max(1, min(self.width(), self.height(), 560))
         dpr = min(2.0, self.devicePixelRatioF())
-        key = (self._source.cacheKey(), side, dpr)
+        key = (self._source.cacheKey(), self.MAX_WIDTH, self.MAX_HEIGHT, dpr)
         if key == self._scale_key:
             return
         self._scale_key = key
-        pixels = max(1, round(side * dpr))
-        scaled = self._source.scaled(pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio,
+        max_w = max(1, round(self.MAX_WIDTH * dpr))
+        max_h = max(1, round(self.MAX_HEIGHT * dpr))
+        scaled = self._source.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
         scaled.setDevicePixelRatio(dpr)
         self.setPixmap(scaled)
@@ -2670,27 +2692,28 @@ class ExpandedArtwork(QLabel):
     def paintEvent(self, event):
         pix = self.pixmap()
         if pix is None or pix.isNull():
-            return super().paintEvent(event)
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        dpr = pix.devicePixelRatioF() or 1.0
-        w = pix.width() / dpr
-        h = pix.height() / dpr
-        target = QRectF((self.width() - w) / 2.0, (self.height() - h) / 2.0, w, h)
-        # Soft drop shadow under the rounded cover
+        target = QRectF(self.rect()).adjusted(6.0, 4.0, -6.0, -8.0)
+        if target.width() <= 4 or target.height() <= 4:
+            painter.end()
+            return
+        # Мягкая тёмная тень непосредственно под фото (без белого свечения и без QGraphicsEffect)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 85))
-        painter.drawRoundedRect(target.translated(0, 5), 14, 14)
+        for dy, expand, alpha in ((4.0, 2.0, 32), (2.5, 1.0, 48), (1.0, 0.0, 64)):
+            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.drawRoundedRect(target.adjusted(-expand, dy - expand, expand, dy + expand), 13.0, 13.0)
         clip = QPainterPath()
-        clip.addRoundedRect(target, 14, 14)
+        clip.addRoundedRect(target, 12.0, 12.0)
         painter.save()
         painter.setClipPath(clip)
         painter.drawPixmap(target, pix, QRectF(pix.rect()))
         painter.restore()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.0))
-        painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), 13.5, 13.5)
+        painter.setPen(QPen(QColor(0, 0, 0, 80), 1.0))
+        painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), 11.5, 11.5)
         painter.end()
 
 
@@ -4293,103 +4316,19 @@ class PlayerBar(QFrame):
         painter.end()
 
 
-class CoverPopupPage(PlayerBar):
-    """Компактное всплывающее окно обложки поверх приглушённого экрана с плавной анимацией."""
+class CoverPopupPage(QWidget):
+    """Прозрачная прослойка без окон и без свечения: страница каталога остаётся видимой."""
     close_requested = pyqtSignal()
-
-    CARD_WIDTH = 384
-    CARD_HEIGHT = 436
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._backdrop_pixmap = QPixmap()
-        self._popup_progress = 1.0
-        self.card = PlayerBar(self)
-        self.card.setObjectName("coverCard")
-        self.card.resize(self.CARD_WIDTH, self.CARD_HEIGHT)
-        shadow = QGraphicsDropShadowEffect(self.card)
-        shadow.setBlurRadius(38)
-        shadow.setOffset(0, 14)
-        shadow.setColor(QColor(0, 0, 0, 145))
-        self.card.setGraphicsEffect(shadow)
-
-        self._popup_animation = QVariantAnimation(self)
-        self._popup_animation.setDuration(270)
-        self._popup_animation.setEasingCurve(QEasingCurve.Type.OutBack)
-        self._popup_animation.valueChanged.connect(self._on_popup_progress)
+        self.accent = QColor("#243F35")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent; border: none;")
 
     def set_cover_accent(self, pixmap):
-        super().set_cover_accent(pixmap)
-        self.card.set_cover_accent(pixmap)
-
-    def set_backdrop(self, pixmap):
-        self._backdrop_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else QPixmap()
-        self.update()
-
-    def clear_backdrop(self):
-        self._backdrop_pixmap = QPixmap()
-
-    def _on_popup_progress(self, value):
-        self._popup_progress = float(value)
-        self._position_card()
-        self.update()
-
-    def animate_open(self):
-        self._popup_animation.stop()
-        self._popup_progress = 0.0
-        self._position_card()
-        self._popup_animation.setStartValue(0.0)
-        self._popup_animation.setEndValue(1.0)
-        self._popup_animation.start()
-
-    def _position_card(self):
-        avail_w = max(260, self.width() - 32)
-        avail_h = max(300, self.height() - 32)
-        target_w = min(self.CARD_WIDTH, avail_w)
-        target_h = min(self.CARD_HEIGHT, avail_h)
-        target_x = (self.width() - target_w) / 2.0
-        target_y = (self.height() - target_h) / 2.0
-        t = self._popup_progress
-        # Плавный вылет снизу-слева (от миниатюры обложки) с лёгким пружинящим раскрытием
-        start_x = max(16.0, target_x - 42.0)
-        start_y = target_y + 44.0
-        x = round(start_x + (target_x - start_x) * t)
-        y = round(start_y + (target_y - start_y) * t)
-        self.card.setGeometry(x, y, int(target_w), int(target_h))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._position_card()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            if not self.card.geometry().contains(event.position().toPoint()):
-                self.close_requested.emit()
-                event.accept()
-                return
-        super().mousePressEvent(event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self.rect()
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(rect), 15, 15)
-        painter.setClipPath(path)
-        if not self._backdrop_pixmap.isNull():
-            painter.drawPixmap(rect, self._backdrop_pixmap)
-        light = getattr(self.window(), "theme", "dark") == "light"
-        veil_alpha = int((165 if light else 185) * max(0.35, min(1.0, self._popup_progress)))
-        painter.fillRect(rect, QColor(230, 236, 244, veil_alpha) if light else QColor(8, 11, 16, veil_alpha))
-        glow_center = QPointF(self.card.geometry().center())
-        glow = QRadialGradient(glow_center, max(220.0, self.card.width() * 0.85))
-        accent = QColor(self.accent)
-        accent.setAlpha(int((42 if light else 85) * max(0.2, min(1.0, self._popup_progress))))
-        glow.setColorAt(0.0, accent)
-        accent.setAlpha(0)
-        glow.setColorAt(1.0, accent)
-        painter.fillRect(rect, glow)
-        painter.end()
+        return
 
 
 class MiniPlayer(PlayerBar):
@@ -4686,6 +4625,7 @@ class MusicPlayer(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "cover_page") and not self._force_exit:
             QTimer.singleShot(0, self.refresh_current_track_views)
+            self._position_expanded_cover()
         toast = getattr(self, "toast", None)
         if toast is not None and toast.isVisible():
             toast.move(max(0, self.width() - toast.width() - 20),
@@ -5617,43 +5557,60 @@ class MusicPlayer(QMainWindow):
         self.cover_page = CoverPopupPage()
         self.cover_page.setObjectName("coverPage")
         self.cover_page.close_requested.connect(self.close_cover_view)
-        self.cover_card = self.cover_page.card
-        layout = QVBoxLayout(self.cover_card)
-        layout.setContentsMargins(22, 16, 22, 20)
-        layout.setSpacing(10)
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        badge = QLabel("СЕЙЧАС ИГРАЕТ", self.cover_card)
-        badge.setObjectName("eyebrow")
-        header.addWidget(badge)
-        header.addStretch(1)
-        self.cover_back_button = QPushButton("×", self.cover_card)
+        self.cover_back_button = QPushButton("×", self.cover_page)
         self.cover_back_button.setObjectName("coverCloseButton")
-        self.cover_back_button.setFixedSize(32, 32)
-        self.cover_back_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.cover_back_button.setToolTip("Закрыть окно обложки (Esc)")
-        self.cover_back_button.setAccessibleName("Закрыть крупную обложку")
+        self.cover_back_button.hide()
         self.cover_back_button.clicked.connect(self.close_cover_view)
-        header.addWidget(self.cover_back_button)
-        layout.addLayout(header)
-        self.expanded_cover = ExpandedArtwork(self.cover_card)
-        self.expanded_cover.setObjectName("expandedCover")
-        layout.addWidget(self.expanded_cover, 1)
-        self.expanded_title = QLabel("", self.cover_card)
+        self.expanded_title = QLabel("", self.cover_page)
         self.expanded_title.setObjectName("expandedTitle")
         self.expanded_title.setTextFormat(Qt.TextFormat.PlainText)
-        self.expanded_title.setWordWrap(True)
-        self.expanded_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.expanded_title.setMaximumHeight(54)
-        layout.addWidget(self.expanded_title)
-        self.expanded_artist = QPushButton("", self.cover_card)
+        self.expanded_title.hide()
+        self.expanded_artist = QPushButton("", self.cover_page)
         self.expanded_artist.setObjectName("expandedArtist")
-        self.expanded_artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.expanded_artist.setFlat(True)
+        self.expanded_artist.hide()
         self.expanded_artist.clicked.connect(self.open_current_artist)
-        layout.addWidget(self.expanded_artist)
+        self.expanded_cover = ExpandedArtwork(self)
+        self.expanded_cover.setObjectName("expandedCover")
+        self.expanded_cover.hide()
+        self.expanded_cover.clicked.connect(self.close_cover_view)
+        self._cover_expand_progress = 1.0
+        self._cover_expand_anim = QVariantAnimation(self)
+        self._cover_expand_anim.setDuration(210)
+        self._cover_expand_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._cover_expand_anim.valueChanged.connect(self._on_cover_expand_progress)
         self._cover_return_page = None
         self.view_stack.addWidget(self.cover_page)
+
+    def _on_cover_expand_progress(self, value):
+        self._cover_expand_progress = float(value)
+        self._position_expanded_cover()
+
+    def _position_expanded_cover(self):
+        if not hasattr(self, "expanded_cover") or not self.expanded_cover.isVisible():
+            return
+        target_size = self.expanded_cover.target_size()
+        target_w = float(target_size.width())
+        target_h = float(target_size.height())
+        if hasattr(self, "bottom_cover") and hasattr(self, "player_bar"):
+            origin = self.bottom_cover.mapTo(self, QPoint(0, 0))
+            start_x = float(origin.x())
+            start_y = float(origin.y())
+            start_w = float(max(48, self.bottom_cover.width()))
+            start_h = float(max(48, self.bottom_cover.height()))
+            bar_top = float(self.player_bar.mapTo(self, QPoint(0, 0)).y())
+            end_x = max(10.0, start_x - 6.0)
+            end_y = max(10.0, bar_top - target_h - 4.0)
+        else:
+            start_x, start_y, start_w, start_h = 18.0, float(max(60, self.height() - 80)), 56.0, 56.0
+            end_x, end_y = 14.0, max(10.0, float(self.height()) - target_h - 96.0)
+        t = getattr(self, "_cover_expand_progress", 1.0)
+        x = round(start_x + (end_x - start_x) * t)
+        y = round(start_y + (end_y - start_y) * t)
+        w = round(start_w + (target_w - start_w) * t)
+        h = round(start_h + (target_h - start_h) * t)
+        self.expanded_cover.setGeometry(x, y, max(48, w), max(48, h))
+        self.expanded_cover.raise_()
 
     @staticmethod
     def artist_card_name(track):
@@ -5693,6 +5650,7 @@ class MusicPlayer(QMainWindow):
             url = normalize_artwork_url(track.get("thumbnail", ""))
             if self.expanded_cover.property("requested_image") != url:
                 self.request_image(url, self.expanded_cover)
+            self._position_expanded_cover()
 
     def toggle_cover_view(self):
         if self.view_stack.currentWidget() is self.cover_page:
@@ -5701,18 +5659,21 @@ class MusicPlayer(QMainWindow):
         if not self.current_track or not self.current_track.get("url"):
             return
         self._cover_return_page = self.view_stack.currentWidget()
-        if self._cover_return_page is not None and self.isVisible():
-            self.cover_page.set_backdrop(self._cover_return_page.grab())
-        else:
-            self.cover_page.clear_backdrop()
-        # No extra window or media player; browsing state and playback stay live.
+        # Никаких новых окон или перекрытия экрана: просто расширяется фото обложки внизу.
         self.fade_to_page(self.cover_page)
-        self.cover_page.animate_open()
         self.refresh_current_track_views()
+        self._cover_expand_anim.stop()
+        self._cover_expand_progress = 0.0
+        self.expanded_cover.show()
+        self._position_expanded_cover()
+        self._cover_expand_anim.setStartValue(0.0)
+        self._cover_expand_anim.setEndValue(1.0)
+        self._cover_expand_anim.start()
 
     def close_cover_view(self):
         if self.view_stack.currentWidget() is self.cover_page:
-            self.cover_page.clear_backdrop()
+            self._cover_expand_anim.stop()
+            self.expanded_cover.hide()
             page = self._cover_return_page
             if page not in (self.browse_page, self.likes_page):
                 page = self.last_library_page
@@ -6115,19 +6076,7 @@ class MusicPlayer(QMainWindow):
             QPushButton#expandedArtist { font-size: 14px; text-align: center; padding: 3px 8px; border-radius: 8px; }
             QPushButton#expandedArtist:hover:enabled { background: rgba(255, 255, 255, 14); }
             QLabel#expandedTitle { color: #F7F9FC; font-size: 18px; font-weight: 800; }
-            QFrame#coverPage { background: transparent; border: none; }
-            QFrame#coverCard {
-                background: rgba(22, 27, 36, 246);
-                border: 1px solid #303B4B;
-                border-radius: 22px;
-            }
-            QPushButton#coverCloseButton {
-                background: #222B37; color: #C6D0DE; border: 1px solid #323E4F;
-                border-radius: 16px; font-size: 18px; font-weight: 700; padding: 0;
-            }
-            QPushButton#coverCloseButton:hover {
-                background: #2D3847; color: #FFFFFF; border-color: #5CE092;
-            }
+            QWidget#coverPage, QLabel#expandedCover { background: transparent; border: none; }
             QFrame#sidebarDivider { background: #222A35; }
             QFrame#searchBox { background: #1B212B; border: 1px solid #2D3746; border-radius: 16px; }
             QFrame#searchBox[focused="true"] { border-color: #5CE092; background: #202834; }
@@ -6260,19 +6209,7 @@ class MusicPlayer(QMainWindow):
             QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #141C26; }
             QPushButton#expandedArtist:hover:enabled { background: rgba(20, 28, 38, 12); }
             QLabel#expandedTitle { color: #141C26; }
-            QFrame#coverPage { background: transparent; border: none; }
-            QFrame#coverCard {
-                background: rgba(255, 255, 255, 248);
-                border: 1px solid #D5DEE8;
-                border-radius: 22px;
-            }
-            QPushButton#coverCloseButton {
-                background: #EFF3F8; color: #364558; border: 1px solid #D5DEE8;
-                border-radius: 16px; font-size: 18px; font-weight: 700; padding: 0;
-            }
-            QPushButton#coverCloseButton:hover {
-                background: #E2F3E8; color: #167A40; border-color: #21834C;
-            }
+            QWidget#coverPage, QLabel#expandedCover { background: transparent; border: none; }
             QFrame#sidebarDivider { background: #DFE6EE; }
             QFrame#searchBox { background: #F2F5F9; border-color: #D6DFE9; }
             QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #21834C; }
@@ -7017,7 +6954,12 @@ class MusicPlayer(QMainWindow):
 
     def fade_to_page(self, page):
         """Короткое затухание при смене внутреннего экрана (без отдельного окна)."""
-        if page is not getattr(self, "cover_page", None) and self.view_stack.currentWidget() is getattr(self, "cover_page", None):
+        was_cover = self.view_stack.currentWidget() is getattr(self, "cover_page", None)
+        is_cover = page is getattr(self, "cover_page", None)
+        if not is_cover and was_cover:
+            if hasattr(self, "_cover_expand_anim"):
+                self._cover_expand_anim.stop()
+            self.expanded_cover.hide()
             self.expanded_cover.clear_artwork()
         if self.page_animation is not None:
             self.page_animation.stop()
@@ -7025,7 +6967,20 @@ class MusicPlayer(QMainWindow):
             if self._animated_page is not None:
                 self._animated_page.setGraphicsEffect(None)
             self.page_animation = None
+        stack_layout = self.view_stack.layout()
+        if is_cover:
+            if isinstance(stack_layout, QStackedLayout):
+                stack_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+            for candidate in (self.browse_page, self.likes_page):
+                if candidate is not None:
+                    candidate.setVisible(candidate is self._cover_return_page)
+            self.view_stack.setCurrentWidget(page)
+            return
+        if isinstance(stack_layout, QStackedLayout):
+            stack_layout.setStackingMode(QStackedLayout.StackingMode.StackOne)
         self.view_stack.setCurrentWidget(page)
+        if was_cover and page is self._cover_return_page:
+            return
         effect = QGraphicsOpacityEffect(page)
         page.setGraphicsEffect(effect)
         effect.setOpacity(0.0)
@@ -10772,6 +10727,7 @@ class MusicPlayer(QMainWindow):
                 label.set_artwork(image)
                 if label is getattr(self, "expanded_cover", None):
                     self.cover_page.set_cover_accent(image)
+                    self._position_expanded_cover()
                 return
             side = max(1, min(label.width(), label.height()))
             ratio = label.devicePixelRatioF()
