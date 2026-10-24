@@ -47,7 +47,7 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 
 
 APP_USER_MODEL_ID = "AuroraLocal.MusicPlayer"
@@ -2913,14 +2913,16 @@ class TrackRow(QWidget):
         layout.addLayout(text_column, 1)
 
         if compact:
-            self.remove_button = QPushButton("×")
+            # An unparented button becomes a native top-level window on show().
+            # Set its owner before visibility changes to avoid a 28x28 flash.
+            self.remove_button = QPushButton("×", self)
             self.remove_button.setObjectName("rowRemove")
             self.remove_button.setFixedSize(28, 28)
             self.remove_button.setToolTip("Удалить из очереди")
             self.remove_button.setAccessibleName(f"Удалить {self._full_title} из очереди")
-            self.remove_button.setVisible(removable)
             self.remove_button.setProperty("revealed", False)
             layout.addWidget(self.remove_button)
+            self.remove_button.setVisible(removable)
             self.now_playing = QLabel("♫", self.thumbnail_label)
             self.now_playing.setObjectName("queuePlayingBadge")
             self.now_playing.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -7748,7 +7750,7 @@ class MusicPlayer(QMainWindow):
         self.recent_heading.setText(heading if tracks else "Недавно слушал")
         self.recent_rows = []
         for track in tracks:
-            row = TrackRow(track, compact=True, removable=False)
+            row = TrackRow(track, compact=True, removable=False, parent=self.recent_rows_widget)
             row.setFixedHeight(64)
             row.play_requested.connect(lambda selected: self.add_to_queue(selected, True))
             self.request_image(track.get("thumbnail", ""), row.thumbnail_label)
@@ -8230,6 +8232,7 @@ class MusicPlayer(QMainWindow):
             track,
             is_favorite=(self.is_youtube_music_liked(track) if youtube_rating_row else self.is_favorite(track)),
             index=index_number,
+            parent=list_widget.viewport(),
             show_source=not (
                 list_widget is self.youtube_likes_list
                 or list_widget is self.soundcloud_likes_list
@@ -10451,7 +10454,7 @@ class MusicPlayer(QMainWindow):
             self.schedule_visible_artwork(self.queue_list)
 
     def _create_queue_row(self, item, queued):
-        row = TrackRow(queued, compact=True)
+        row = TrackRow(queued, compact=True, parent=self.queue_list.viewport())
         row.setCursor(Qt.CursorShape.PointingHandCursor)
         self.queue_list.setItemWidget(item, row)
         uid = queued.get("queue_id")

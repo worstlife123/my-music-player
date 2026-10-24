@@ -630,6 +630,44 @@ class PlayerChanges(unittest.TestCase):
         self.w.likes_settings_menu.hide()
         self.assertFalse(self.w.connect_account_button.isVisible())
 
+    def test_selecting_tracks_and_rebuilding_queue_never_shows_a_standalone_control(self):
+        w = self.w
+        shown_windows = []
+        class Audit(m.QObject):
+            def eventFilter(self, watched, event):
+                if (event.type() == QEvent.Type.Show and isinstance(watched, m.QWidget)
+                        and watched.isWindow()):
+                    shown_windows.append((type(watched).__name__, watched.objectName()))
+                return False
+        audit = Audit()
+        app.installEventFilter(audit)
+        try:
+            youtube = [self.youtube_track(f'noflash{i:04}') for i in range(4)]
+            soundcloud = [{'source': 'soundcloud', 'title': f'Track {i}',
+                           'url': f'https://soundcloud.com/test/noflash-{i}'} for i in range(3)]
+            w.youtube_liked_tracks = youtube
+            w.soundcloud_liked_tracks = soundcloud
+            with patch.object(w, 'queue_artwork_lookup'), patch.object(w, 'play_queue_index') as play:
+                w.refresh_likes_list(force_rebuild=True)
+                w.set_source('likes')
+                for tab, lw, expected in ((0, w.youtube_likes_list, youtube),
+                                          (1, w.soundcloud_likes_list, soundcloud)):
+                    w.likes_tabs.setCurrentIndex(tab)
+                    app.processEvents()
+                    row = lw.itemWidget(lw.item(0))
+                    row.play_button.click()
+                    self.assertEqual([t['url'] for t in w.queue_tracks], [t['url'] for t in expected])
+                    play.assert_called_with(0)
+                    self.assertEqual(w.queue_list.count(), len(expected))
+                    queue_row = w.queue_list.itemWidget(w.queue_list.item(0))
+                    self.assertFalse(queue_row.remove_button.isWindow())
+                    queue_row.remove_button.click()
+                    self.assertEqual(len(w.queue_tracks), len(expected) - 1)
+                    self.settle_row_deletions()
+                self.assertEqual(shown_windows, [])
+        finally:
+            app.removeEventFilter(audit)
+
     def test_queue_highlight_uses_position_identity_and_remove_is_available_on_hover(self):
         track = self.youtube_track('same0000001')
         with patch.object(self.w, 'prepare_next_track'):
