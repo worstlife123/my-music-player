@@ -1290,6 +1290,110 @@ class PlayerChanges(unittest.TestCase):
         assert image.save(buffer, fmt)
         return bytes(buffer.data())
 
+    def test_wallpaper_picker_save_restores_owned_copy_and_reuses_render_cache(self):
+        w = self.w
+        source = self.test_path / 'my-photo.jpg'
+        source.write_bytes(self.encoded_image(3072, 1536, '#426699'))
+        dialog = m.SettingsDialog(w)
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(str(source), '')):
+            dialog.choose_wallpaper()
+        self.assertFalse(w.backdrop.has_wallpaper)
+        self.assertEqual(dialog.wallpaper_draft.size(), m.QSize(2048, 1024))
+        dialog.wallpaper_dim_slider.setValue(73)
+        dialog.save_changes()
+        self.assertTrue(w.backdrop.has_wallpaper)
+        owned = Path(w.wallpaper_path)
+        self.assertNotEqual(owned, source)
+        self.assertTrue(owned.is_file())
+        source.unlink()
+        with self.reopened_player() as restored:
+            self.assertTrue(restored.backdrop.has_wallpaper)
+            self.assertEqual(restored.backdrop.image.size(), m.QSize(2048, 1024))
+            self.assertEqual(restored.wallpaper_dim, 73)
+            restored.backdrop.grab()
+            cache_key = restored.backdrop._cache.cacheKey()
+            restored.backdrop.grab()
+            self.assertEqual(restored.backdrop._cache.cacheKey(), cache_key)
+            restored.toggle_theme()
+            restored.backdrop.grab()
+            self.assertNotEqual(restored.backdrop._cache.cacheKey(), cache_key)
+            self.assertLessEqual(max(restored.backdrop._cache.width(), restored.backdrop._cache.height()), 2048)
+
+    def test_wallpaper_cancel_and_invalid_selection_leave_player_unchanged(self):
+        w = self.w
+        image = QImage(512, 256, QImage.Format.Format_RGB32)
+        image.fill(m.QColor('red'))
+        self.assertTrue(w.set_wallpaper_image(image))
+        old_bytes = Path(w.wallpaper_path).read_bytes()
+        old_key = w.backdrop.image.cacheKey()
+        source = self.test_path / 'replacement.png'
+        source.write_bytes(self.encoded_image(256, 128, '#426699', 'PNG'))
+        dialog = m.SettingsDialog(w)
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(str(source), '')):
+            dialog.choose_wallpaper()
+        dialog.wallpaper_dim_slider.setValue(10)
+        dialog.reject()
+        self.assertEqual(w.backdrop.image.cacheKey(), old_key)
+        self.assertEqual(Path(w.wallpaper_path).read_bytes(), old_bytes)
+        self.assertEqual(w.wallpaper_dim, 55)
+        bad = self.test_path / 'bad.png'
+        bad.write_bytes(b'not an image')
+        other = m.SettingsDialog(w)
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(str(bad), '')):
+            other.choose_wallpaper()
+        self.assertFalse(other.wallpaper_dirty)
+        self.assertIn('Не удалось', other.wallpaper_message.text())
+        self.assertEqual(w.backdrop.image.cacheKey(), old_key)
+
+    def test_wallpaper_remove_deletes_only_app_copy_and_survives_restart(self):
+        w = self.w
+        original = self.test_path / 'original.png'
+        original.write_bytes(self.encoded_image(256, 128, '#426699', 'PNG'))
+        self.assertTrue(w.set_wallpaper_image(m.read_wallpaper_image(str(original))))
+        owned = Path(w.wallpaper_path)
+        dialog = m.SettingsDialog(w)
+        dialog.remove_wallpaper()
+        self.assertTrue(w.backdrop.has_wallpaper)
+        dialog.save_changes()
+        self.assertTrue(original.exists())
+        self.assertFalse(owned.exists())
+        self.assertFalse(w.backdrop.has_wallpaper)
+        with self.reopened_player() as restored:
+            self.assertFalse(restored.backdrop.has_wallpaper)
+            self.assertEqual(restored.wallpaper_path, '')
+            restored.backdrop.grab()
+            self.assertIsNone(restored.backdrop._cache)
+
+    def test_failed_wallpaper_save_keeps_previous_file_and_missing_wallpaper_does_not_block_startup(self):
+        w = self.w
+        image = QImage(256, 128, QImage.Format.Format_RGB32)
+        image.fill(m.QColor('red'))
+        self.assertTrue(w.set_wallpaper_image(image))
+        previous = Path(w.wallpaper_path).read_bytes()
+        key = w.backdrop.image.cacheKey()
+        dialog = m.SettingsDialog(w)
+        dialog.wallpaper_dirty = True
+        dialog.wallpaper_draft = image
+        with patch.object(m, 'QSaveFile') as output:
+            output.return_value.open.return_value = False
+            dialog.save_changes()
+        self.assertEqual(dialog.result(), 0)
+        self.assertIn('Не удалось сохранить', dialog.wallpaper_message.text())
+        self.assertEqual(Path(w.wallpaper_path).read_bytes(), previous)
+        self.assertEqual(w.backdrop.image.cacheKey(), key)
+        with patch.object(m, 'app_data_directory', side_effect=OSError('unavailable')):
+            self.assertFalse(w.set_wallpaper_image(image))
+        self.assertEqual(w.backdrop.image.cacheKey(), key)
+        w.settings.setValue('wallpaper_path', str(self.test_path / 'missing.png'))
+        w.settings.setValue('wallpaper_dim', 'invalid')
+        with self.reopened_player() as restored:
+            self.assertFalse(restored.backdrop.has_wallpaper)
+            self.assertEqual(restored.wallpaper_dim, 55)
+        with patch.object(m, 'QImageReader') as reader:
+            reader.return_value.size.return_value = m.QSize(10000, 10000)
+            self.assertTrue(m.read_wallpaper_image(w.wallpaper_path).isNull())
+            reader.return_value.read.assert_not_called()
+
     def test_large_artwork_is_decoded_to_display_resolution_and_bad_images_are_ignored(self):
         w = self.w
         pixmap = w._decode_artwork(self.encoded_image())

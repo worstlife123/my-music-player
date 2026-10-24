@@ -26,10 +26,10 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice
+from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
-    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader,
+    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkDiskCache
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -754,11 +754,7 @@ class SpotifyPlaylistCard(QPushButton):
                 painter.setPen(QPen(QColor(80, 13, 40, 130), 11))
                 radius = 46 + index * 31
                 painter.drawEllipse(QPointF(340, 45), radius, radius)
-            painter.setPen(QColor("#FFF5E8"))
-            font = QFont("Arial", 60, QFont.Weight.Black)
-            painter.setFont(font)
-            painter.drawText(QRectF(24, 122, 342, 96), Qt.AlignmentFlag.AlignLeft, "SUPER")
-            painter.drawText(QRectF(24, 202, 342, 96), Qt.AlignmentFlag.AlignLeft, "MIX")
+            draw_vector_icon(painter, "supermix", QRectF(100, 96, 184, 184), "#FFF5E8")
         elif style == "shuffle":
             painter.save()
             painter.translate(190, 190)
@@ -776,11 +772,6 @@ class SpotifyPlaylistCard(QPushButton):
                 painter.drawEllipse(center, radius, radius)
             draw_vector_icon(painter, "heart", QRectF(102, 92, 180, 180), "#FFFFFF")
 
-        painter.setPen(QColor(255, 255, 255, 205))
-        painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-        footer = {"likes": "LIKED MUSIC", "soundcloud-likes": "YOUR LIKES",
-                  "supermix": "MADE FROM YOUR LIKES", "shuffle": "ON REPEAT"}.get(style, "MUSIC")
-        painter.drawText(QRectF(26, 333, 340, 26), Qt.AlignmentFlag.AlignLeft, footer)
         painter.end()
         return image
 
@@ -814,15 +805,9 @@ class SpotifyPlaylistCard(QPushButton):
         title_font = QFont(self.font().family(), 15, QFont.Weight.Bold)
         painter.setFont(title_font)
         painter.setPen(QColor("#18202A" if light else "#FFFFFF"))
-        painter.drawText(QRectF(left, bounds.center().y() - 29, width, 32),
+        painter.drawText(QRectF(left, bounds.center().y() - 16, width, 32),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(width)))
-        detail_font = QFont(self.font().family(), 9)
-        painter.setFont(detail_font)
-        painter.setPen(QColor("#626C7B" if light else "#AFB7C4"))
-        painter.drawText(QRectF(left, bounds.center().y() + 9, width, 23),
-                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         QFontMetrics(detail_font).elidedText(self.subtitle, Qt.TextElideMode.ElideRight, int(width)))
         button = QRectF(bounds.right() - 56, bounds.center().y() - 20, 40, 40)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#FFFFFF"))
@@ -872,10 +857,6 @@ class SpotifyPlaylistCard(QPushButton):
                               ("#18202A" if light else "#F5F7FA")))
         painter.drawText(QRectF(14, cover.bottom() + 10, side, 24), Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(title_font).elidedText(self.title, Qt.TextElideMode.ElideRight, int(side)))
-        painter.setFont(QFont(self.font().family(), 9))
-        painter.setPen(QColor("#626C7B" if light else "#AFB7C4"))
-        painter.drawText(QRectF(14, cover.bottom() + 36, side, 36),
-                         Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, self.subtitle)
         painter.end()
 
     def paintEvent(self, event):
@@ -2438,17 +2419,120 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+def read_wallpaper_image(path):
+    """Decode one local frame and keep a bounded image, including EXIF rotation."""
+    if not path:
+        return QImage()
+    try:
+        image_path = Path(path)
+        if not image_path.is_file() or image_path.stat().st_size > 40_000_000:
+            return QImage()
+        reader = QImageReader(str(image_path))
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if not size.isValid() or size.width() * size.height() > 36_000_000:
+            return QImage()
+        if max(size.width(), size.height()) > 2048:
+            reader.setScaledSize(size.scaled(2048, 2048, Qt.AspectRatioMode.KeepAspectRatio))
+        return reader.read()
+    except (OSError, ValueError, TypeError):
+        return QImage()
+
+
+class PlayerBackdrop(QWidget):
+    """Static wallpaper; hover paints reuse the composed bitmap without scaling."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.image = QPixmap()
+        self.theme = "dark"
+        self.dim = 55
+        self._cache = None
+        self._cache_key = None
+
+    @property
+    def has_wallpaper(self):
+        return not self.image.isNull()
+
+    def set_image(self, image):
+        self.image = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        self._cache = None
+        self.update()
+
+    def set_appearance(self, theme, dim):
+        if self.theme != theme or self.dim != dim:
+            self.theme, self.dim = theme, dim
+            self._cache = None
+            self.update()
+
+    def paintEvent(self, event):
+        if not self.has_wallpaper:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor("#0B0D10" if self.theme == "dark" else "#E9EDF2"))
+            painter.end()
+            return
+        key = (self.size(), self.devicePixelRatioF(), self.theme, self.dim)
+        if self._cache is None or key != self._cache_key:
+            dpr = self.devicePixelRatioF()
+            # A wallpaper is deliberately capped at 2048 px even on 4K/HiDPI screens.
+            pixels = QSize(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+            if max(pixels.width(), pixels.height()) > 2048:
+                pixels = pixels.scaled(2048, 2048, Qt.AspectRatioMode.KeepAspectRatio)
+            bitmap = QPixmap(pixels)
+            bitmap.fill(QColor("#0B0D10" if self.theme == "dark" else "#E9EDF2"))
+            if self.has_wallpaper:
+                painter = QPainter(bitmap)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                target = QRectF(0, 0, pixels.width(), pixels.height())
+                ratio = max(pixels.width() / self.image.width(), pixels.height() / self.image.height())
+                crop_w, crop_h = pixels.width() / ratio, pixels.height() / ratio
+                crop = QRectF((self.image.width() - crop_w) / 2, (self.image.height() - crop_h) / 2, crop_w, crop_h)
+                painter.drawPixmap(target, self.image, crop)
+                painter.fillRect(target, QColor(0, 0, 0, round(255 * self.dim / 100)))
+                painter.end()
+            self._cache, self._cache_key = bitmap, key
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self._cache)
+        painter.end()
+
+
+def make_service_artwork(source):
+    """Small local artwork for navigation; no downloads or emoji fonts."""
+    pixmap = QPixmap(80, 80)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    colors = {"youtube": ("#FF5469", "#C81036"), "soundcloud": ("#FFB15B", "#F15024"),
+              "likes": ("#9A86FF", "#5B3AB1"), "brand": ("#73E9C1", "#3189A4")}
+    start, end = colors.get(source, colors["brand"])
+    gradient = QLinearGradient(0, 0, 80, 80)
+    gradient.setColorAt(0, QColor(start))
+    gradient.setColorAt(1, QColor(end))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(QRectF(1, 1, 78, 78), 23, 23)
+    painter.setBrush(QColor(255, 255, 255, 24))
+    painter.drawEllipse(QRectF(37, -15, 64, 64))
+    kind = {"youtube": "play", "soundcloud": "cloud", "likes": "heart", "brand": "headphones"}.get(source, "music")
+    draw_vector_icon(painter, kind, QRectF(20, 20, 40, 40), "#FFFFFF")
+    painter.end()
+    pixmap.setDevicePixelRatio(2)
+    return pixmap
+
+
 class AnimatedNavButton(QPushButton):
     """Кнопка боковой навигации с собственной отрисовкой и плавным цветом текста."""
     def __init__(self, icon_text, title, parent=None):
         super().__init__(parent)
         self.setObjectName("navButton")
         self.setCheckable(True)
-        self.setMinimumHeight(50)
+        self.setMinimumHeight(60)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._nav_icon = icon_text
         self._nav_title = title
+        source = "youtube" if "youtube" in title.casefold() else "soundcloud" if "soundcloud" in title.casefold() else "likes"
+        self._service_artwork = make_service_artwork(source)
         self._collapsed = False
         self._theme = "dark"
         self._base_color = QColor("#B3B3B3")
@@ -2523,22 +2607,11 @@ class AnimatedNavButton(QPushButton):
             painter.setBrush(QColor("#1DB954"))
             painter.drawRoundedRect(rect.left(), rect.top() + 9, 3, max(12, rect.height() - 18), 1.5, 1.5)
         painter.setPen(self._text_color)
-        title_key = self._nav_title.casefold()
-        if "youtube" in title_key:
-            icon_kind = "play"
-        elif "soundcloud" in title_key:
-            icon_kind = "cloud"
-        elif "лайк" in title_key or "like" in title_key:
-            icon_kind = "heart"
-        else:
-            icon_kind = "music"
-        if self._collapsed:
-            icon_rect = QRectF(rect.center().x() - 13, rect.center().y() - 13, 26, 26)
-            draw_vector_icon(painter, icon_kind, icon_rect, self._text_color, self._active_color)
-        else:
-            icon_rect = QRectF(rect.left() + 14, rect.center().y() - 12, 24, 24)
-            draw_vector_icon(painter, icon_kind, icon_rect, self._text_color, self._active_color)
-            text_rect = QRect(rect.left() + 49, rect.top(), max(0, rect.width() - 56), rect.height())
+        icon_rect = QRectF(rect.center().x() - 18 if self._collapsed else rect.left() + 10,
+                           rect.center().y() - 18, 36, 36)
+        painter.drawPixmap(icon_rect, self._service_artwork, QRectF(0, 0, 80, 80))
+        if not self._collapsed:
+            text_rect = QRect(rect.left() + 57, rect.top(), max(0, rect.width() - 64), rect.height())
             nav_font = QFont(self.font())
             nav_font.setPixelSize(13)
             nav_font.setWeight(QFont.Weight.DemiBold if self.isChecked() else QFont.Weight.Medium)
@@ -3424,6 +3497,47 @@ class SettingsDialog(QDialog):
         )
         tabs.addTab(general, "Общие")
 
+        # Wallpaper changes are drafts until Save; Cancel leaves the player untouched.
+        self.wallpaper_dirty = False
+        self.wallpaper_draft = QImage()
+        self.wallpaper_preview_source = player.backdrop.image
+        background = QWidget()
+        background.setObjectName("settingsBackground")
+        background_layout = QVBoxLayout(background)
+        background_layout.setContentsMargins(16, 18, 16, 18)
+        background_layout.setSpacing(14)
+        self.wallpaper_preview = QLabel()
+        self.wallpaper_preview.setObjectName("wallpaperPreview")
+        self.wallpaper_preview.setFixedSize(360, 170)
+        self.wallpaper_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        background_layout.addWidget(self.wallpaper_preview, 0, Qt.AlignmentFlag.AlignHCenter)
+        image_buttons = QHBoxLayout()
+        self.wallpaper_choose = QPushButton("Выбрать картинку")
+        self.wallpaper_choose.setObjectName("settingsPicker")
+        self.wallpaper_choose.clicked.connect(self.choose_wallpaper)
+        self.wallpaper_remove = QPushButton("Убрать фон")
+        self.wallpaper_remove.setObjectName("settingsPicker")
+        self.wallpaper_remove.clicked.connect(self.remove_wallpaper)
+        image_buttons.addWidget(self.wallpaper_choose)
+        image_buttons.addWidget(self.wallpaper_remove)
+        background_layout.addLayout(image_buttons)
+        self.wallpaper_dim_label = QLabel()
+        self.wallpaper_dim_label.setObjectName("settingsField")
+        background_layout.addWidget(self.wallpaper_dim_label)
+        self.wallpaper_dim_slider = QSlider(Qt.Orientation.Horizontal)
+        self.wallpaper_dim_slider.setRange(0, 90)
+        self.wallpaper_dim_slider.setValue(player.wallpaper_dim)
+        self.wallpaper_dim_slider.setTracking(False)
+        self.wallpaper_dim_slider.valueChanged.connect(self.update_wallpaper_preview)
+        background_layout.addWidget(self.wallpaper_dim_slider)
+        self.wallpaper_message = QLabel("Картинка сохранится в плеере. Оригинал останется на месте.")
+        self.wallpaper_message.setObjectName("settingsHint")
+        self.wallpaper_message.setWordWrap(True)
+        background_layout.addWidget(self.wallpaper_message)
+        background_layout.addStretch(1)
+        self.update_wallpaper_preview()
+        tabs.addTab(background, "Фон")
+
         # ------------------ Воспроизведение ------------------
         playback = QWidget()
         playback.setObjectName("settingsPlayback")
@@ -3552,6 +3666,8 @@ class SettingsDialog(QDialog):
             QWidget#settingsServices {
                 background-color: #181818;
             }
+            QLabel#wallpaperPreview { background: #20242B; border-radius: 10px; color: #AEB6C3; }
+            QWidget#settingsBackground { background: #181818; }
             QLabel#settingsTitle { font-size: 24px; font-weight: 800; color: #FFF8FA; }
             QLabel#settingsHint { color: #AFA4B9; font-size: 10pt; }
             QLabel#settingsGroup { color: #1DB954; font-size: 10pt; font-weight: 800; }
@@ -3611,6 +3727,8 @@ class SettingsDialog(QDialog):
                 QWidget { color: #25252C; }
                 QWidget#settingsGeneral, QWidget#settingsPlayback, QWidget#settingsServices,
                 QTabWidget#settingsTabs::pane { background: #FFFFFF; border-color: #DADAE2; }
+                QWidget#settingsBackground { background: #FFFFFF; }
+                QLabel#wallpaperPreview { background: #E9EDF2; color: #526075; }
                 QLabel#settingsTitle { color: #202027; }
                 QLabel#settingsHint { color: #666675; }
                 QLabel#settingsGroup { color: #16883D; }
@@ -3633,6 +3751,44 @@ class SettingsDialog(QDialog):
                 QMenu::item:selected { background: #E1F4E7; color: #16883D; }"""
             for popup in self.findChildren(QMenu):
                 popup.setStyleSheet(light_menu)
+
+    def choose_wallpaper(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать фон", "", "Картинки (*.png *.jpg *.jpeg *.webp *.bmp)")
+        if not path:
+            return
+        image = read_wallpaper_image(path)
+        if image.isNull():
+            self.wallpaper_message.setText("Не удалось открыть картинку. Выбери PNG, JPEG или WebP до 36 мегапикселей и 40 МБ.")
+            return
+        self.wallpaper_draft = image
+        self.wallpaper_dirty = True
+        self.wallpaper_preview_source = QPixmap.fromImage(image)
+        self.wallpaper_message.setText("Нажми «Сохранить», чтобы применить фон.")
+        self.update_wallpaper_preview()
+
+    def remove_wallpaper(self):
+        self.wallpaper_draft = QImage()
+        self.wallpaper_dirty = True
+        self.wallpaper_preview_source = QPixmap()
+        self.wallpaper_message.setText("Нажми «Сохранить», чтобы убрать фон.")
+        self.update_wallpaper_preview()
+
+    def update_wallpaper_preview(self):
+        dim = self.wallpaper_dim_slider.value()
+        self.wallpaper_dim_label.setText(f"Затемнение · {dim}%")
+        self.wallpaper_remove.setEnabled(not self.wallpaper_preview_source.isNull())
+        self.wallpaper_preview.clear()
+        if self.wallpaper_preview_source.isNull():
+            self.wallpaper_preview.setText("Фон не выбран")
+            return
+        preview = self.wallpaper_preview_source.scaled(self.wallpaper_preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation)
+        # This is a small settings preview; the main window reuses its static cache.
+        preview.setDevicePixelRatio(1)
+        painter = QPainter(preview)
+        painter.fillRect(preview.rect(), QColor(0, 0, 0, round(255 * dim / 100)))
+        painter.end()
+        self.wallpaper_preview.setPixmap(preview)
 
     def _service_status_text(self):
         player = self.player_window
@@ -3676,6 +3832,10 @@ class SettingsDialog(QDialog):
 
     def save_changes(self):
         player = self.player_window
+        if self.wallpaper_dirty and not player.set_wallpaper_image(self.wallpaper_draft):
+            self.wallpaper_message.setText("Не удалось сохранить фон. Проверь свободное место и попробуй снова.")
+            return
+        player.wallpaper_dim = self.wallpaper_dim_slider.value()
         player.change_limit(int(self.result_count.value()))
         player.volume_slider.setValue(self.volume.value())
         player.audio_quality = str(self.audio_quality.currentData())
@@ -3693,6 +3853,7 @@ class SettingsDialog(QDialog):
         player.autoplay_playlists = self.autoplay_playlists.isChecked()
         if player.sidebar_collapsed != self.compact_sidebar.isChecked():
             player.toggle_sidebar()
+        player.apply_styles()
         player.save_preferences()
         self.accept()
 
@@ -4204,6 +4365,11 @@ class MusicPlayer(QMainWindow):
         self.theme = str(self.settings.value("spotify_theme", "dark"))
         if self.theme not in ("dark", "light"):
             self.theme = "dark"
+        self.wallpaper_path = str(self.settings.value("wallpaper_path", "") or "")
+        try:
+            self.wallpaper_dim = max(0, min(90, int(self.settings.value("wallpaper_dim", 55))))
+        except (TypeError, ValueError):
+            self.wallpaper_dim = 55
         self.audio_quality = str(self.settings.value("audio_quality", "auto") or "auto")
         if self.audio_quality not in ("auto", "high", "economy", "compatibility"):
             self.audio_quality = "auto"
@@ -4594,7 +4760,10 @@ class MusicPlayer(QMainWindow):
                 self._tray_notice_shown = True
 
     def build_ui(self):
-        root_widget = QWidget()
+        root_widget = PlayerBackdrop()
+        self.backdrop = root_widget
+        root_widget.set_image(read_wallpaper_image(self.wallpaper_path))
+        root_widget.set_appearance(self.theme, self.wallpaper_dim)
         root_widget.setObjectName("root")
         root = QVBoxLayout(root_widget)
         root.setContentsMargins(14, 14, 14, 12)
@@ -4635,7 +4804,8 @@ class MusicPlayer(QMainWindow):
 
         top = QHBoxLayout()
         top.setSpacing(9)
-        self.brand_mark = QLabel("A")
+        self.brand_mark = QLabel()
+        self.brand_mark.setPixmap(make_service_artwork("brand").scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.brand_mark.setObjectName("brandMark")
         self.brand_mark.setFixedSize(32, 32)
         self.brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -4650,11 +4820,11 @@ class MusicPlayer(QMainWindow):
         top.addStretch(1)
         top.addWidget(self.sidebar_toggle)
         side_layout.addLayout(top)
-        side_layout.addSpacing(24)
-        self.menu_hint = QLabel("МУЗЫКА")
+        side_layout.addSpacing(20)
+        self.menu_hint = QLabel("", self.sidebar)
         self.menu_hint.setObjectName("eyebrow")
         self.menu_hint.setContentsMargins(14, 0, 0, 8)
-        side_layout.addWidget(self.menu_hint)
+        self.menu_hint.hide()
 
         self.nav_buttons = []
         self.nav_data = [
@@ -4698,20 +4868,16 @@ class MusicPlayer(QMainWindow):
         browse.setContentsMargins(0, 0, 0, 0)
         browse.setSpacing(12)
 
-        title_row = QHBoxLayout()
-        self.page_title = QLabel("YouTube Music")
+        self.page_title = QLabel("YouTube Music", self.browse_page)
         self.page_title.setObjectName("pageTitle")
-        self.page_description = QLabel("Твоя коллекция и новые открытия")
+        self.page_description = QLabel("", self.browse_page)
         self.page_description.setObjectName("mutedText")
-        title_row.addWidget(self.page_title)
-        title_row.addStretch(1)
-        title_row.addWidget(self.page_description)
+        self.page_title.hide()
+        self.page_description.hide()
         self.theme_button = QPushButton("☀")
         self.theme_button.setObjectName("themeButton")
         self.theme_button.setFixedSize(42, 38)
         self.theme_button.setToolTip("Переключить светлую / тёмную тему")
-        title_row.addWidget(self.theme_button)
-        browse.addLayout(title_row)
 
         self.search_row = QWidget()
         search_layout = QHBoxLayout(self.search_row)
@@ -4764,6 +4930,7 @@ class MusicPlayer(QMainWindow):
         shell_layout.addWidget(self.search_button)
         search_layout.addWidget(self.back_button)
         search_layout.addWidget(self.search_shell, 1)
+        search_layout.addWidget(self.theme_button)
         browse.addWidget(self.search_row)
 
         self.start_cards_widget = QWidget()
@@ -5094,7 +5261,7 @@ class MusicPlayer(QMainWindow):
         self.bottom_title = MarqueeLabel("Ничего не играет")
         self.bottom_title.setObjectName("bottomTitle")
         self.bottom_title.setToolTip("Текущий трек")
-        self.bottom_artist = QLabel("Выбери песню")
+        self.bottom_artist = QLabel("")
         self.bottom_artist.setObjectName("bottomArtist")
         labels.addWidget(self.bottom_title)
         labels.addWidget(self.bottom_artist)
@@ -5495,7 +5662,7 @@ class MusicPlayer(QMainWindow):
             QSlider#seekSlider::handle:horizontal { background: #278454; }
         """
         dark_styles += r"""
-            QLabel#brandMark { background: #67D99A; color: #10251A; border-radius: 10px; font-size: 20px; font-weight: 800; }
+            QLabel#brandMark { background: transparent; color: #10251A; border-radius: 10px; font-size: 20px; font-weight: 800; }
             QLabel#brandName { color: #F0F4F8; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
             QFrame#sidebarDivider { background: #252D37; }
             QFrame#searchBox { background: #1E242D; border: 1px solid #303A48; border-radius: 16px; }
@@ -5508,7 +5675,7 @@ class MusicPlayer(QMainWindow):
             QPushButton#searchSubmit:disabled { background: #2A3C33; color: #899F93; }
         """
         light_styles += r"""
-            QLabel#brandMark { background: #D8F3E4; color: #237B4A; }
+            QLabel#brandMark { background: transparent; color: #237B4A; }
             QLabel#brandName { color: #1C2938; }
             QFrame#sidebarDivider { background: #E0E6ED; }
             QFrame#searchBox { background: #F2F5F8; border-color: #D8E0EA; }
@@ -5520,6 +5687,22 @@ class MusicPlayer(QMainWindow):
             QPushButton#searchSubmit:pressed { background: #1B6A3D; }
             QPushButton#searchSubmit:disabled { background: #DEE8E2; color: #7A8E81; }
         """
+        if self.backdrop.has_wallpaper:
+            dark_styles += r"""
+                QFrame#sidebar, QFrame#queuePanel { background: rgba(12, 16, 23, 205); }
+                QFrame#centerPanel { background: rgba(17, 22, 30, 180); }
+                QFrame#playerBar { background: rgba(18, 24, 32, 220); }
+                QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
+                QWidget#startCardsWidget, QListWidget { background: transparent; }
+            """
+            light_styles += r"""
+                QFrame#sidebar, QFrame#queuePanel { background: rgba(251, 253, 255, 220); }
+                QFrame#centerPanel { background: rgba(251, 253, 255, 205); }
+                QFrame#playerBar { background: rgba(251, 253, 255, 235); }
+                QScrollArea#startCardsScroll, QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
+                QWidget#startCardsWidget, QListWidget { background: transparent; }
+            """
+        self.backdrop.set_appearance(self.theme, self.wallpaper_dim)
         self.setStyleSheet(dark_styles if self.theme == "dark" else dark_styles + light_styles)
         if self.mini_player is not None:
             self.mini_player.apply_theme()
@@ -5663,9 +5846,40 @@ class MusicPlayer(QMainWindow):
         self.apply_styles()
         self.save_preferences()
 
+    def set_wallpaper_image(self, image):
+        """Keep an app-owned copy; never alter or delete the selected original."""
+        try:
+            destination = app_data_directory() / "background.png"
+        except OSError:
+            return False
+        if image.isNull():
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                return False
+            self.wallpaper_path = ""
+        else:
+            output = QSaveFile(str(destination))
+            if not output.open(QIODevice.OpenModeFlag.WriteOnly):
+                return False
+            if not image.save(output, "PNG"):
+                output.cancelWriting()
+                return False
+            if not output.commit():
+                return False
+            self.wallpaper_path = str(destination)
+        self.settings.setValue("wallpaper_path", self.wallpaper_path)
+        self.settings.sync()
+        self.backdrop.set_image(image)
+        self.apply_styles()
+        return True
+
     def open_settings(self):
         dialog = SettingsDialog(self)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def show_about(self):
         QMessageBox.about(
@@ -5690,6 +5904,8 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("autoplay_playlists", self.autoplay_playlists)
         self.settings.setValue("theme", self.theme)
         self.settings.setValue("spotify_theme", self.theme)
+        self.settings.setValue("wallpaper_path", self.wallpaper_path)
+        self.settings.setValue("wallpaper_dim", self.wallpaper_dim)
         self.settings.setValue("youtube_cookie_file", self.youtube_cookie_file)
         self.settings.setValue("youtube_auth_mode", self.youtube_auth_mode)
         self.settings.setValue("youtube_auth_browser", self.youtube_auth_browser)
@@ -6188,7 +6404,7 @@ class MusicPlayer(QMainWindow):
         collapsed = self.sidebar_collapsed
         self.sidebar.setFixedWidth(72 if collapsed else 216)
         self.sidebar.layout().setContentsMargins(8 if collapsed else 14, 20, 8 if collapsed else 14, 16)
-        self.menu_hint.setVisible(not collapsed)
+        self.menu_hint.hide()
         self.brand_mark.setVisible(not collapsed)
         self.brand_name.setVisible(not collapsed)
         self.sidebar_settings_button.setText("" if collapsed else "Настройки")
@@ -6308,7 +6524,7 @@ class MusicPlayer(QMainWindow):
         self.search_row.show()
         self.rebuild_start_cards()
         self.page_title.setText("YouTube Music" if source == "youtube" else "SoundCloud")
-        self.page_description.setText("Твоя коллекция и новые открытия")
+        self.page_description.clear()
         self.results_label.setText("РЕЗУЛЬТАТЫ ПОИСКА")
         self.search_input.setText(self.saved_queries[source])
         self.source_status.setText(self.source_statuses[source])
@@ -7346,7 +7562,7 @@ class MusicPlayer(QMainWindow):
         if not hasattr(self, "home_tiles_layout") or self._force_exit:
             return
         width = max(180, self.start_cards_scroll.viewport().width())
-        self.page_description.setVisible(width >= 650)
+        self.page_description.hide()
         columns = 3 if width >= 650 else 2 if width >= 360 else 1
         horizontal = len(self.start_cards) == 1 and not self.start_cards[0].tile_mode
         if horizontal:
@@ -7359,7 +7575,7 @@ class MusicPlayer(QMainWindow):
         while self.home_tiles_layout.count():
             self.home_tiles_layout.takeAt(0)
         for index, card in enumerate(self.start_cards):
-            card.setFixedSize(side, 148 if horizontal else side + 60)
+            card.setFixedSize(side, 148 if horizontal else side + 28)
             self.home_tiles_layout.addWidget(card, index // columns, index % columns,
                                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         for column in range(4):
@@ -9271,7 +9487,7 @@ class MusicPlayer(QMainWindow):
             self.current_queue_index = -1
             self.bottom_title.setText("Ничего не играет")
             self.bottom_title.setToolTip("Текущий трек")
-            self.bottom_artist.setText("Выбери песню")
+            self.bottom_artist.clear()
             self.bottom_artist.setToolTip("")
             self.show_cover("")
             self.play_button.setIcon(control_icon("play", "#FFFFFF"))
