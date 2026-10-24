@@ -2930,50 +2930,17 @@ class AnimatedNavButton(QPushButton):
 
 
 class MarqueeLabel(QLabel):
-    """Текстовая бегущая строка: длинные названия плавно прокручиваются внизу."""
+    """Спокойный заголовок трека без дёрганья и без точки: длинный текст аккуратно сокращается троеточием."""
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full_text = ""
-        self._offset = 0.0
-        self._timer = QTimer(self)
-        self._timer.setInterval(35)
-        self._timer.timeout.connect(self._advance_marquee)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setText(text)
 
     def setText(self, text):
         self._full_text = str(text or "")
         super().setText(self._full_text)
-        self._offset = 0.0
-        self._update_marquee_timer()
         self.update()
-
-    def _loop_text(self):
-        return self._full_text + "     •     "
-
-    def _update_marquee_timer(self):
-        if not hasattr(self, "_timer"):
-            return
-        fm = QFontMetrics(self.font())
-        if self._full_text and fm.horizontalAdvance(self._full_text) > max(10, self.contentsRect().width()):
-            if not self._timer.isActive():
-                self._timer.start()
-        else:
-            self._timer.stop()
-            self._offset = 0.0
-
-    def _advance_marquee(self):
-        if not self._full_text:
-            return
-        self._offset += 1.1
-        cycle = max(1, QFontMetrics(self.font()).horizontalAdvance(self._loop_text()))
-        if self._offset >= cycle:
-            self._offset = 0.0
-        self.update()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_marquee_timer()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2984,16 +2951,8 @@ class MarqueeLabel(QLabel):
         painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
         fm = QFontMetrics(self.font())
         baseline = rect.top() + (rect.height() - fm.height()) // 2 + fm.ascent()
-        text_width = fm.horizontalAdvance(self._full_text)
-        if text_width <= rect.width():
-            painter.drawText(rect.left(), baseline, self._full_text)
-        else:
-            loop_text = self._loop_text()
-            cycle = max(1, fm.horizontalAdvance(loop_text))
-            x = rect.left() - int(self._offset % cycle)
-            while x < rect.right():
-                painter.drawText(x, baseline, loop_text)
-                x += cycle
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(16, rect.width()))
+        painter.drawText(rect.left(), baseline, elided)
         painter.end()
 
 
@@ -5708,10 +5667,10 @@ class MusicPlayer(QMainWindow):
         controls.setSpacing(0)
         # Левая и правая зоны одинаковой ширины: транспорт строго в центре.
         track_info = QWidget()
-        track_info.setFixedWidth(320)
+        track_info.setFixedWidth(360)
         info = QHBoxLayout(track_info)
         info.setContentsMargins(0, 0, 0, 0)
-        info.setSpacing(10)
+        info.setSpacing(12)
         self.bottom_cover = ClickableLabel()
         self.bottom_cover.setEnabled(False)
         self.bottom_cover.setToolTip("Открыть крупную обложку")
@@ -5726,7 +5685,8 @@ class MusicPlayer(QMainWindow):
         self.bottom_cover.setGraphicsEffect(cover_shadow)
         info.addWidget(self.bottom_cover)
         labels = QVBoxLayout()
-        labels.setSpacing(0)
+        labels.setContentsMargins(0, 2, 0, 2)
+        labels.setSpacing(2)
         self.bottom_title = MarqueeLabel("Ничего не играет")
         self.bottom_title.setObjectName("bottomTitle")
         self.bottom_title.setToolTip("Текущий трек")
@@ -5742,10 +5702,12 @@ class MusicPlayer(QMainWindow):
         self.bottom_favorite_button.setObjectName("bottomFavorite")
         self.bottom_favorite_button.setIcon(control_icon("heart-outline", "#B3B3B3", 22))
         self.bottom_favorite_button.setIconSize(QSize(20, 20))
-        self.bottom_favorite_button.setFixedSize(30, 30)
+        self.bottom_favorite_button.setFixedSize(34, 34)
+        self.bottom_favorite_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.bottom_favorite_button.setCheckable(True)
         self.bottom_favorite_button.setEnabled(False)
         self.bottom_favorite_button.setToolTip("Добавить в локальные лайки")
+        info.addWidget(self.bottom_favorite_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.bottom_dislike_button = QPushButton()
         self.bottom_dislike_button.setObjectName("bottomDislike")
         self.bottom_dislike_button.setIcon(control_icon("thumb-down-outline", "#B3B3B3", 22))
@@ -5771,8 +5733,7 @@ class MusicPlayer(QMainWindow):
         central_controls = QWidget()
         center_row = QHBoxLayout(central_controls)
         center_row.setContentsMargins(0, 0, 0, 0)
-        center_row.setSpacing(4)
-        center_row.addSpacing(30)  # Balance the heart on the other side of Play.
+        center_row.setSpacing(8)
         self.shuffle_button = tool_button("shuffle", "Перемешивание: выкл.")
         self.shuffle_button.setCheckable(True)
         self.previous_button = tool_button("previous", "Предыдущий трек")
@@ -5785,7 +5746,7 @@ class MusicPlayer(QMainWindow):
         self.stop_button = tool_button("stop", "Остановить")
         for button in (
             self.shuffle_button, self.previous_button, self.play_button,
-            self.bottom_favorite_button, self.next_button, self.repeat_button,
+            self.next_button, self.repeat_button,
         ):
             center_row.addWidget(button)
         self.stop_button.setParent(bar)
@@ -5794,7 +5755,7 @@ class MusicPlayer(QMainWindow):
         controls.addStretch(1)
 
         right_tools = QWidget()
-        right_tools.setFixedWidth(320)
+        right_tools.setFixedWidth(360)
         right_row = QHBoxLayout(right_tools)
         right_row.setContentsMargins(0, 0, 0, 0)
         right_row.setSpacing(8)
@@ -5969,9 +5930,10 @@ class MusicPlayer(QMainWindow):
             QPushButton#transportButton:checked { color: #5CE092; background: #1B2E26; }
             QPushButton#transportButton::menu-indicator, QPushButton#themeButton::menu-indicator { image: none; width: 0; }
 
-            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 8px; padding: 2px; }
-            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #222A36; }
-            QPushButton#bottomFavorite:checked { background: #1A3025; }
+            QPushButton#bottomFavorite, QPushButton#bottomDislike { background: transparent; border: none; border-radius: 17px; padding: 0; }
+            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: rgba(255, 255, 255, 18); }
+            QPushButton#bottomFavorite:checked { background: transparent; }
+            QPushButton#bottomFavorite:checked:hover { background: rgba(29, 185, 84, 28); }
             QPushButton#bottomDislike:checked { background: #361F22; }
 
             QPushButton#playButton { background: #1DB954; color: #FFFFFF; border: none; border-radius: 25px; padding: 0; }
@@ -6174,8 +6136,9 @@ class MusicPlayer(QMainWindow):
 
             QPushButton#playButton, QPushButton#accentButton { background: #1DB954; color: #FFFFFF; }
             QPushButton#playButton:hover, QPushButton#accentButton:hover { background: #179443; }
-            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: #EBF0F6; }
-            QPushButton#bottomFavorite:checked { background: #E1F3E8; }
+            QPushButton#bottomFavorite:hover, QPushButton#bottomDislike:hover { background: rgba(20, 28, 38, 14); }
+            QPushButton#bottomFavorite:checked { background: transparent; }
+            QPushButton#bottomFavorite:checked:hover { background: rgba(29, 185, 84, 22); }
             QPushButton#bottomDislike:checked { background: #F7E6E6; }
 
             QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove,
