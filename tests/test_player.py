@@ -2882,6 +2882,171 @@ class PlayerChanges(unittest.TestCase):
             other.close()
 
 
+class StreamLoading(unittest.TestCase):
+    @staticmethod
+    def track(source='soundcloud', **extra):
+        return {'source': source, 'url': f'https://{source}.com/test/song', 'title': 'Test', **extra}
+
+    @staticmethod
+    def soundcloud_info(codecs=('aac', 'opus', 'mp3')):
+        mime_types = {'aac': 'audio/mp4; codecs="mp4a.40.2"',
+                      'opus': 'audio/ogg; codecs="opus"', 'mp3': 'audio/mpeg'}
+        return {
+            'id': 123, 'title': 'Test', 'duration': 180000,
+            'user': {'username': 'Artist'},
+            'artwork_url': 'https://i1.sndcdn.com/artwork-large.png',
+            'media': {'transcodings': [
+                {'url': f'https://api-v2.soundcloud.com/media/{protocol}_{codec}',
+                 'preset': codec + ('_160k' if codec == 'opus' else '_96k'),
+                 'format': {'protocol': protocol, 'mime_type': mime_types[codec]}}
+                for codec in codecs for protocol in ('progressive', 'hls')
+            ]},
+        }
+
+    def extract_soundcloud(self, options, info, calls):
+        with m.YoutubeDL(options) as downloader:
+            extractor = downloader.get_info_extractor('Soundcloud')
+            extractor._CLIENT_ID = 'test-client-id'
+            def stream_info(url, *_args, **_kwargs):
+                calls.append(url)
+                return {'url': 'https://cdn.example.invalid/' + url.rsplit('/', 1)[-1]}
+            with patch.object(extractor, '_call_api', side_effect=stream_info):
+                result = extractor._extract_info_dict(info)
+                result.update(extractor='soundcloud', extractor_key='Soundcloud')
+                return downloader.process_ie_result(result, download=False)
+
+    def test_fifty_soundcloud_results_need_no_individual_thumbnail_requests(self):
+        from yt_dlp.extractor.soundcloud import SoundcloudSearchIE
+        entries = [dict(self.soundcloud_info(), id=i, uri=f'https://api.soundcloud.com/tracks/{i}')
+                   for i in range(50)]
+        with m.YoutubeDL({'quiet': True, 'extract_flat': True}) as downloader:
+            # Compare upstream and the per-downloader adapter on identical data.
+            upstream = SoundcloudSearchIE(downloader)
+            adapted = downloader.get_info_extractor('SoundcloudSearch')
+            for extractor, expected_head_requests in ((upstream, 50), (adapted, 0)):
+                extractor._CLIENT_ID = 'test-client-id'
+                with patch.object(extractor, '_call_api', return_value={'collection': entries}) as api, \
+                     patch.object(extractor, '_request_webpage') as head:
+                    tracks = list(extractor._get_collection('search/tracks', 'test', limit=50))
+                self.assertEqual(len(tracks), 50)
+                api.assert_called_once()
+                self.assertEqual(head.call_count, expected_head_requests)
+                self.assertEqual(tracks[0]['title'], 'Test')
+                if extractor is adapted:
+                    self.assertEqual(tracks[0]['thumbnails'][0]['url'],
+                                     'https://i1.sndcdn.com/artwork-t500x500.jpg')
+
+    def test_thumbnail_adapter_preserves_avatar_and_nonstandard_urls(self):
+        with m.YoutubeDL({'quiet': True}) as downloader:
+            for key in ('Soundcloud', 'SoundcloudSet', 'SoundcloudUser', 'SoundcloudSearch'):
+                extractor = downloader.get_info_extractor(key)
+                with self.subTest(extractor=key), \
+                     patch.object(extractor, '_request_webpage', side_effect=AssertionError('thumbnail probe')):
+                    thumbs = extractor._extract_thumbnails({
+                        'user': {'avatar_url': '//i1.sndcdn.com/avatar-large.png?version=2'}})
+                    self.assertEqual(thumbs[0]['url'], 'https://i1.sndcdn.com/avatar-t500x500.jpg?version=2')
+                    self.assertEqual(extractor._extract_thumbnails({'artwork_url': 'https://example.invalid/cover.webp'}),
+                                     [{'url': 'https://example.invalid/cover.webp'}])
+                    self.assertEqual(extractor._extract_thumbnails({}), [])
+
+    def test_soundcloud_auto_resolves_two_transcodings_instead_of_six(self):
+        info, full_calls, fast_calls = self.soundcloud_info(), [], []
+        self.extract_soundcloud({'quiet': True}, info, full_calls)
+        worker = m.StreamWorker(self.track())
+        ready, failed = QSignalSpy(worker.stream_ready), QSignalSpy(worker.failed)
+        with patch.object(worker, '_extract', side_effect=lambda opts:
+                          self.extract_soundcloud(opts, info, fast_calls)):
+            worker.run()
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(failed), 0)
+        self.assertIn('aac', ready[0][0])
+        self.assertEqual(len(full_calls), 6)
+        self.assertEqual(len(fast_calls), 2)
+
+    def test_soundcloud_mp3_only_track_falls_back_and_still_plays(self):
+        info, calls = self.soundcloud_info(codecs=('mp3',)), []
+        worker = m.StreamWorker(self.track())
+        ready, failed = QSignalSpy(worker.stream_ready), QSignalSpy(worker.failed)
+        with patch.object(worker, '_extract', side_effect=lambda opts:
+                          self.extract_soundcloud(opts, info, calls)) as extract:
+            worker.run()
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(failed), 0)
+        self.assertIn('mp3', ready[0][0])
+        self.assertEqual(extract.call_count, 2)
+
+    def test_youtube_hls_only_track_uses_full_fallback(self):
+        worker = m.StreamWorker(self.track('youtube'))
+        ready = QSignalSpy(worker.stream_ready)
+        def extract_formats(options):
+            formats = [{'format_id': '18', 'url': 'https://example.invalid/video.mp4',
+                        'protocol': 'https', 'ext': 'mp4', 'vcodec': 'h264', 'acodec': 'aac'}]
+            if 'extractor_args' not in options:
+                formats.append({'format_id': 'audio', 'url': 'https://example.invalid/audio.m3u8',
+                                'protocol': 'm3u8_native', 'ext': 'm4a', 'vcodec': 'none', 'acodec': 'aac'})
+            with m.YoutubeDL(options) as downloader:
+                return downloader.process_ie_result({'id': 'test', 'title': 'Test', 'extractor': 'youtube',
+                                                     'formats': formats}, download=False)
+        with patch.object(worker, '_extract', side_effect=extract_formats) as extract:
+            worker.run()
+        self.assertEqual(len(ready), 1)
+        self.assertTrue(ready[0][0].endswith('audio.m3u8'))
+        self.assertEqual(extract.call_count, 2)
+        self.assertEqual(extract.call_args_list[0].args[0]['extractor_args']['youtube']['skip'], ['dash', 'hls'])
+        self.assertNotIn('extractor_args', extract.call_args_list[1].args[0])
+
+    def test_access_and_network_errors_do_not_trigger_format_fallback(self):
+        for message in ('HTTP Error 403: Forbidden', 'timed out', 'Video unavailable'):
+            worker = m.StreamWorker(self.track())
+            failed = QSignalSpy(worker.failed)
+            with self.subTest(error=message), \
+                 patch.object(worker, '_extract', side_effect=RuntimeError(message)) as extract:
+                worker.run()
+                extract.assert_called_once()
+                self.assertEqual(len(failed), 1)
+
+    def test_format_fallback_preserves_cookie_authentication(self):
+        with tempfile.NamedTemporaryFile(dir=state.name) as cookies:
+            worker = m.StreamWorker(self.track('youtube'), cookie_file=cookies.name)
+            ready = QSignalSpy(worker.stream_ready)
+            with patch.object(worker, '_extract', side_effect=[
+                    RuntimeError('Sign in to confirm your age'),
+                    RuntimeError('Requested format is not available'),
+                    {'url': 'https://example.invalid/audio.m3u8'}]) as extract:
+                worker.run()
+            self.assertEqual(len(ready), 1)
+            self.assertNotIn('cookiefile', extract.call_args_list[0].args[0])
+            for attempt in extract.call_args_list[1:]:
+                self.assertEqual(attempt.args[0]['cookiefile'], cookies.name)
+
+    def test_high_quality_compatibility_live_and_recovery_keep_all_formats(self):
+        for kwargs in ({'audio_quality': 'high'}, {'audio_quality': 'compatibility'},
+                       {'avoid_format_id': 'hls_aac_96k'}, {'track': self.track(is_live=True)}):
+            options = dict(kwargs)
+            worker = m.StreamWorker(options.pop('track', self.track()), **options)
+            with self.subTest(options=kwargs), \
+                 patch.object(worker, '_extract', return_value={'url': 'https://example.invalid/audio'}) as extract:
+                worker.run()
+                extract.assert_called_once()
+                self.assertNotIn('extractor_args', extract.call_args.args[0])
+
+    def test_cancelled_extraction_does_not_start_or_retry(self):
+        worker = m.StreamWorker(self.track())
+        worker.cancel()
+        with patch.object(worker, '_extract') as extract:
+            worker.run()
+            extract.assert_not_called()
+        worker = m.StreamWorker(self.track())
+        failed = QSignalSpy(worker.failed)
+        def cancel_during_request(_options):
+            worker.cancel()
+            raise RuntimeError('Requested format is not available')
+        with patch.object(worker, '_extract', side_effect=cancel_during_request) as extract:
+            worker.run()
+            extract.assert_called_once()
+        self.assertEqual(len(failed), 0)
+
+
 class NativeSupermix(unittest.TestCase):
     MIX_ID = 'RDTMAK5uy_personal_account_mix'
 

@@ -44,7 +44,35 @@ from PyQt6.QtWidgets import (
 def YoutubeDL(*args, **kwargs):
     """Load the extraction engine in its worker, without delaying the first window."""
     from yt_dlp import YoutubeDL as Downloader
-    return Downloader(*args, **kwargs)
+    from yt_dlp.extractor import soundcloud
+    downloader = Downloader(*args, **kwargs)
+    # Flat SoundCloud search still checks every original thumbnail with HEAD.
+    # Replace only this metadata step on this downloader's own extractors;
+    # yt-dlp continues to handle API access, authentication and pagination.
+    for extractor in vars(soundcloud).values():
+        if (isinstance(extractor, type) and issubclass(extractor, soundcloud.SoundcloudBaseIE)
+                and extractor is not soundcloud.SoundcloudBaseIE
+                and not extractor.__name__.endswith("BaseIE")):
+            adapted = type(extractor.__name__, (extractor,), {
+                "__module__": __name__, "_extract_thumbnails": soundcloud_artwork_metadata,
+            })
+            downloader.add_info_extractor(adapted(downloader))
+    return downloader
+
+
+def soundcloud_artwork_metadata(_extractor, info):
+    """Use a documented-size JPEG thumbnail without probing the original file."""
+    user = info.get("user") or {}
+    raw_url = info.get("artwork_url") or (user.get("avatar_url") if isinstance(user, dict) else "")
+    url = normalize_artwork_url(raw_url)
+    if not url:
+        return []
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower().endswith(".sndcdn.com"):
+        path, replaced = re.subn(r"-[0-9a-z]+\.(?:jpg|png)$", "-t500x500.jpg", parsed.path)
+        if replaced:
+            return [{"url": urlunsplit(parsed._replace(path=path)), "width": 500, "height": 500}]
+    return [{"url": url}]
 
 _SMOKE_DIRECTORY = None
 APP_VERSION = "0.1.9"
@@ -2445,7 +2473,45 @@ class StreamWorker(QThread):
         with YoutubeDL(options) as ydl:
             return ydl.extract_info(self.track["url"], download=False)
 
+    def _extract_playback(self, options):
+        """Resolve likely playback formats first; expand only if none are available."""
+        source = self.track.get("source")
+        extractor_args = None
+        if not self.avoid_format_id and not self.track.get("is_live"):
+            if source == "soundcloud" and self.audio_quality in ("auto", "economy"):
+                # Each SoundCloud transcoding costs a separate API request. AAC
+                # works in Qt with both progressive and HLS delivery. Keep all
+                # encodings for high quality, compatibility and stream recovery.
+                extractor_args = {"soundcloud": {"formats": ["http_aac", "hls_aac"]}}
+            elif source == "youtube":
+                # These are current yt-dlp extractor arguments. The old
+                # youtube_include_*_manifest options no longer skip manifests.
+                extractor_args = {"youtube": {"skip": ["dash", "hls"]}}
+        if extractor_args is None:
+            return self._extract(options)
+        fast_options = {**options, "extractor_args": extractor_args}
+        if source == "youtube":
+            # A muxed video must not hide an audio-only HLS fallback: downloading
+            # its video would cost more bandwidth than the original audio path.
+            fast_options["format"] = options["format"].removesuffix("/best")
+        try:
+            return self._extract(fast_options)
+        except Exception as error:
+            message = str(error).casefold()
+            missing_formats = any(marker in message for marker in (
+                "requested format is not available", "no video formats found",
+                "no audio formats found", "no suitable formats",
+            ))
+            # A timeout, access error or cancellation must not cause a second
+            # round of identical network requests. HLS-only YouTube tracks and
+            # older SoundCloud tracks still get the full extractor fallback.
+            if self._cancel_requested or not missing_formats:
+                raise
+            return self._extract(options)
+
     def run(self):
+        if self._cancel_requested:
+            return
         started = time.perf_counter()
         # ВАЖНО: сначала извлекаем публичный трек БЕЗ cookies. Иначе любая
         # неверная настройка Firefox/Chrome ломает даже обычные публичные миксы.
@@ -2486,13 +2552,11 @@ class StreamWorker(QThread):
             "extractor_retries": 1,
             "cachedir": None,
             "ignoreconfig": True,
-            "youtube_include_dash_manifest": False,
-            "youtube_include_hls_manifest": False,
             "no_color": True,
         }
         try:
             try:
-                info = self._extract(options)
+                info = self._extract_playback(options)
                 if self._cancel_requested:
                     return
             except Exception as public_error:
@@ -2510,7 +2574,7 @@ class StreamWorker(QThread):
                 retry_options = dict(options)
                 retry_options.update(auth_options)
                 try:
-                    info = self._extract(retry_options)
+                    info = self._extract_playback(retry_options)
                     if self._cancel_requested:
                         return
                 except Exception as auth_error:
