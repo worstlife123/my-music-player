@@ -47,7 +47,7 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 
 
 APP_USER_MODEL_ID = "AuroraLocal.MusicPlayer"
@@ -2857,7 +2857,9 @@ class AnimatedNavButton(QPushButton):
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#1DB954"))
-            painter.drawRoundedRect(rect.left() + 1, rect.top() + 11, 3.5, max(12, rect.height() - 22), 1.75, 1.75)
+            indicator = QRectF(rect.left() + 1, rect.top() + 11,
+                               3.5, max(12, rect.height() - 22))
+            painter.drawRoundedRect(indicator, 1.75, 1.75)
         painter.setPen(self._text_color)
         icon_rect = QRectF(rect.center().x() - 18 if self._collapsed else rect.left() + 11,
                            rect.center().y() - 18, 36, 36)
@@ -12070,6 +12072,12 @@ def run_smoke_test():
         window = MusicPlayer(settings=QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat))
         for player in window.players:
             player.setAudioOutput(None)
+        # Paint the main window before hiding it: mini-only startup misses
+        # failures in sidebar/card paintEvent handlers in the frozen build.
+        window.show()
+        app.processEvents()
+        if window.grab().isNull():
+            raise RuntimeError("Не удалось отрисовать главное окно")
         window.show_mini_player()
         path = root / "sample.wav"
         with wave.open(str(path), "wb") as sound:

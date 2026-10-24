@@ -338,10 +338,14 @@ class PlayerChanges(unittest.TestCase):
         for theme in ('dark', 'light'):
             self.w.theme = theme
             self.w.apply_styles()
-            app.processEvents()
-            pixmap = self.w.grab()
-            self.assertFalse(pixmap.isNull())
-            self.assertTrue(pixmap.save(str(self.test_path / (theme + '.png'))))
+            for source in ('youtube', 'soundcloud', 'likes'):
+                with self.subTest(theme=theme, source=source):
+                    self.w.set_source(source)
+                    wait_for(lambda: self.w.page_animation is None)
+                    app.processEvents()
+                    pixmap = self.w.grab()
+                    self.assertFalse(pixmap.isNull())
+                    self.assertTrue(pixmap.save(str(self.test_path / (theme + '-' + source + '.png'))))
 
     @staticmethod
     def youtube_track(video_id):
