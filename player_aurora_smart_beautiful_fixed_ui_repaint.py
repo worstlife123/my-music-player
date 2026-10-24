@@ -2825,7 +2825,7 @@ def make_service_artwork(source, pixel_size=80):
     gradient.setColorAt(0, QColor(start))
     gradient.setColorAt(1, QColor(end))
     clip = QPainterPath()
-    clip.addRoundedRect(QRectF(1, 1, 78, 78), 22, 22)
+    clip.addRoundedRect(QRectF(1, 1, 78, 78), 18, 18)
     painter.save()
     painter.setClipPath(clip)
     painter.setPen(Qt.PenStyle.NoPen)
@@ -2852,32 +2852,47 @@ def make_service_artwork(source, pixel_size=80):
 
 
 class AnimatedNavButton(QPushButton):
-    """Кнопка боковой навигации с собственной отрисовкой и плавным цветом текста."""
-    def __init__(self, icon_text, title, parent=None):
+    """Элемент источника/раздела внутри «Моей медиатеки» в стиле Spotify."""
+    def __init__(self, icon_text, title, parent=None, subtitle=""):
         super().__init__(parent)
         self.setObjectName("navButton")
         self.setCheckable(True)
-        self.setMinimumHeight(60)
+        self.setFixedHeight(50)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._nav_icon = icon_text
         self._nav_title = title
         source = "youtube" if "youtube" in title.casefold() else "soundcloud" if "soundcloud" in title.casefold() else "likes"
-        self._service_artwork = make_service_artwork(source)
+        default_subtitles = {
+            "youtube": "Каталог • Рекомендации",
+            "soundcloud": "Поток • Треки и волны",
+            "likes": "Плейлист • Любимая музыка",
+        }
+        self._nav_subtitle = str(subtitle or default_subtitles.get(source, ""))
+        self._service_artwork = make_service_artwork(source, 76)
         self._collapsed = False
         self._theme = "dark"
-        self._base_color = QColor("#B3B3B3")
+        self._base_color = QColor("#F4F7FB")
         self._hover_color = QColor("#FFFFFF")
-        self._active_color = QColor("#1DB954")
+        self._active_color = QColor("#1ED760")
         self._text_color = QColor(self._base_color)
         self._color_animation = QVariantAnimation(self)
         self._color_animation.setDuration(180)
         self._color_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._color_animation.valueChanged.connect(self._set_animated_color)
         self.toggled.connect(self._checked_changed)
-        self.setAccessibleName(title)
-        self.setToolTip(title)
+        self.setAccessibleName(f"{self._nav_title}: {self._nav_subtitle}" if self._nav_subtitle else self._nav_title)
+        self.setToolTip(f"{self._nav_title}\n{self._nav_subtitle}" if self._nav_subtitle else self._nav_title)
         self.setStyleSheet("QPushButton#navButton { border: none; padding: 0; background: transparent; }")
+
+    def set_subtitle(self, subtitle):
+        subtitle = str(subtitle or "")
+        if self._nav_subtitle != subtitle:
+            self._nav_subtitle = subtitle
+            self.setAccessibleName(f"{self._nav_title}: {self._nav_subtitle}" if self._nav_subtitle else self._nav_title)
+            self.setToolTip(f"{self._nav_title}\n{self._nav_subtitle}" if self._nav_subtitle else self._nav_title)
+            self.update()
 
     def set_collapsed(self, collapsed):
         self._collapsed = bool(collapsed)
@@ -2887,13 +2902,13 @@ class AnimatedNavButton(QPushButton):
     def set_theme(self, theme):
         self._theme = "light" if theme == "light" else "dark"
         if self._theme == "light":
-            self._base_color = QColor("#546275")
+            self._base_color = QColor("#141C26")
             self._hover_color = QColor("#141C26")
             self._active_color = QColor("#167A40")
         else:
-            self._base_color = QColor("#A2AEBF")
+            self._base_color = QColor("#F4F7FB")
             self._hover_color = QColor("#FFFFFF")
-            self._active_color = QColor("#5CE092")
+            self._active_color = QColor("#1ED760")
         self._animate_color(self._active_color if self.isChecked() else
                             (self._hover_color if self.underMouse() else self._base_color))
         self.update()
@@ -2923,35 +2938,52 @@ class AnimatedNavButton(QPushButton):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         if self.isChecked() or self.underMouse() or self.isDown():
             if self._theme == "light":
                 background = QColor("#E2F3E8" if self.isChecked() else ("#DCE5EE" if self.isDown() else "#EDF2F7"))
-                border = QColor("#B7DEC5" if self.isChecked() else "#D7E0EA")
+                border = QColor("#A9DBC0" if self.isChecked() else "#D7E0EA")
             else:
-                background = QColor("#182C24" if self.isChecked() else ("#252E3B" if self.isDown() else "#19202A"))
-                border = QColor("#2D5742" if self.isChecked() else "#283241")
-            painter.setPen(QPen(border, 1))
+                background = QColor("#162920" if self.isChecked() else ("#222B37" if self.isDown() else "#1A212C"))
+                border = QColor("#29543D" if self.isChecked() else "#26303F")
+            painter.setPen(QPen(border, 1.0))
             painter.setBrush(background)
-            painter.drawRoundedRect(rect, 11, 11)
+            painter.drawRoundedRect(rect, 9.0, 9.0)
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#1DB954"))
-            indicator = QRectF(rect.left() + 1, rect.top() + 11,
-                               3.5, max(12, rect.height() - 22))
-            painter.drawRoundedRect(indicator, 1.75, 1.75)
-        painter.setPen(self._text_color)
-        icon_rect = QRectF(rect.center().x() - 18 if self._collapsed else rect.left() + 11,
-                           rect.center().y() - 18, 36, 36)
-        painter.drawPixmap(icon_rect, self._service_artwork, QRectF(0, 0, 80, 80))
+            indicator = QRectF(rect.left() + 1.0, rect.top() + 10.0,
+                               3.0, max(12.0, rect.height() - 20.0))
+            painter.drawRoundedRect(indicator, 1.5, 1.5)
+        icon_rect = QRectF(rect.center().x() - 19.0 if self._collapsed else 6.0,
+                           6.0, 38.0, 38.0)
+        painter.drawPixmap(icon_rect, self._service_artwork, QRectF(0, 0, 76, 76))
         if not self._collapsed:
-            text_rect = QRect(rect.left() + 58, rect.top(), max(0, rect.width() - 65), rect.height())
-            nav_font = QFont(self.font())
-            nav_font.setPixelSize(13)
-            nav_font.setWeight(QFont.Weight.Bold if self.isChecked() else QFont.Weight.Medium)
-            painter.setFont(nav_font)
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._nav_title)
+            text_left = 51
+            text_w = max(20, int(self.width() - text_left - 8))
+            title_font = QFont(self.font())
+            title_font.setPixelSize(12)
+            title_font.setWeight(QFont.Weight.Bold if self.isChecked() else QFont.Weight.DemiBold)
+            painter.setFont(title_font)
+            painter.setPen(self._text_color)
+            title_rect = QRect(text_left, 7, text_w, 18)
+            painter.drawText(
+                title_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                QFontMetrics(title_font).elidedText(self._nav_title, Qt.TextElideMode.ElideRight, text_w),
+            )
+            sub_font = QFont(self.font())
+            sub_font.setPixelSize(11)
+            sub_font.setWeight(QFont.Weight.Medium)
+            painter.setFont(sub_font)
+            painter.setPen(QColor("#5C697C" if self._theme == "light" else "#8F9BAE"))
+            sub_rect = QRect(text_left, 25, text_w, 17)
+            painter.drawText(
+                sub_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                QFontMetrics(sub_font).elidedText(self._nav_subtitle, Qt.TextElideMode.ElideRight, text_w),
+            )
         painter.end()
 
 
@@ -5251,26 +5283,9 @@ class MusicPlayer(QMainWindow):
         side_layout.setContentsMargins(12, 16, 12, 14)
         side_layout.setSpacing(6)
 
-        self.nav_buttons = []
-        self.nav_data = [
-            ("▶", "YouTube Music", "youtube"),
-            ("☁", "SoundCloud", "soundcloud"),
-            ("♥", "Лайки", "likes"),
-        ]
-        for icon, title, _ in self.nav_data:
-            btn = AnimatedNavButton(icon, title, self.sidebar)
-            side_layout.addWidget(btn)
-            self.nav_buttons.append(btn)
-
-        self.sidebar_top_divider = QFrame(self.sidebar)
-        self.sidebar_top_divider.setObjectName("sidebarDivider")
-        self.sidebar_top_divider.setFixedHeight(1)
-        side_layout.addSpacing(2)
-        side_layout.addWidget(self.sidebar_top_divider)
-
         lib_header = QWidget(self.sidebar)
         lib_header_layout = QHBoxLayout(lib_header)
-        lib_header_layout.setContentsMargins(4, 4, 2, 2)
+        lib_header_layout.setContentsMargins(4, 0, 2, 2)
         lib_header_layout.setSpacing(6)
         self.sidebar_library_title = QLabel("МОЯ МЕДИАТЕКА", lib_header)
         self.sidebar_library_title.setObjectName("sidebarSectionTitle")
@@ -5297,6 +5312,18 @@ class MusicPlayer(QMainWindow):
         self.sidebar_library_layout.setSpacing(4)
         self.sidebar_library_scroll.setWidget(self.sidebar_library_widget)
         side_layout.addWidget(self.sidebar_library_scroll, 1)
+
+        self.nav_buttons = []
+        self.nav_data = [
+            ("▶", "YouTube Music", "youtube"),
+            ("☁", "SoundCloud", "soundcloud"),
+            ("♥", "Лайки", "likes"),
+        ]
+        for icon, title, _ in self.nav_data:
+            btn = AnimatedNavButton(icon, title, self.sidebar_library_widget)
+            self.sidebar_library_layout.addWidget(btn)
+            self.nav_buttons.append(btn)
+
         self.sidebar_library_items = []
         self._sidebar_library_signature = None
 
@@ -6254,7 +6281,7 @@ class MusicPlayer(QMainWindow):
             QScrollArea#sidebarLibraryScroll,
             QScrollArea#sidebarLibraryScroll QWidget#qt_scrollarea_viewport,
             QWidget#sidebarLibraryWidget { background: transparent; border: none; }
-            QLabel#sidebarMediaCover { background: #1E2530; border-radius: 8px; }
+            QLabel#sidebarMediaCover { background: transparent; border: none; }
             QFrame#searchBox { background: #1B212B; border: 1px solid #2A3342; border-radius: 24px; }
             QFrame#searchBox[focused="true"] { border-color: #1DB954; background: #202834; }
             QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus {
@@ -6392,7 +6419,7 @@ class MusicPlayer(QMainWindow):
             QLabel#sidebarSectionTitle { color: #647285; }
             QPushButton#sidebarAddButton { color: #546275; }
             QPushButton#sidebarAddButton:hover { background: #EBF0F6; color: #141C26; }
-            QLabel#sidebarMediaCover { background: #E9EEF4; border-radius: 8px; }
+            QLabel#sidebarMediaCover { background: transparent; border: none; }
             QFrame#searchBox { background: #F2F5F9; border-color: #D6DFE9; }
             QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #21834C; }
             QLineEdit#catalogSearch, QLineEdit#catalogSearch:hover, QLineEdit#catalogSearch:focus { color: #162230; }
@@ -8234,7 +8261,7 @@ class MusicPlayer(QMainWindow):
         self.refresh_sidebar_library()
 
     def refresh_sidebar_library(self):
-        """Заполняет блок «Моя медиатека» в левой панели обложками плейлистов и недавних треков."""
+        """Заполняет блок «Моя медиатека» в левой панели сервисами, миксами и плейлистами без лишних треков."""
         if not hasattr(self, "sidebar_library_layout") or getattr(self, "_force_exit", False):
             return
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
@@ -8243,56 +8270,35 @@ class MusicPlayer(QMainWindow):
         active_likes = sc_likes if source == "soundcloud" else yt_likes
         likes_count = len(active_likes)
         likes_subtitle = f"Плейлист • {likes_count} треков" if likes_count else "Плейлист • Любимая музыка"
-        likes_thumb = next((str(t.get("thumbnail") or "") for t in active_likes if t.get("thumbnail")), "")
-
-        media_tracks = []
-        seen_keys = set()
-        for candidate in list(self.recent_tracks) + list(active_likes) + list(yt_likes) + list(sc_likes):
-            if not isinstance(candidate, dict) or not candidate.get("url") or self.is_disliked(candidate):
-                continue
-            key = self.favorite_key(candidate)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            media_tracks.append(candidate)
-            if len(media_tracks) >= 6:
-                break
+        if len(getattr(self, "nav_buttons", [])) >= 3 and hasattr(self.nav_buttons[2], "set_subtitle"):
+            self.nav_buttons[2].set_subtitle(likes_subtitle)
 
         custom_entries = tuple(
             (str(p.get("title") or ""), str(p.get("url") or ""), str(p.get("source") or "youtube"))
-            for p in getattr(self, "custom_playlists", [])[:3]
+            for p in getattr(self, "custom_playlists", [])
             if isinstance(p, dict) and p.get("url")
-        )
-        track_signature = tuple(
-            (self.favorite_key(t), str(t.get("title") or ""), str(t.get("artist") or ""), str(t.get("thumbnail") or ""))
-            for t in media_tracks
         )
         signature = (
             source,
             likes_subtitle,
-            likes_thumb,
             str(getattr(self, "supermix_cover_url", "") or ""),
             custom_entries,
-            track_signature,
         )
         if signature == getattr(self, "_sidebar_library_signature", None):
             self._sync_sidebar_playing_state()
             return
         self._sidebar_library_signature = signature
 
-        while self.sidebar_library_layout.count():
-            child = self.sidebar_library_layout.takeAt(0)
-            widget = child.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
+        for item in getattr(self, "sidebar_library_items", []):
+            self.sidebar_library_layout.removeWidget(item)
+            item.hide()
+            item.deleteLater()
         self.sidebar_library_items = []
 
-        likes_item = SidebarMediaItem("Любимые треки", likes_subtitle, "likes", self.sidebar_library_widget)
-        likes_item.track_key = "__likes__"
-        likes_item.clicked.connect(lambda checked=False, src=source: self.open_likes_library(src))
-        self.sidebar_library_layout.addWidget(likes_item)
-        self.sidebar_library_items.append(likes_item)
+        for idx in range(self.sidebar_library_layout.count() - 1, -1, -1):
+            layout_item = self.sidebar_library_layout.itemAt(idx)
+            if layout_item is not None and layout_item.widget() is None:
+                self.sidebar_library_layout.takeAt(idx)
 
         supermix_item = SidebarMediaItem("Супермикс", "Микс • YouTube Music", "supermix", self.sidebar_library_widget)
         supermix_item.track_key = "__supermix__"
@@ -8315,35 +8321,16 @@ class MusicPlayer(QMainWindow):
             self.sidebar_library_layout.addWidget(pl_item)
             self.sidebar_library_items.append(pl_item)
 
-        for track in media_tracks:
-            title = str(track.get("title") or "Без названия")
-            artist = str(track.get("artist_display") or track.get("artist") or "Трек")
-            item = SidebarMediaItem(title, artist, track.get("source", "youtube"), self.sidebar_library_widget)
-            item.track_key = self.favorite_key(track)
-            item.clicked.connect(lambda checked=False, t=dict(track): self.add_to_queue(t, True))
-            thumb = str(track.get("thumbnail") or "")
-            if thumb:
-                self.request_image(thumb, item.cover_label)
-            else:
-                self.set_pixmap_safe(item.cover_label, self.fallback_cover)
-            self.sidebar_library_layout.addWidget(item)
-            self.sidebar_library_items.append(item)
-
         self.sidebar_library_layout.addStretch(1)
         self._sync_sidebar_playing_state()
 
     def _sync_sidebar_playing_state(self):
-        current = getattr(self, "current_track", None)
-        current_key = self.favorite_key(current) if isinstance(current, dict) and current.get("url") else ""
         supermix_active = bool(getattr(self, "supermix_session", None) is not None and getattr(self, "queue_mode", "") == "supermix")
-        likes_active = bool(getattr(self, "queue_mode", "") in ("youtube_likes", "soundcloud_likes"))
         for item in getattr(self, "sidebar_library_items", []):
             if item.track_key == "__supermix__":
                 item.set_playing(supermix_active)
-            elif item.track_key == "__likes__":
-                item.set_playing(likes_active)
             else:
-                item.set_playing(bool(current_key and item.track_key == current_key))
+                item.set_playing(False)
 
     def rebuild_start_cards(self):
         """Карточки коллекции и настоящая история прослушиваний выбранного сервиса."""
