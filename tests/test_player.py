@@ -88,6 +88,126 @@ class PlayerChanges(unittest.TestCase):
         self.w.play_track(track, -1)
         wait_for(lambda: self.w.requested_track is None and self.w.current_track is not None and self.w.current_track['url'] == track['url'])
 
+    def test_large_cover_preserves_playback_and_returns_to_likes(self):
+        w = self.w
+        track = self.local_track('large-cover')
+        track['thumbnail'] = 'https://example.invalid/wide-cover.png'
+        cover = m.QPixmap(640, 320)
+        cover.fill(m.QColor('#345678'))
+        w.pixmap_cache[track['thumbnail']] = cover
+        w.set_source('likes')
+        self.start(track)
+        player = w.player
+        self.assertTrue(w.bottom_cover.isEnabled())
+        QTest.mouseClick(w.bottom_cover, m.Qt.MouseButton.LeftButton)
+        wait_for(lambda: w.page_animation is None)
+        self.assertIs(w.view_stack.currentWidget(), w.cover_page)
+        self.assertEqual(w.expanded_cover._source.cacheKey(), cover.cacheKey())
+        image = w.expanded_cover.pixmap()
+        self.assertAlmostEqual(image.width() / image.height(), 2, places=1)
+        self.assertEqual(w.expanded_title.text(), track['title'])
+        self.assertIs(w.player, player)
+        self.assertEqual(player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+        w.cover_back_button.click()
+        self.assertIs(w.view_stack.currentWidget(), w.likes_page)
+        self.assertIsNone(w.expanded_cover._source)
+        self.assertTrue(w.expanded_cover.pixmap().isNull())
+        QTest.mouseClick(w.bottom_cover, m.Qt.MouseButton.LeftButton)
+        w.escape_shortcut()
+        self.assertIs(w.view_stack.currentWidget(), w.likes_page)
+        self.assertIs(w.player, player)
+        self.assertEqual(len(w.players), 2)
+
+    def test_large_cover_rejects_late_images_after_track_change_and_close(self):
+        w = self.w
+        old_url = 'https://example.invalid/old-large.png'
+        new_url = 'https://example.invalid/new-large.png'
+        w.current_track = dict(self.youtube_track('old-cover'), thumbnail=old_url)
+        data = self.encoded_image(128, 128, 'red', 'PNG')
+        class Reply:
+            def readAll(self): return data
+            def deleteLater(self): pass
+        with patch.object(w, 'pump_images'):
+            w.update_bottom_track_actions()
+            w.toggle_cover_view()
+            w.current_track = dict(self.youtube_track('new-cover'), thumbnail=new_url, title='Next cover')
+            w.update_bottom_track_actions()
+            expected = w.expanded_cover.pixmap().cacheKey()
+            w.image_finished(old_url, Reply())
+            self.assertEqual(w.expanded_cover.property('requested_image'), new_url)
+            self.assertEqual(w.expanded_cover.pixmap().cacheKey(), expected)
+            self.assertEqual(w.expanded_title.text(), 'Next cover')
+            w.close_cover_view()
+            w.image_finished(new_url, Reply())
+            self.assertIsNone(w.expanded_cover._source)
+            self.assertTrue(w.expanded_cover.pixmap().isNull())
+            w.toggle_cover_view()
+            self.assertEqual(w.expanded_cover._source.toImage().pixelColor(0, 0), m.QColor('red'))
+
+    def test_bottom_and_large_artist_links_use_full_track_metadata_without_stopping(self):
+        w = self.w
+        for method in ('prepare_next_track', 'ensure_following_track_prepared'):
+            fixture = patch.object(w, method)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        self.start(self.local_track('artist-links'))
+        player = w.player
+        youtube = dict(self.youtube_track('artist-link'), artist='First artist, Guest',
+                       artist_metadata=['First artist', 'Guest'], profile_artist_name='Canonical artist')
+        soundcloud = {'source': 'soundcloud', 'url': 'https://soundcloud.com/test/song',
+                      'title': 'Song', 'artist': 'SC Artist', 'artist_url': 'https://soundcloud.com/sc-artist'}
+        with patch.object(w, 'start_search') as search:
+            for track, name, profile in ((youtube, 'Canonical artist', ''),
+                                         (soundcloud, 'SC Artist', soundcloud['artist_url'])):
+                w.current_track = track
+                w.update_bottom_track_actions()
+                if track is youtube:
+                    w.bottom_artist.click()
+                else:
+                    w.toggle_cover_view()
+                    w.expanded_artist.click()
+                w.search_debounce_timer.stop()
+                self.assertEqual(w.artist_profile_query, name)
+                self.assertTrue(w.artist_profile_open)
+                self.assertEqual(w._pending_direct_url, profile)
+                self.assertEqual(w.current_source, track['source'])
+                self.assertIs(w.view_stack.currentWidget(), w.browse_page)
+                self.assertIs(w.player, player)
+                self.assertEqual(player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+            self.assertEqual(search.call_count, 2)
+
+    def test_heart_sits_next_to_play_and_keeps_favorite_behavior(self):
+        w = self.w
+        track = self.local_track('central-heart')
+        self.start(track)
+        for width in (1000, 1380):
+            w.resize(width, 850)
+            app.processEvents()
+            play_center = w.play_button.mapTo(w.player_bar, w.play_button.rect().center()).x()
+            heart_left = w.bottom_favorite_button.mapTo(w.player_bar, m.QPoint(0, 0)).x()
+            self.assertLessEqual(abs(play_center - w.player_bar.rect().center().x()), 4)
+            self.assertGreater(heart_left, play_center)
+            self.assertLess(heart_left - play_center, 40)
+        w.bottom_favorite_button.click()
+        self.assertIn(w.favorite_key(track), w.favorites)
+        self.assertTrue(w.bottom_favorite_button.isChecked())
+        self.assertEqual(w.player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+
+    def test_empty_cover_and_unknown_artist_are_not_interactive(self):
+        w = self.w
+        w.update_bottom_track_actions()
+        self.assertFalse(w.bottom_cover.isEnabled())
+        w.toggle_cover_view()
+        self.assertIsNot(w.view_stack.currentWidget(), w.cover_page)
+        for source in ('youtube', 'soundcloud', 'local'):
+            w.current_track = {'source': source, 'url': 'example', 'artist': 'Unknown artist'}
+            w.update_bottom_track_actions()
+            self.assertFalse(w.bottom_artist.isEnabled())
+            self.assertFalse(w.expanded_artist.isEnabled())
+            with patch.object(w, 'search_artist_name') as search:
+                w.open_current_artist()
+                search.assert_not_called()
+
     def test_empty_play_shows_inline_guidance_without_a_modal(self):
         w = self.w
         with patch.object(m.QMessageBox, 'information') as dialog:

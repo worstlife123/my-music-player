@@ -47,7 +47,7 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 
 
 APP_USER_MODEL_ID = "AuroraLocal.MusicPlayer"
@@ -2566,6 +2566,47 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class ExpandedArtwork(QLabel):
+    """Keep one full-size cover; resize it only when the view or source changes."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._source = None
+        self._scale_key = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(120, 120)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+    def set_artwork(self, pixmap):
+        self._source = pixmap
+        self._scale_key = None
+        self._render_cover()
+
+    def clear_artwork(self):
+        self._source = None
+        self._scale_key = None
+        self.clear()
+        self.setProperty("requested_image", "")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_cover()
+
+    def _render_cover(self):
+        if self._source is None or self._source.isNull():
+            return
+        side = max(1, min(self.width(), self.height(), 560))
+        dpr = min(2.0, self.devicePixelRatioF())
+        key = (self._source.cacheKey(), side, dpr)
+        if key == self._scale_key:
+            return
+        self._scale_key = key
+        pixels = max(1, round(side * dpr))
+        scaled = self._source.scaled(pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        self.setPixmap(scaled)
+
+
 def read_wallpaper_image(path):
     """Decode one local frame and keep a bounded image, including EXIF rotation."""
     if not path:
@@ -4396,7 +4437,9 @@ class MusicPlayer(QMainWindow):
                 self.toggle_favorite(track)
 
     def escape_shortcut(self):
-        if self.queue_open:
+        if self.view_stack.currentWidget() is self.cover_page:
+            self.close_cover_view()
+        elif self.queue_open:
             self.toggle_queue()
         elif self.radio_dialog is not None and self.radio_dialog.isVisible():
             dialog = self.radio_dialog
@@ -4422,6 +4465,8 @@ class MusicPlayer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "cover_page") and not self._force_exit:
+            QTimer.singleShot(0, self.refresh_current_track_views)
         toast = getattr(self, "toast", None)
         if toast is not None and toast.isVisible():
             toast.move(max(0, self.width() - toast.width() - 20),
@@ -5306,6 +5351,7 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.addTab(self.likes_list, "Мои лайки · 0")
         likes.addWidget(self.likes_tabs, 1)
         self.view_stack.addWidget(self.likes_page)
+        self.create_cover_page()
         return panel
 
     def create_queue(self):
@@ -5348,6 +5394,107 @@ class MusicPlayer(QMainWindow):
         self.queue_list.setToolTip("Правый клик по треку — изменить порядок, удалить или скачать")
         return self.queue_panel
 
+    def create_cover_page(self):
+        self.cover_page = PlayerBar()
+        self.cover_page.setObjectName("coverPage")
+        layout = QVBoxLayout(self.cover_page)
+        layout.setContentsMargins(20, 12, 20, 20)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        self.cover_back_button = QPushButton("‹", self.cover_page)
+        self.cover_back_button.setObjectName("backButton")
+        self.cover_back_button.setFixedSize(38, 36)
+        self.cover_back_button.setToolTip("Вернуться к списку треков")
+        self.cover_back_button.setAccessibleName("Закрыть крупную обложку")
+        self.cover_back_button.clicked.connect(self.close_cover_view)
+        header.addWidget(self.cover_back_button)
+        header.addStretch(1)
+        layout.addLayout(header)
+        self.expanded_cover = ExpandedArtwork(self.cover_page)
+        self.expanded_cover.setObjectName("expandedCover")
+        layout.addWidget(self.expanded_cover, 1)
+        self.expanded_title = QLabel("", self.cover_page)
+        self.expanded_title.setObjectName("expandedTitle")
+        self.expanded_title.setTextFormat(Qt.TextFormat.PlainText)
+        self.expanded_title.setWordWrap(True)
+        self.expanded_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.expanded_title.setMaximumHeight(76)
+        layout.addWidget(self.expanded_title)
+        self.expanded_artist = QPushButton("", self.cover_page)
+        self.expanded_artist.setObjectName("expandedArtist")
+        self.expanded_artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.expanded_artist.setFlat(True)
+        self.expanded_artist.clicked.connect(self.open_current_artist)
+        layout.addWidget(self.expanded_artist)
+        self._cover_return_page = None
+        self.view_stack.addWidget(self.cover_page)
+
+    @staticmethod
+    def artist_card_name(track):
+        if not isinstance(track, dict) or track.get("source") not in ("youtube", "soundcloud"):
+            return ""
+        if track.get("source") == "youtube":
+            credits = track.get("artist_metadata") or []
+            if isinstance(credits, str):
+                credits = [credits]
+            name = track.get("profile_artist_name") or (credits[0] if credits else track.get("artist"))
+        else:
+            name = track.get("artist")
+        name = str(name or "").strip()
+        return "" if name.casefold() in ("исполнитель неизвестен", "unknown artist") else name
+
+    def refresh_current_track_views(self):
+        if self._force_exit or not hasattr(self, "expanded_artist"):
+            return
+        track = self.current_track or {}
+        available = bool(track.get("url"))
+        name = self.artist_card_name(track)
+        display = str(track.get("artist_display") or track.get("artist") or name or "")
+        self.bottom_cover.setEnabled(available)
+        self.bottom_cover.setCursor(Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor)
+        for button in (self.bottom_artist, self.expanded_artist):
+            button.setEnabled(bool(name))
+            button.setCursor(Qt.CursorShape.PointingHandCursor if name else Qt.CursorShape.ArrowCursor)
+            button.setText(button.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, max(40, button.width() - 8)))
+            button.setToolTip(f"Открыть исполнителя: {name}" if name else display)
+            button.setAccessibleName(f"Открыть исполнителя: {name}" if name else display)
+        if self.view_stack.currentWidget() is self.cover_page:
+            if not available:
+                self.close_cover_view()
+                return
+            self.expanded_title.setText(str(track.get("title") or "Без названия"))
+            self.expanded_title.setToolTip(self.expanded_title.text())
+            url = normalize_artwork_url(track.get("thumbnail", ""))
+            if self.expanded_cover.property("requested_image") != url:
+                self.request_image(url, self.expanded_cover)
+
+    def toggle_cover_view(self):
+        if self.view_stack.currentWidget() is self.cover_page:
+            self.close_cover_view()
+            return
+        if not self.current_track or not self.current_track.get("url"):
+            return
+        self._cover_return_page = self.view_stack.currentWidget()
+        # No extra window or media player; browsing state and playback stay live.
+        self.fade_to_page(self.cover_page)
+        self.refresh_current_track_views()
+
+    def close_cover_view(self):
+        if self.view_stack.currentWidget() is self.cover_page:
+            page = self._cover_return_page
+            if page not in (self.browse_page, self.likes_page):
+                page = self.last_library_page
+            self.fade_to_page(page)
+
+    def open_current_artist(self):
+        track = self.current_track
+        if not self.artist_card_name(track):
+            return
+        self.search_artist_name(dict(track), track.get("source"))
+        self.last_library_page = self.browse_page
+        if self.view_stack.currentWidget() is not self.browse_page:
+            self.fade_to_page(self.browse_page)
+
     def create_bottom_bar(self):
         """Нижняя панель с единственной обложкой текущего трека."""
         bar = PlayerBar()
@@ -5366,7 +5513,11 @@ class MusicPlayer(QMainWindow):
         info = QHBoxLayout(track_info)
         info.setContentsMargins(0, 0, 0, 0)
         info.setSpacing(10)
-        self.bottom_cover = QLabel()
+        self.bottom_cover = ClickableLabel()
+        self.bottom_cover.setEnabled(False)
+        self.bottom_cover.setToolTip("Открыть крупную обложку")
+        self.bottom_cover.setAccessibleName("Открыть крупную обложку текущего трека")
+        self.bottom_cover.clicked.connect(self.toggle_cover_view)
         self.bottom_cover.setObjectName("bottomCover")
         self.bottom_cover.setFixedSize(56, 56)
         cover_shadow = QGraphicsDropShadowEffect(self.bottom_cover)
@@ -5380,8 +5531,11 @@ class MusicPlayer(QMainWindow):
         self.bottom_title = MarqueeLabel("Ничего не играет")
         self.bottom_title.setObjectName("bottomTitle")
         self.bottom_title.setToolTip("Текущий трек")
-        self.bottom_artist = QLabel("")
-        self.bottom_artist.setObjectName("bottomArtist")
+        self.bottom_artist = QPushButton("", track_info)
+        self.bottom_artist.setObjectName("bottomArtistLink")
+        self.bottom_artist.setFlat(True)
+        self.bottom_artist.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.bottom_artist.clicked.connect(self.open_current_artist)
         labels.addWidget(self.bottom_title)
         labels.addWidget(self.bottom_artist)
         info.addLayout(labels, 1)
@@ -5393,7 +5547,6 @@ class MusicPlayer(QMainWindow):
         self.bottom_favorite_button.setCheckable(True)
         self.bottom_favorite_button.setEnabled(False)
         self.bottom_favorite_button.setToolTip("Добавить в локальные лайки")
-        info.addWidget(self.bottom_favorite_button)
         self.bottom_dislike_button = QPushButton()
         self.bottom_dislike_button.setObjectName("bottomDislike")
         self.bottom_dislike_button.setIcon(control_icon("thumb-down-outline", "#B3B3B3", 22))
@@ -5420,6 +5573,7 @@ class MusicPlayer(QMainWindow):
         center_row = QHBoxLayout(central_controls)
         center_row.setContentsMargins(0, 0, 0, 0)
         center_row.setSpacing(4)
+        center_row.addSpacing(30)  # Balance the heart on the other side of Play.
         self.shuffle_button = tool_button("shuffle", "Перемешивание: выкл.")
         self.shuffle_button.setCheckable(True)
         self.previous_button = tool_button("previous", "Предыдущий трек")
@@ -5432,7 +5586,7 @@ class MusicPlayer(QMainWindow):
         self.stop_button = tool_button("stop", "Остановить")
         for button in (
             self.shuffle_button, self.previous_button, self.play_button,
-            self.next_button, self.repeat_button,
+            self.bottom_favorite_button, self.next_button, self.repeat_button,
         ):
             center_row.addWidget(button)
         self.stop_button.setParent(bar)
@@ -5781,6 +5935,11 @@ class MusicPlayer(QMainWindow):
             QSlider#seekSlider::handle:horizontal { background: #278454; }
         """
         dark_styles += r"""
+            QPushButton#bottomArtistLink, QPushButton#expandedArtist { background: transparent; border: none; padding: 0; color: #ADB6C5; font-size: 12px; text-align: left; }
+            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #FFFFFF; text-decoration: underline; }
+            QPushButton#expandedArtist { font-size: 16px; text-align: center; padding: 4px; }
+            QLabel#expandedTitle { color: #F4F6F9; font-size: 23px; font-weight: 700; }
+            QFrame#coverPage { background: rgba(19, 24, 31, 180); border-radius: 12px; }
             QFrame#sidebarDivider { background: #252D37; }
             QFrame#searchBox { background: #1E242D; border: 1px solid #303A48; border-radius: 16px; }
             QFrame#searchBox[focused="true"] { border-color: #66CD94; background: #222B35; }
@@ -5792,6 +5951,10 @@ class MusicPlayer(QMainWindow):
             QPushButton#searchSubmit:disabled { background: #2A3C33; color: #899F93; }
         """
         light_styles += r"""
+            QPushButton#bottomArtistLink, QPushButton#expandedArtist { color: #606D80; }
+            QPushButton#bottomArtistLink:hover:enabled, QPushButton#expandedArtist:hover:enabled { color: #18202A; }
+            QLabel#expandedTitle { color: #18202A; }
+            QFrame#coverPage { background: rgba(245, 248, 251, 210); }
             QFrame#sidebarDivider { background: #E0E6ED; }
             QFrame#searchBox { background: #F2F5F8; border-color: #D8E0EA; }
             QFrame#searchBox[focused="true"] { background: #FFFFFF; border-color: #278454; }
@@ -6532,6 +6695,8 @@ class MusicPlayer(QMainWindow):
 
     def fade_to_page(self, page):
         """Короткое затухание при смене внутреннего экрана (без отдельного окна)."""
+        if page is not getattr(self, "cover_page", None) and self.view_stack.currentWidget() is getattr(self, "cover_page", None):
+            self.expanded_cover.clear_artwork()
         if self.page_animation is not None:
             self.page_animation.stop()
             self.page_animation.deleteLater()
@@ -9497,6 +9662,7 @@ class MusicPlayer(QMainWindow):
         )
         self.bottom_dislike_button.blockSignals(False)
         self.dislike_action.setEnabled(available and not disliked)
+        self.refresh_current_track_views()
         self.refresh_mini_player()
 
     def toggle_current_favorite(self):
@@ -9588,7 +9754,7 @@ class MusicPlayer(QMainWindow):
             self.current_queue_index = -1
             self.bottom_title.setText("Ничего не играет")
             self.bottom_title.setToolTip("Текущий трек")
-            self.bottom_artist.clear()
+            self.bottom_artist.setText("")
             self.bottom_artist.setToolTip("")
             self.show_cover("")
             self.play_button.setIcon(control_icon("play", "#FFFFFF"))
@@ -10269,6 +10435,11 @@ class MusicPlayer(QMainWindow):
 
     def set_pixmap_safe(self, label, image):
         try:
+            if isinstance(label, ExpandedArtwork):
+                label.set_artwork(image)
+                if label is getattr(self, "expanded_cover", None):
+                    self.cover_page.set_cover_accent(image)
+                return
             side = max(1, min(label.width(), label.height()))
             ratio = label.devicePixelRatioF()
             circular = bool(label.property("circular_image"))
@@ -10413,9 +10584,12 @@ class MusicPlayer(QMainWindow):
             self.pump_images()
 
     def show_cover(self, url):
-        # Изображение текущего трека показывается только в нижней панели.
+        # Main thumbnail and the expanded view share the existing bounded cache.
         self.player_bar.set_cover_accent(self.pixmap_cache.get(normalize_artwork_url(url)))
-        for label in (self.bottom_cover,):
+        labels = [self.bottom_cover]
+        if self.view_stack.currentWidget() is self.cover_page:
+            labels.append(self.expanded_cover)
+        for label in labels:
             if not url:
                 label.setProperty("requested_image", "")
                 self.set_pixmap_safe(label, self.fallback_cover)
