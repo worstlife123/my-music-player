@@ -566,6 +566,8 @@ class PlayerChanges(unittest.TestCase):
         original_location = m.QStandardPaths.writableLocation(m.QStandardPaths.StandardLocation.AppDataLocation)
         m.configure_application(app)
         self.assertEqual(app.applicationName(), original_name)
+        self.assertEqual(app.applicationDisplayName(), '')
+        self.assertEqual(self.w.windowTitle(), '')
         self.assertEqual(m.QStandardPaths.writableLocation(m.QStandardPaths.StandardLocation.AppDataLocation), original_location)
         for side in (16, 32, 48, 256):
             self.assertFalse(app.windowIcon().pixmap(side, side).isNull())

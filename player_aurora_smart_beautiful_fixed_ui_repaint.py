@@ -292,7 +292,7 @@ def application_icon():
     return QIcon(_APP_ICON)
 
 
-def _apply_native_win32_icon(hwnd):
+def _apply_native_win32_icon(hwnd, clear_caption=False):
     global _WIN32_HICONS
     if sys.platform != "win32" or not hwnd:
         return
@@ -356,6 +356,14 @@ def _apply_native_win32_icon(hwnd):
                     set_class(hwnd, -34, ctypes.c_void_p(small_h))
         except Exception:
             pass
+        if clear_caption:
+            try:
+                set_text = user32.SetWindowTextW
+                set_text.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+                set_text.restype = ctypes.c_int32
+                set_text(hwnd, "")
+            except Exception:
+                pass
         if first_init:
             try:
                 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
@@ -404,7 +412,8 @@ def apply_native_title_bar(widget, theme, dwm_api=None):
         function.restype = ctypes.c_int32
         hwnd = ctypes.c_void_p(int(handle))
         if dwm_api is None:
-            _apply_native_win32_icon(hwnd)
+            clear_caption = isinstance(widget, QMainWindow) and not widget.windowTitle().strip()
+            _apply_native_win32_icon(hwnd, clear_caption=clear_caption)
         def attribute(number, value):
             data = ctypes.c_uint32(value)
             return function(hwnd, number, ctypes.byref(data), ctypes.sizeof(data)) >= 0
@@ -446,7 +455,7 @@ class NativeTitleBarFilter(QObject):
 
 
 def configure_application(app):
-    app.setApplicationDisplayName("Aurora Music Player")
+    app.setApplicationDisplayName("")
     app.setWindowIcon(application_icon())
     if sys.platform == "win32" and not hasattr(app, "_aurora_title_bar_filter"):
         app._aurora_title_bar_filter = NativeTitleBarFilter(app)
@@ -6269,7 +6278,7 @@ class MusicPlayer(QMainWindow):
         self.shuffle_future = None
         self._shuffle_history = deque(maxlen=min(20, 200))
         self._shuffle_weights_cache = {}
-        self.setWindowTitle("Aurora Music Player")
+        self.setWindowTitle("")
         self.setWindowIcon(application_icon())
         self.resize(1380, 860)
         self.setMinimumSize(1000, 650)
@@ -13948,7 +13957,10 @@ def main():
         for delay_ms in (50, 250):
             QTimer.singleShot(
                 delay_ms,
-                lambda w=window: _apply_native_win32_icon(ctypes.c_void_p(int(w.effectiveWinId())))
+                lambda w=window: _apply_native_win32_icon(
+                    ctypes.c_void_p(int(w.effectiveWinId())),
+                    clear_caption=not w.windowTitle().strip(),
+                )
                 if w.isVisible() and w.effectiveWinId() else None,
             )
     try:
