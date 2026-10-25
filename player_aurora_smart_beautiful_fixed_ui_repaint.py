@@ -4989,12 +4989,6 @@ def control_icon(name, color="#D4CDD5", side=32):
         p.drawRoundedRect(5, 7, 22, 18, 3, 3)
         p.setBrush(QColor(color))
         p.drawRoundedRect(15, 14, 9, 8, 1.8, 1.8)
-    elif name == "lyrics":
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(12, 5, 8, 12, 4, 4)
-        p.drawArc(9, 9, 14, 12, 0, -180 * 16)
-        p.drawLine(16, 21, 16, 26)
-        p.drawLine(12, 26, 20, 26)
     p.end()
     return QIcon(pix)
 
@@ -5358,209 +5352,6 @@ class RadioDialog(QDialog):
         if callable(callback):
             QTimer.singleShot(0, callback)
         self.deleteLater()
-
-
-class LyricsWorker(QThread):
-    """Загружает синхронизированный (LRC) или обычный текст песни из публичного каталога LRCLIB."""
-    lyrics_ready = pyqtSignal(str, list, str)
-
-    def __init__(self, track, parent=None):
-        super().__init__(parent)
-        self.track = dict(track or {})
-
-    @staticmethod
-    def _clean_query(title, artist):
-        clean_title = re.sub(r"\s*[\(\[][^\)\]]*(?:official|video|audio|lyrics|prod\.?|feat\.?|ft\.?)[^\)\]]*[\)\]]", "", str(title or ""), flags=re.IGNORECASE)
-        clean_title = re.sub(r"\s+", " ", clean_title).strip()
-        clean_artist = re.sub(r"\s*-\s*Topic$", "", str(artist or ""), flags=re.IGNORECASE).strip()
-        return clean_title or str(title or "").strip(), clean_artist
-
-    @staticmethod
-    def _parse_lrc(lrc_text):
-        lines = []
-        pattern = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\](.*)")
-        for raw in str(lrc_text or "").splitlines():
-            match = pattern.match(raw.strip())
-            if not match:
-                continue
-            minutes = int(match.group(1))
-            seconds = int(match.group(2))
-            frac = match.group(3) or "0"
-            ms = int(frac.ljust(3, "0")[:3])
-            total_ms = (minutes * 60 + seconds) * 1000 + ms
-            content = match.group(4).strip()
-            if content:
-                lines.append((total_ms, content))
-        lines.sort(key=lambda item: item[0])
-        return lines
-
-    def run(self):
-        import urllib.parse
-        import urllib.request
-
-        url_key = str(self.track.get("url") or "")
-        raw_title = str(self.track.get("title") or "")
-        raw_artist = str(self.track.get("artist_display") or self.track.get("artist") or "")
-        title, artist = self._clean_query(raw_title, raw_artist)
-        if " - " in title and (not artist or artist.casefold() in ("исполнитель неизвестен", "unknown artist")):
-            parts = title.split(" - ", 1)
-            artist, title = parts[0].strip(), parts[1].strip()
-        queries = [f"{artist} {title}".strip(), title]
-        for q in queries:
-            if not q:
-                continue
-            try:
-                api_url = "https://lrclib.net/api/search?" + urllib.parse.urlencode({"q": q})
-                req = urllib.request.Request(api_url, headers={"User-Agent": "AuroraMusicPlayer/1.2"})
-                with urllib.request.urlopen(req, timeout=6) as resp:
-                    payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if isinstance(payload, list) and payload:
-                    best = next((item for item in payload if isinstance(item, dict) and item.get("syncedLyrics")), payload[0])
-                    synced = self._parse_lrc(best.get("syncedLyrics") or "")
-                    plain = str(best.get("plainLyrics") or "").strip()
-                    if synced or plain:
-                        self.lyrics_ready.emit(url_key, synced, plain)
-                        return
-            except Exception:
-                continue
-        self.lyrics_ready.emit(url_key, [], "")
-
-
-class LyricsDialog(QDialog):
-    """Полупрозрачная панель синхронизированного текста песни (караоке-режим с перемоткой по клику)."""
-
-    def __init__(self, player):
-        super().__init__(player)
-        self.player_window = player
-        self.setObjectName("lyricsDialog")
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setModal(False)
-        self._synced_lines = []
-        self._active_index = -1
-        self._current_url = ""
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(36, 36, 36, 36)
-        card = QFrame(self)
-        card.setObjectName("radioCard")
-        card.setMaximumWidth(640)
-        card.setMinimumWidth(460)
-        self.card = card
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(28, 22, 28, 24)
-        card_layout.setSpacing(10)
-
-        top = QHBoxLayout()
-        badge = QLabel("ТЕКСТ ПЕСНИ · LYRICS")
-        badge.setObjectName("radioBrand")
-        top.addWidget(badge)
-        top.addStretch(1)
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(30, 30)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(self.close)
-        top.addWidget(close_btn)
-        card_layout.addLayout(top)
-
-        self.title_label = QLabel("Ничего не играет")
-        self.title_label.setObjectName("radioTrackTitle")
-        self.title_label.setWordWrap(True)
-        card_layout.addWidget(self.title_label)
-
-        self.status_label = QLabel("")
-        self.status_label.setObjectName("radioStatus")
-        card_layout.addWidget(self.status_label)
-
-        self.lines_list = QListWidget()
-        self.lines_list.setObjectName("lyricsList")
-        self.lines_list.setWordWrap(True)
-        self.lines_list.setSpacing(4)
-        self.lines_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.lines_list.itemClicked.connect(self._on_line_clicked)
-        card_layout.addWidget(self.lines_list, 1)
-
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(card, 1)
-        row.addStretch(1)
-        root.addLayout(row, 1)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(8, 10, 14, 195))
-        painter.end()
-
-    def set_track_loading(self, track):
-        self._current_url = str((track or {}).get("url") or "")
-        self._synced_lines = []
-        self._active_index = -1
-        title = str((track or {}).get("title") or "Без названия")
-        artist = str((track or {}).get("artist_display") or (track or {}).get("artist") or "")
-        self.title_label.setText(f"{title} — {artist}" if artist else title)
-        self.status_label.setText("Ищем синхронизированный текст…")
-        self.status_label.show()
-        self.lines_list.clear()
-
-    def set_lyrics(self, url, synced_lines, plain_text):
-        if url != self._current_url:
-            return
-        self.lines_list.clear()
-        self._synced_lines = list(synced_lines or [])
-        self._active_index = -1
-        if self._synced_lines:
-            self.status_label.setText("Нажми на любую строчку, чтобы перемотать к ней")
-            for ms, text in self._synced_lines:
-                item = QListWidgetItem(text)
-                item.setData(Qt.ItemDataRole.UserRole, ms)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                font = QFont(self.font())
-                font.setPointSize(12)
-                font.setWeight(QFont.Weight.DemiBold)
-                item.setFont(font)
-                self.lines_list.addItem(item)
-            self.sync_position(self.player_window.player.position())
-        elif plain_text:
-            self.status_label.setText("Текст без таймкодов")
-            for raw_line in plain_text.splitlines():
-                item = QListWidgetItem(raw_line or " ")
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.lines_list.addItem(item)
-        else:
-            self.status_label.setText("Текст для этого трека не найден в базе LRCLIB.")
-
-    def sync_position(self, position_ms):
-        if not self._synced_lines or not self.isVisible():
-            return
-        idx = -1
-        for i, (ms, _) in enumerate(self._synced_lines):
-            if position_ms + 180 >= ms:
-                idx = i
-            else:
-                break
-        if idx == self._active_index:
-            return
-        self._active_index = idx
-        light = getattr(self.player_window, "theme", "dark") == "light"
-        for i in range(self.lines_list.count()):
-            item = self.lines_list.item(i)
-            font = item.font()
-            if i == idx:
-                font.setPointSize(14)
-                font.setWeight(QFont.Weight.ExtraBold)
-                item.setForeground(QColor("#167A40" if light else "#5CE092"))
-            else:
-                font.setPointSize(11)
-                font.setWeight(QFont.Weight.Medium)
-                item.setForeground(QColor("#647285" if light else "#8E9BAE"))
-            item.setFont(font)
-        if 0 <= idx < self.lines_list.count():
-            self.lines_list.scrollToItem(self.lines_list.item(idx), QAbstractItemView.ScrollHint.PositionAtCenter)
-
-    def _on_line_clicked(self, item):
-        ms = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(ms, int) and self.player_window.player.isSeekable():
-            self.player_window.player.setPosition(ms)
 
 
 class SettingsDialog(QDialog):
@@ -6419,9 +6210,7 @@ class MusicPlayer(QMainWindow):
                 self.toggle_favorite(track)
 
     def escape_shortcut(self):
-        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
-            self.lyrics_dialog.close()
-        elif self.view_stack.currentWidget() is self.cover_page:
+        if self.view_stack.currentWidget() is self.cover_page:
             self.close_cover_view()
         elif self.queue_open:
             self.toggle_queue()
@@ -6429,45 +6218,6 @@ class MusicPlayer(QMainWindow):
             dialog = self.radio_dialog
             self.radio_dialog = None
             dialog.fade_out()
-
-    def toggle_lyrics_dialog(self):
-        dialog = getattr(self, "lyrics_dialog", None)
-        if dialog is not None and dialog.isVisible():
-            dialog.close()
-            return
-        track = self.current_track or self.requested_track
-        if not isinstance(track, dict) or not track.get("url"):
-            self.show_toast("Включи трек, чтобы открыть синхронизированный текст песни.")
-            return
-        if dialog is None:
-            dialog = LyricsDialog(self)
-            self.lyrics_dialog = dialog
-        dialog.setGeometry(self.geometry())
-        dialog.show()
-        dialog.raise_()
-        self._request_lyrics_for_track(track)
-
-    def _request_lyrics_for_track(self, track):
-        dialog = getattr(self, "lyrics_dialog", None)
-        if dialog is None or not dialog.isVisible() or not isinstance(track, dict):
-            return
-        url = str(track.get("url") or "")
-        cached = getattr(self, "_lyrics_cache", {}).get(url)
-        dialog.set_track_loading(track)
-        if cached is not None:
-            dialog.set_lyrics(url, cached[0], cached[1])
-            return
-        worker = LyricsWorker(track, self)
-        self._lyrics_worker = worker
-        def _done(track_url, synced, plain):
-            if not hasattr(self, "_lyrics_cache"):
-                self._lyrics_cache = {}
-            self._lyrics_cache[track_url] = (synced, plain)
-            if getattr(self, "lyrics_dialog", None) is not None:
-                self.lyrics_dialog.set_lyrics(track_url, synced, plain)
-        worker.lyrics_ready.connect(_done)
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -6500,8 +6250,6 @@ class MusicPlayer(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._sync_bottom_bar_side_widths()
-        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
-            self.lyrics_dialog.setGeometry(self.geometry())
         if hasattr(self, "cover_page") and not self._force_exit:
             QTimer.singleShot(0, self.refresh_current_track_views)
             self._position_expanded_cover()
@@ -7554,9 +7302,6 @@ class MusicPlayer(QMainWindow):
             button.setText(button.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, max_w))
             button.setToolTip(f"Открыть исполнителя: {name}" if name else display)
             button.setAccessibleName(f"Открыть исполнителя: {name}" if name else display)
-        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible() and available:
-            if getattr(self.lyrics_dialog, "_current_url", "") != str(track.get("url") or ""):
-                self._request_lyrics_for_track(track)
         if self.view_stack.currentWidget() is self.cover_page:
             if not available:
                 self.close_cover_view()
@@ -7746,7 +7491,7 @@ class MusicPlayer(QMainWindow):
         base.addWidget(central_controls, 1, Qt.AlignmentFlag.AlignVCenter)
         base.addStretch(1)
 
-        # 3. Правая колонка Spotify: Текст песни + Мини-плеер + Очередь + Громкость + Меню.
+        # 3. Правая колонка Spotify: Мини-плеер + Очередь + Громкость + Меню.
         right_tools = QWidget()
         self.bottom_right_tools = right_tools
         right_tools.setFixedWidth(360)
@@ -7754,8 +7499,6 @@ class MusicPlayer(QMainWindow):
         right_row.setContentsMargins(0, 0, 0, 0)
         right_row.setSpacing(6)
         right_row.addStretch(1)
-        self.bottom_lyrics_button = tool_button("lyrics", "Синхронизированный текст песни (Lyrics)")
-        self.bottom_lyrics_button.clicked.connect(self.toggle_lyrics_dialog)
         self.bottom_mini_button = tool_button("mini", "Мини-плеер поверх окон (Ctrl+M)")
         self.bottom_mini_button.clicked.connect(self.show_mini_player)
         self.bottom_queue_button = tool_button("queue", "Показать / скрыть очередь")
@@ -7773,7 +7516,6 @@ class MusicPlayer(QMainWindow):
         self.menu_button = tool_button("menu", "Действия с треком и настройки")
         self.menu_button.setIcon(QIcon())
         self.menu_button.setText("⋯")
-        right_row.addWidget(self.bottom_lyrics_button)
         right_row.addWidget(self.bottom_mini_button)
         right_row.addWidget(self.bottom_queue_button)
         right_row.addSpacing(2)
@@ -8217,8 +7959,6 @@ class MusicPlayer(QMainWindow):
             button.setIcon(control_icon(name, icon_color))
         self.shuffle_button.setIcon(control_icon("shuffle", "#1DB954" if self.shuffle_enabled else icon_color))
         self.repeat_button.setIcon(control_icon("repeat", "#1DB954" if self.repeat_mode != "off" else icon_color))
-        if hasattr(self, "bottom_lyrics_button"):
-            self.bottom_lyrics_button.setIcon(control_icon("lyrics", icon_color))
         if hasattr(self, "bottom_mini_button"):
             self.bottom_mini_button.setIcon(control_icon("mini", icon_color))
         self.bottom_queue_button.setIcon(control_icon("queue", "#1DB954" if self.queue_open else icon_color))
@@ -10328,7 +10068,6 @@ class MusicPlayer(QMainWindow):
         menu.addAction("📻  Запустить радио по треку", lambda: self.start_radio(dict(track)))
         if self.artist_card_name(track):
             menu.addAction("👤  Перейти к исполнителю", lambda: self.search_artist_name(dict(track), track.get("source")))
-        menu.addAction("🎤  Текст песни (Lyrics)", lambda: (self.add_to_queue(dict(track), True), QTimer.singleShot(150, self.toggle_lyrics_dialog)))
         global_pos = anchor_widget.mapToGlobal(local_pos if local_pos is not None else QPoint(0, anchor_widget.height()))
         menu.exec(global_pos)
 
@@ -13919,8 +13658,6 @@ class MusicPlayer(QMainWindow):
         self.position_label.setText(self.format_position(position))
         if self.mini_player is not None and self.mini_player.isVisible():
             self.mini_player.sync_position()
-        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
-            self.lyrics_dialog.sync_position(position)
 
         # Проверка дешёвая: порог очереди и worker защищают от повторных запросов.
         if self.queue_mode == "supermix":
