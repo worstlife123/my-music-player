@@ -2,11 +2,28 @@
 """Interactive Web Preview Server for Aurora Music Player (Port 3000)."""
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import ast
+import base64
 import json
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PLAYER_FILE = ROOT_DIR / "player_aurora_smart_beautiful_fixed_ui_repaint.py"
+
+
+def _load_embedded_icon_bytes():
+    try:
+        tree = ast.parse(PLAYER_FILE.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "_CUSTOM_BRAND_ICON_B64":
+                        val = ast.literal_eval(node.value)
+                        return base64.b64decode(val)
+    except Exception:
+        pass
+    return b""
+
 
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="ru">
@@ -17,6 +34,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <meta name="description" content="Aurora — умный десктопный музыкальный плеер на PyQt6 с компактным анимированным окном обложки" />
   <meta property="og:title" content="Aurora Music Player — Interactive UI Preview" />
   <meta property="og:description" content="Aurora — умный десктопный музыкальный плеер на PyQt6 с компактным анимированным окном обложки" />
+  <link rel="icon" type="image/png" href="/api/app-icon.png" />
   <style>
     :root {
       --bg-window: #07070b;
@@ -109,16 +127,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     .brand-dot {
-      width: 28px;
-      height: 28px;
-      border-radius: 9px;
-      background: linear-gradient(135deg, #8b5cf6, #ec4899);
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: #000;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #fff;
-      font-size: 14px;
-      box-shadow: 0 6px 16px rgba(139, 92, 246, 0.35);
+      overflow: hidden;
+      box-shadow: 0 4px 14px rgba(184, 20, 26, 0.45);
+      border: 1px solid rgba(220, 38, 38, 0.35);
+    }
+
+    .brand-dot img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
     }
 
     .nav-btn {
@@ -711,7 +736,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <aside class="sidebar">
       <div class="brand-row">
         <div class="brand-title">
-          <div class="brand-dot">✦</div>
+          <div class="brand-dot"><img src="/api/app-icon.png" alt="Aurora Icon" /></div>
           <span>Aurora</span>
         </div>
       </div>
@@ -1052,6 +1077,16 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        if self.path in ("/api/app-icon.png", "/favicon.ico"):
+            icon_bytes = _load_embedded_icon_bytes()
+            if icon_bytes:
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(icon_bytes)))
+                self.end_headers()
+                self.wfile.write(icon_bytes)
+                return
 
         body = HTML_PAGE.encode("utf-8")
         self.send_response(200)
