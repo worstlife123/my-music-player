@@ -59,6 +59,7 @@ echo [2/3] Installing or updating build dependencies. Internet is required.
 if errorlevel 1 goto failed
 
 if exist "fonts\" set "PLAYER_FONT_OPTIONS=--add-data=fonts:fonts"
+if exist "tools\generate_app_icon.py" "%PLAYER_BUILD_PYTHON%" tools\generate_app_icon.py >nul 2>&1
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
 "%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "assets:assets" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
