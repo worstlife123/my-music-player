@@ -5501,8 +5501,110 @@ def control_icon(name, color="#D4CDD5", side=32):
         p.drawRoundedRect(5, 7, 22, 18, 3, 3)
         p.setBrush(QColor(color))
         p.drawRoundedRect(15, 14, 9, 8, 1.8, 1.8)
+    elif name == "download":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(16, 5.5), QPointF(16, 19.5))
+        p.drawLine(QPointF(10.5, 14.2), QPointF(16, 19.8))
+        p.drawLine(QPointF(21.5, 14.2), QPointF(16, 19.8))
+        tray = QPainterPath()
+        tray.moveTo(6.5, 20.5)
+        tray.lineTo(6.5, 24.5)
+        tray.quadTo(6.5, 26.0, 8.0, 26.0)
+        tray.lineTo(24.0, 26.0)
+        tray.quadTo(25.5, 26.0, 25.5, 24.5)
+        tray.lineTo(25.5, 20.5)
+        p.drawPath(tray)
+    elif name == "downloaded":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(16, 16), 10.5, 10.5)
+        p.drawLine(QPointF(11.2, 16.3), QPointF(14.6, 19.7))
+        p.drawLine(QPointF(14.6, 19.7), QPointF(21.2, 12.6))
+    elif name == "queue-add":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(6, 9.5), QPointF(21, 9.5))
+        p.drawLine(QPointF(6, 15.5), QPointF(19, 15.5))
+        p.drawLine(QPointF(6, 21.5), QPointF(14, 21.5))
+        p.drawLine(QPointF(18.5, 21.5), QPointF(26.5, 21.5))
+        p.drawLine(QPointF(22.5, 17.5), QPointF(22.5, 25.5))
+    elif name == "radio":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QPointF(16, 16), 2.5, 2.5)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(9.5, 9.5, 13.0, 13.0), -42 * 16, 84 * 16)
+        p.drawArc(QRectF(9.5, 9.5, 13.0, 13.0), 138 * 16, 84 * 16)
+        p.drawArc(QRectF(4.8, 4.8, 22.4, 22.4), -46 * 16, 92 * 16)
+        p.drawArc(QRectF(4.8, 4.8, 22.4, 22.4), 134 * 16, 92 * 16)
+    elif name == "artist":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(16, 11), 4.6, 4.6)
+        shoulders = QPainterPath()
+        shoulders.moveTo(7.2, 25.2)
+        shoulders.cubicTo(7.8, 19.2, 24.2, 19.2, 24.8, 25.2)
+        p.drawPath(shoulders)
+    elif name == "external":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        box = QPainterPath()
+        box.moveTo(14.5, 8.0)
+        box.lineTo(9.0, 8.0)
+        box.quadTo(7.0, 8.0, 7.0, 10.0)
+        box.lineTo(7.0, 23.0)
+        box.quadTo(7.0, 25.0, 9.0, 25.0)
+        box.lineTo(22.0, 25.0)
+        box.quadTo(24.0, 25.0, 24.0, 23.0)
+        box.lineTo(24.0, 17.5)
+        p.drawPath(box)
+        p.drawLine(QPointF(14.5, 17.5), QPointF(25.0, 7.0))
+        p.drawLine(QPointF(18.5, 7.0), QPointF(25.0, 7.0))
+        p.drawLine(QPointF(25.0, 7.0), QPointF(25.0, 13.5))
+    elif name == "folder":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        folder_path = QPainterPath()
+        folder_path.moveTo(5.5, 9.5)
+        folder_path.lineTo(12.2, 9.5)
+        folder_path.lineTo(14.8, 12.2)
+        folder_path.lineTo(26.5, 12.2)
+        folder_path.lineTo(26.5, 24.2)
+        folder_path.lineTo(5.5, 24.2)
+        folder_path.closeSubpath()
+        p.drawPath(folder_path)
+    elif name == "arrow-up":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(16, 25), QPointF(16, 7))
+        p.drawLine(QPointF(10, 13), QPointF(16, 7))
+        p.drawLine(QPointF(22, 13), QPointF(16, 7))
+    elif name == "arrow-down":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(16, 7), QPointF(16, 25))
+        p.drawLine(QPointF(10, 19), QPointF(16, 25))
+        p.drawLine(QPointF(22, 19), QPointF(16, 25))
+    elif name == "remove":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(9.5, 9.5), QPointF(22.5, 22.5))
+        p.drawLine(QPointF(22.5, 9.5), QPointF(9.5, 22.5))
     p.end()
     return QIcon(pix)
+
+
+def menu_action_icon(name, theme="dark", accent=False):
+    """Создаёт чёткую векторную иконку для пунктов QMenu с подсветкой при наведении."""
+    light = theme == "light"
+    normal_color = ("#187941" if accent else "#334152") if light else ("#5CE092" if accent else "#D6E0EE")
+    active_color = "#167A40" if light else "#66E099"
+    disabled_color = "#9AA6B8" if light else "#556274"
+    icon = QIcon()
+    for mode, color in (
+        (QIcon.Mode.Normal, normal_color),
+        (QIcon.Mode.Active, active_color),
+        (QIcon.Mode.Selected, active_color),
+        (QIcon.Mode.Disabled, disabled_color),
+    ):
+        pm = control_icon(name, color, 36).pixmap(36, 36)
+        pm.setDevicePixelRatio(2.0)
+        icon.addPixmap(pm, mode)
+    return icon
+
 
 
 
@@ -5900,7 +6002,7 @@ class SettingsDialog(QDialog):
         general.setObjectName("settingsGeneral")
         general_layout = QVBoxLayout(general)
         general_layout.setContentsMargins(15, 19, 15, 16)
-        general_layout.setSpacing(13)
+        general_layout.setSpacing(12)
         self._add_group_label(general_layout, "ПОИСК")
 
         self.result_count = MenuChoice(
@@ -5908,13 +6010,37 @@ class SettingsDialog(QDialog):
             player.result_limit, width=214, suffix=" треков"
         )
         general_layout.addLayout(self._form_row("Количество результатов", self.result_count))
-        general_layout.addSpacing(6)
+        general_layout.addSpacing(4)
         self._add_group_label(general_layout, "ВНЕШНИЙ ВИД")
         self.theme_choice = MenuChoice(
             [("Тёмная тема", "dark"), ("Светлая тема", "light")],
             player.theme, width=214
         )
         general_layout.addLayout(self._form_row("Тема оформления", self.theme_choice))
+        general_layout.addSpacing(4)
+        self._add_group_label(general_layout, "СКАЧИВАНИЕ ТРЕКОВ")
+        self.download_dir_draft = str(getattr(player, "download_dir", "") or "").strip()
+        self.download_dir_field = QLineEdit()
+        self.download_dir_field.setObjectName("settingsPathField")
+        self.download_dir_field.setReadOnly(True)
+        self.download_dir_choose = QPushButton("Выбрать папку…")
+        self.download_dir_choose.setObjectName("settingsPicker")
+        self.download_dir_choose.clicked.connect(self.choose_download_dir)
+        self.download_dir_open = QPushButton("Открыть")
+        self.download_dir_open.setObjectName("settingsPicker")
+        self.download_dir_open.clicked.connect(self.open_download_dir_from_settings)
+        self.download_dir_reset = QPushButton("По умолчанию")
+        self.download_dir_reset.setObjectName("settingsPicker")
+        self.download_dir_reset.clicked.connect(self.reset_download_dir)
+        dl_path_row = QHBoxLayout()
+        dl_path_row.setSpacing(8)
+        dl_path_row.addWidget(self.download_dir_field, 1)
+        dl_path_row.addWidget(self.download_dir_choose, 0)
+        dl_path_row.addWidget(self.download_dir_open, 0)
+        dl_path_row.addWidget(self.download_dir_reset, 0)
+        general_layout.addLayout(self._form_row("Папка загрузки", dl_path_row))
+        self.update_download_dir_ui()
+        general_layout.addSpacing(4)
         self._add_group_label(general_layout, "ПАНЕЛИ")
         self.minimize_to_tray = QCheckBox("При закрытии окна сворачивать плеер в системный трей")
         self.minimize_to_tray.setChecked(player.minimize_to_tray)
@@ -6109,6 +6235,10 @@ class SettingsDialog(QDialog):
             QLabel#settingsHint { color: #9AA6B8; font-size: 10pt; }
             QLabel#settingsGroup { color: #5CE092; font-size: 9.5pt; font-weight: 800; letter-spacing: 0.8px; }
             QLabel#settingsField { font-size: 10pt; color: #DDE4EE; font-weight: 500; }
+            QLineEdit#settingsPathField {
+                background: #1C232E; border: 1px solid #2E3846; border-radius: 10px;
+                color: #DCE5F2; padding: 8px 12px; font-size: 9.5pt;
+            }
             QTabWidget::pane {
                 border: 1px solid #252E3B;
                 background: #151A22; border-radius: 14px;
@@ -6172,6 +6302,9 @@ class SettingsDialog(QDialog):
                 QLabel#settingsHint { color: #5E6B7E; }
                 QLabel#settingsGroup { color: #187941; }
                 QLabel#settingsField { color: #263242; }
+                QLineEdit#settingsPathField {
+                    background: #F4F7FA; border-color: #D4DCE7; color: #18202A;
+                }
                 QTabWidget::pane { border-color: #D8E0EA; background: #FFFFFF; }
                 QTabBar::tab { color: #5E6B7E; }
                 QTabBar::tab:hover { background: #E9EFF6; color: #141C26; }
@@ -6193,6 +6326,42 @@ class SettingsDialog(QDialog):
                 QMenu::item:selected { background: #E2F3E8; color: #167A40; }"""
             for popup in self.findChildren(QMenu):
                 popup.setStyleSheet(light_menu)
+
+    def choose_download_dir(self):
+        default_dir = str(app_cache_directory() / "downloads")
+        initial = self.download_dir_draft or default_dir
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Выбрать папку для скачивания треков",
+            initial,
+        )
+        if not selected:
+            return
+        self.download_dir_draft = str(Path(selected))
+        self.update_download_dir_ui()
+
+    def reset_download_dir(self):
+        self.download_dir_draft = ""
+        self.update_download_dir_ui()
+
+    def open_download_dir_from_settings(self):
+        target = Path(self.download_dir_draft) if self.download_dir_draft else (app_cache_directory() / "downloads")
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def update_download_dir_ui(self):
+        default_dir = str(app_cache_directory() / "downloads")
+        active_path = self.download_dir_draft or default_dir
+        if self.download_dir_draft:
+            self.download_dir_field.setText(self.download_dir_draft)
+            self.download_dir_field.setToolTip(f"Выбранная папка загрузки:\n{self.download_dir_draft}")
+        else:
+            self.download_dir_field.setText(f"По умолчанию ({default_dir})")
+            self.download_dir_field.setToolTip(f"Папка по умолчанию:\n{default_dir}")
+        self.download_dir_reset.setEnabled(bool(self.download_dir_draft))
 
     def choose_wallpaper(self):
         path, _ = QFileDialog.getOpenFileName(self, "Выбрать фон", "", "Картинки (*.png *.jpg *.jpeg *.webp *.bmp)")
@@ -6278,6 +6447,7 @@ class SettingsDialog(QDialog):
             self.wallpaper_message.setText("Не удалось сохранить фон. Проверь свободное место и попробуй снова.")
             return
         player.wallpaper_dim = self.wallpaper_dim_slider.value()
+        player.download_dir = str(self.download_dir_draft or "").strip()
         player.change_limit(int(self.result_count.value()))
         player.volume_slider.setValue(self.volume.value())
         player.audio_quality = str(self.audio_quality.currentData())
@@ -6362,17 +6532,33 @@ class DownloadWorker(QThread):
     completed = pyqtSignal(dict, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, track, parent=None):
+    def __init__(self, track, parent=None, download_dir=None):
         super().__init__(parent)
         self.track = dict(track)
+        if download_dir is None and parent is not None and hasattr(parent, "get_download_directory"):
+            try:
+                download_dir = parent.get_download_directory()
+            except Exception:
+                download_dir = None
+        self.download_dir = str(download_dir or "").strip()
+
+    @staticmethod
+    def _sanitize_filename(value):
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", str(value or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+        return cleaned[:110]
 
     def run(self):
         try:
             url = str(self.track.get("url") or "")
             if not url.startswith(("https://", "http://")):
                 raise ValueError("Нет адреса для скачивания")
-            folder = app_cache_directory() / "downloads"
-            folder.mkdir(parents=True, exist_ok=True)
+            folder = Path(self.download_dir) if self.download_dir else (app_cache_directory() / "downloads")
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                folder = app_cache_directory() / "downloads"
+                folder.mkdir(parents=True, exist_ok=True)
             from urllib.parse import urlparse, parse_qs
             video_id = str(self.track.get("video_id") or "")
             if not video_id and self.track.get("source") == "youtube":
@@ -6380,7 +6566,16 @@ class DownloadWorker(QThread):
             video_id = video_id or hashlib.sha256(url.encode()).hexdigest()[:24]
             source = re.sub(r"[^A-Za-z0-9_-]", "_", str(self.track.get("source") or "web"))
             video_id = re.sub(r"[^A-Za-z0-9_-]", "_", video_id)[:120]
-            stem = f"{source}_{video_id}"
+            title = self._sanitize_filename(self.track.get("title") or "")
+            artist = self._sanitize_filename(self.track.get("artist") or "")
+            if artist.casefold() in ("исполнитель неизвестен", "unknown artist"):
+                artist = ""
+            if title and artist and artist.casefold() not in title.casefold():
+                readable = f"{artist} - {title}"
+            else:
+                readable = title
+            readable = self._sanitize_filename(readable)
+            stem = f"{readable} [{video_id[:16]}]" if readable else f"{source}_{video_id}"
             def hook(status):
                 if status.get("status") == "downloading":
                     total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
@@ -6394,7 +6589,10 @@ class DownloadWorker(QThread):
                     raise RuntimeError("yt-dlp не вернул файл")
                 path = Path(ydl.prepare_filename(info))
             if not path.is_file():
-                candidates = [p for p in folder.glob(stem + ".*") if p.is_file() and p.suffix not in (".part", ".ytdl", ".temp")]
+                candidates = [
+                    p for p in folder.iterdir()
+                    if p.is_file() and p.stem == stem and p.suffix not in (".part", ".ytdl", ".temp")
+                ]
                 if not candidates:
                     raise FileNotFoundError("Скачанный файл не найден")
                 path = max(candidates, key=lambda p: p.stat().st_mtime)
@@ -6770,6 +6968,35 @@ class MusicPlayer(QMainWindow):
             toast.move(max(0, self.width() - toast.width() - 20),
                        max(0, self.height() - toast.height() - 20))
 
+    def get_download_directory(self):
+        custom = str(getattr(self, "download_dir", "") or "").strip()
+        if custom:
+            try:
+                path = Path(custom).expanduser()
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError:
+                pass
+        default_dir = app_cache_directory() / "downloads"
+        try:
+            default_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return default_dir
+
+    def open_download_folder(self, track=None):
+        target = None
+        if isinstance(track, dict):
+            offline = self.offline_path_for(track)
+            if offline:
+                try:
+                    target = Path(offline).resolve().parent
+                except OSError:
+                    target = None
+        if target is None or not target.is_dir():
+            target = self.get_download_directory()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
     def offline_path_for(self, track):
         if not isinstance(track, dict):
             return None
@@ -6780,7 +7007,8 @@ class MusicPlayer(QMainWindow):
                 continue
             path = Path(candidate)
             if not path.is_absolute():
-                path = app_cache_directory() / "downloads" / path
+                custom_candidate = self.get_download_directory() / path
+                path = custom_candidate if custom_candidate.is_file() else (app_cache_directory() / "downloads" / path)
             try:
                 if path.is_file() and path.stat().st_size > 0:
                     return str(path)
@@ -6820,7 +7048,7 @@ class MusicPlayer(QMainWindow):
         if any(self.favorite_key(w.track) == key for w in self._download_workers):
             self.show_toast("Трек уже скачивается")
             return
-        worker = DownloadWorker(track, self)
+        worker = DownloadWorker(track, self, download_dir=self.get_download_directory())
         self._download_workers.add(worker)
         worker.progress.connect(lambda percent: self.set_status(f"Скачивание {percent}%"))
         worker.completed.connect(self.on_download_completed)
@@ -6853,6 +7081,7 @@ class MusicPlayer(QMainWindow):
         self.theme = str(self.settings.value("spotify_theme", "dark"))
         if self.theme not in ("dark", "light"):
             self.theme = "dark"
+        self.download_dir = str(self.settings.value("download_dir", "") or "").strip()
         self.wallpaper_path = str(self.settings.value("wallpaper_path", "") or "")
         try:
             self.wallpaper_dim = max(0, min(90, int(self.settings.value("wallpaper_dim", 55))))
@@ -8669,6 +8898,7 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("autoplay_playlists", self.autoplay_playlists)
         self.settings.setValue("theme", self.theme)
         self.settings.setValue("spotify_theme", self.theme)
+        self.settings.setValue("download_dir", self.download_dir)
         self.settings.setValue("wallpaper_path", self.wallpaper_path)
         self.settings.setValue("wallpaper_dim", self.wallpaper_dim)
         self.settings.setValue("youtube_cookie_file", self.youtube_cookie_file)
@@ -10583,11 +10813,7 @@ class MusicPlayer(QMainWindow):
         if not isinstance(track, dict) or not track.get("url"):
             return
         menu = self.make_context_menu()
-        menu.addAction("▶  Воспроизвести сейчас", lambda: self.add_to_queue(dict(track), True))
-        menu.addAction("＋  Добавить в очередь", lambda: self.add_to_queue(dict(track), False))
-        menu.addAction("📻  Запустить радио по треку", lambda: self.start_radio(dict(track)))
-        if self.artist_card_name(track):
-            menu.addAction("👤  Перейти к исполнителю", lambda: self.search_artist_name(dict(track), track.get("source")))
+        self._populate_track_context_menu(menu, track)
         global_pos = anchor_widget.mapToGlobal(local_pos if local_pos is not None else QPoint(0, anchor_widget.height()))
         menu.exec(global_pos)
 
@@ -12079,12 +12305,7 @@ class MusicPlayer(QMainWindow):
         if not isinstance(track, dict):
             return
         menu = self.make_context_menu()
-        if track.get("source") != "local":
-            menu.addAction("⬇   Скачать офлайн", lambda t=dict(track): self.download_track(t))
-        menu.addAction("▶   Воспроизвести", lambda t=dict(track): self.add_to_queue(t, True))
-        menu.addAction("＋   Добавить в очередь", lambda t=dict(track): self.add_to_queue(t, False))
-        if track.get("source") in ("youtube", "soundcloud"):
-            menu.addAction("♫   Запустить радио по треку", lambda t=dict(track): self.start_radio(t))
+        self._populate_track_context_menu(menu, track)
         menu.exec(list_widget.viewport().mapToGlobal(point))
 
     @staticmethod
@@ -13022,14 +13243,141 @@ class MusicPlayer(QMainWindow):
             self.toggle_queue()
 
     def make_context_menu(self):
-        """Единое контекстное меню в графитовых тонах с зелёным выделением."""
+        """Современное контекстное меню в палитре Aurora с поддержкой векторных иконок."""
         menu = QMenu(self)
         menu.setObjectName("darkMenu")
+        menu.setMinimumWidth(248)
         if self.theme == "dark":
-            menu.setStyleSheet("QMenu{background:#282828;color:#fff;border:1px solid #3b3b3b;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;margin:1px;} QMenu::item:selected{background:#3a3a3a;color:#1DB954;} QMenu::separator{height:1px;background:#444;margin:5px 10px;}")
+            menu.setStyleSheet(
+                "QMenu {"
+                "  background-color: #161C24;"
+                "  color: #F2F6FA;"
+                "  border: 1px solid #2A3544;"
+                "  border-radius: 12px;"
+                "  padding: 6px;"
+                "}"
+                "QMenu::item {"
+                "  padding: 9px 22px 9px 12px;"
+                "  border-radius: 8px;"
+                "  margin: 2px 3px;"
+                "  font-weight: 600;"
+                "  font-size: 13px;"
+                "}"
+                "QMenu::item:selected {"
+                "  background-color: #1E3428;"
+                "  color: #66E099;"
+                "}"
+                "QMenu::item:disabled {"
+                "  color: #556274;"
+                "  background: transparent;"
+                "}"
+                "QMenu::icon {"
+                "  padding-left: 8px;"
+                "  padding-right: 4px;"
+                "}"
+                "QMenu::separator {"
+                "  height: 1px;"
+                "  background: #25303E;"
+                "  margin: 5px 10px;"
+                "}"
+            )
         else:
-            menu.setStyleSheet("QMenu{background:#fff;color:#222;border:1px solid #ddd;padding:7px;} QMenu::item{padding:10px 22px 10px 14px;border-radius:7px;margin:1px;} QMenu::item:selected{background:#e1f4e7;color:#16883d;} QMenu::separator{height:1px;background:#ddd;margin:5px 10px;}")
+            menu.setStyleSheet(
+                "QMenu {"
+                "  background-color: #FFFFFF;"
+                "  color: #18202A;"
+                "  border: 1px solid #D5DEE8;"
+                "  border-radius: 12px;"
+                "  padding: 6px;"
+                "}"
+                "QMenu::item {"
+                "  padding: 9px 22px 9px 12px;"
+                "  border-radius: 8px;"
+                "  margin: 2px 3px;"
+                "  font-weight: 600;"
+                "  font-size: 13px;"
+                "}"
+                "QMenu::item:selected {"
+                "  background-color: #E2F3E8;"
+                "  color: #167A40;"
+                "}"
+                "QMenu::item:disabled {"
+                "  color: #9AA6B8;"
+                "  background: transparent;"
+                "}"
+                "QMenu::icon {"
+                "  padding-left: 8px;"
+                "  padding-right: 4px;"
+                "}"
+                "QMenu::separator {"
+                "  height: 1px;"
+                "  background: #E2E8F0;"
+                "  margin: 5px 10px;"
+                "}"
+            )
         return menu
+
+    def _add_menu_action(self, menu, text, callback, icon_name=None, enabled=True, accent=False):
+        action = menu.addAction(text, callback)
+        if icon_name:
+            action.setIcon(menu_action_icon(icon_name, self.theme, accent=accent))
+        action.setEnabled(bool(enabled))
+        return action
+
+    def _populate_track_context_menu(self, menu, track, include_play=True, include_queue_add=True):
+        if include_play:
+            self._add_menu_action(
+                menu, "Воспроизвести",
+                lambda t=dict(track): self.add_to_queue(t, True),
+                icon_name="play", accent=True,
+            )
+        if include_queue_add:
+            self._add_menu_action(
+                menu, "Добавить в очередь",
+                lambda t=dict(track): self.add_to_queue(t, False),
+                icon_name="queue-add",
+            )
+        if track.get("source") in ("youtube", "soundcloud"):
+            self._add_menu_action(
+                menu, "Запустить радио по треку",
+                lambda t=dict(track): self.start_radio(t),
+                icon_name="radio",
+            )
+        if track.get("source") != "local":
+            menu.addSeparator()
+            if self.offline_path_for(track):
+                self._add_menu_action(
+                    menu, "Скачано · Открыть папку",
+                    lambda t=dict(track): self.open_download_folder(t),
+                    icon_name="downloaded", accent=True,
+                )
+            else:
+                self._add_menu_action(
+                    menu, "Скачать трек",
+                    lambda t=dict(track): self.download_track(t),
+                    icon_name="download",
+                )
+        artist = self.artist_card_name(track) or str(track.get("artist") or "").strip()
+        has_artist = bool(
+            track.get("source") != "local"
+            and artist
+            and artist not in ("Исполнитель неизвестен", "Unknown artist")
+        )
+        has_web = str(track.get("url", "")).startswith(("https://", "http://"))
+        if has_artist or has_web:
+            menu.addSeparator()
+            if has_artist:
+                self._add_menu_action(
+                    menu, "Найти треки исполнителя",
+                    lambda t=dict(track): self.find_artist(t),
+                    icon_name="artist",
+                )
+            if has_web:
+                self._add_menu_action(
+                    menu, "Открыть на сайте",
+                    lambda t=dict(track): self.open_track_website(t),
+                    icon_name="external",
+                )
 
     def open_result_menu(self, point):
         item = self.source_list.itemAt(point)
@@ -13044,23 +13392,12 @@ class MusicPlayer(QMainWindow):
         if not isinstance(track, dict):
             return
         menu = self.make_context_menu()
-        if track.get("source") != "local":
-            menu.addAction("⬇   Скачать офлайн", lambda t=dict(track): self.download_track(t))
-        menu.addAction("▶   Воспроизвести", lambda t=dict(track): self.add_to_queue(t, True))
-        menu.addAction("＋   Добавить в очередь", lambda t=dict(track): self.add_to_queue(t, False))
-        if track.get("source") in ("youtube", "soundcloud"):
-            menu.addAction("♫   Запустить радио по треку", lambda t=dict(track): self.start_radio(t))
-        artist = track.get("artist", "")
-        if track.get("source") != "local" and artist and artist != "Исполнитель неизвестен":
-            menu.addSeparator()
-            menu.addAction("⌕   Найти треки исполнителя", lambda t=dict(track): self.find_artist(t))
-        if str(track.get("url", "")).startswith(("https://", "http://")):
-            menu.addAction("↗   Открыть на сайте", lambda t=dict(track): self.open_track_website(t))
+        self._populate_track_context_menu(menu, track)
         menu.exec(self.source_list.viewport().mapToGlobal(point))
 
     def find_artist(self, track):
         """Ищем популярные треки по клику на исполнителя."""
-        self.search_artist_name(track.get("artist", ""), track.get("source"))
+        self.search_artist_name(dict(track) if isinstance(track, dict) else track, track.get("source") if isinstance(track, dict) else None)
 
     def open_soundcloud_search_in_browser(self):
         """Запасной вариант, если API SoundCloud не отвечает."""
@@ -13554,19 +13891,50 @@ class MusicPlayer(QMainWindow):
         if not isinstance(index, int) or not 0 <= index < len(self.queue_tracks):
             return
         uid = self.queue_tracks[index].get("queue_id")
-        menu = self.make_context_menu()
-        menu.addAction("▶   Воспроизвести", lambda u=uid: self.play_queue_index(self.index_for_uid(u)))
-        menu.addAction("×   Удалить из очереди", lambda u=uid: self.remove_queue_uid(u))
         queued_track = self.queue_tracks[index]
-        if queued_track.get("source") != "local":
-            menu.addAction("⬇   Скачать офлайн", lambda t=dict(queued_track): self.download_track(t))
+        menu = self.make_context_menu()
+        self._add_menu_action(
+            menu, "Воспроизвести",
+            lambda u=uid: self.play_queue_index(self.index_for_uid(u)),
+            icon_name="play", accent=True,
+        )
         if queued_track.get("source") in ("youtube", "soundcloud"):
-            menu.addAction("♫   Запустить радио по треку", lambda t=dict(queued_track): self.start_radio(t))
+            self._add_menu_action(
+                menu, "Запустить радио по треку",
+                lambda t=dict(queued_track): self.start_radio(t),
+                icon_name="radio",
+            )
+        if queued_track.get("source") != "local":
+            menu.addSeparator()
+            if self.offline_path_for(queued_track):
+                self._add_menu_action(
+                    menu, "Скачано · Открыть папку",
+                    lambda t=dict(queued_track): self.open_download_folder(t),
+                    icon_name="downloaded", accent=True,
+                )
+            else:
+                self._add_menu_action(
+                    menu, "Скачать трек",
+                    lambda t=dict(queued_track): self.download_track(t),
+                    icon_name="download",
+                )
         menu.addSeparator()
-        up = menu.addAction("↑   Переместить выше", lambda u=uid: self.move_queue_index(self.index_for_uid(u), -1))
-        down = menu.addAction("↓   Переместить ниже", lambda u=uid: self.move_queue_index(self.index_for_uid(u), 1))
-        up.setEnabled(index > 0)
-        down.setEnabled(index < len(self.queue_tracks) - 1)
+        self._add_menu_action(
+            menu, "Переместить выше",
+            lambda u=uid: self.move_queue_index(self.index_for_uid(u), -1),
+            icon_name="arrow-up", enabled=(index > 0),
+        )
+        self._add_menu_action(
+            menu, "Переместить ниже",
+            lambda u=uid: self.move_queue_index(self.index_for_uid(u), 1),
+            icon_name="arrow-down", enabled=(index < len(self.queue_tracks) - 1),
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Удалить из очереди",
+            lambda u=uid: self.remove_queue_uid(u),
+            icon_name="remove",
+        )
         menu.exec(self.queue_list.viewport().mapToGlobal(point))
 
     def update_queue_count(self):
