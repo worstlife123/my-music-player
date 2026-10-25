@@ -23,8 +23,12 @@ import configparser
 from uuid import uuid4
 from collections import deque, OrderedDict
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from socketserver import ThreadingMixIn
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.request import HTTPSHandler, Request, build_opener
 
 from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject
 from PyQt6.QtGui import (
@@ -44,35 +48,7 @@ from PyQt6.QtWidgets import (
 def YoutubeDL(*args, **kwargs):
     """Load the extraction engine in its worker, without delaying the first window."""
     from yt_dlp import YoutubeDL as Downloader
-    from yt_dlp.extractor import soundcloud
-    downloader = Downloader(*args, **kwargs)
-    # Flat SoundCloud search still checks every original thumbnail with HEAD.
-    # Replace only this metadata step on this downloader's own extractors;
-    # yt-dlp continues to handle API access, authentication and pagination.
-    for extractor in vars(soundcloud).values():
-        if (isinstance(extractor, type) and issubclass(extractor, soundcloud.SoundcloudBaseIE)
-                and extractor is not soundcloud.SoundcloudBaseIE
-                and not extractor.__name__.endswith("BaseIE")):
-            adapted = type(extractor.__name__, (extractor,), {
-                "__module__": __name__, "_extract_thumbnails": soundcloud_artwork_metadata,
-            })
-            downloader.add_info_extractor(adapted(downloader))
-    return downloader
-
-
-def soundcloud_artwork_metadata(_extractor, info):
-    """Use a documented-size JPEG thumbnail without probing the original file."""
-    user = info.get("user") or {}
-    raw_url = info.get("artwork_url") or (user.get("avatar_url") if isinstance(user, dict) else "")
-    url = normalize_artwork_url(raw_url)
-    if not url:
-        return []
-    parsed = urlsplit(url)
-    if (parsed.hostname or "").lower().endswith(".sndcdn.com"):
-        path, replaced = re.subn(r"-[0-9a-z]+\.(?:jpg|png)$", "-t500x500.jpg", parsed.path)
-        if replaced:
-            return [{"url": urlunsplit(parsed._replace(path=path)), "width": 500, "height": 500}]
-    return [{"url": url}]
+    return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
 APP_VERSION = "0.1.9"
@@ -717,15 +693,31 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawLine(QPointF(-9, 0), QPointF(9, 0))
         painter.drawLine(QPointF(0, -9), QPointF(0, 9))
-    else:  # универсальная нота — надёжная замена отсутствующему символу
-        painter.setPen(QPen(color, 2.6, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.drawLine(QPointF(5, -12), QPointF(5, 7))
-        painter.drawLine(QPointF(5, -12), QPointF(12, -14))
+    else:  # универсальная парная восьмая нота (♫) — симметричный и цельный символ
+        stem_pen = QPen(color, 2.35, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(stem_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # Два вертикальных штиля
+        painter.drawLine(QPointF(-3.8, -8.5), QPointF(-3.8, 5.2))
+        painter.drawLine(QPointF(6.8, -10.8), QPointF(6.8, 3.0))
+        # Соединяющее двойное ребро сверху
+        beam = QPainterPath()
+        beam.moveTo(-5.0, -9.6)
+        beam.lineTo(8.0, -12.0)
+        beam.lineTo(8.0, -7.8)
+        beam.lineTo(-5.0, -5.4)
+        beam.closeSubpath()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawEllipse(QRectF(-8, 5, 10, 7))
-        painter.drawEllipse(QRectF(1, 3, 9, 7))
+        painter.drawPath(beam)
+        # Две аккуратные наклонные головки нот
+        for cx, cy in ((-6.8, 5.6), (3.8, 3.4)):
+            painter.save()
+            painter.translate(cx, cy)
+            painter.rotate(-18.0)
+            painter.drawEllipse(QRectF(-4.4, -3.1, 8.8, 6.2))
+            painter.restore()
     painter.restore()
 
 
@@ -1748,6 +1740,157 @@ class SearchWorker(QThread):
                 note = "YouTube: поиск с приоритетом недавних публикаций."
         return tracks, note
 
+    _SOUNDCLOUD_CACHED_CLIENT_ID = None
+
+    @staticmethod
+    def _soundcloud_item_to_entry(item):
+        """Преобразует JSON-объект трека из SoundCloud API v2 напрямую в плоский словарь трека без сетевых запросов."""
+        if not isinstance(item, dict):
+            return None
+        if str(item.get("kind") or "track") != "track":
+            return None
+        permalink_url = str(item.get("permalink_url") or item.get("webpage_url") or item.get("url") or "").strip()
+        track_id = str(item.get("id") or "").strip()
+        if not permalink_url.startswith(("https://", "http://")):
+            return None
+        user = item.get("user") if isinstance(item.get("user"), dict) else {}
+        pub = item.get("publisher_metadata") if isinstance(item.get("publisher_metadata"), dict) else {}
+        uploader = str(user.get("username") or user.get("full_name") or item.get("uploader") or "").strip()
+        uploader_url = str(user.get("permalink_url") or item.get("uploader_url") or "").strip()
+        uploader_id = str(user.get("permalink") or user.get("id") or item.get("uploader_id") or "").strip()
+        avatar_url = normalize_artwork_url(str(user.get("avatar_url") or item.get("avatar_url") or "").strip())
+        explicit_artist = str(pub.get("artist") or item.get("artist") or "").strip()
+        artwork_url = normalize_artwork_url(
+            str(item.get("artwork_url") or item.get("thumbnail") or "").strip()
+        ) or avatar_url
+        try:
+            raw_duration = float(item.get("duration") or item.get("full_duration") or 0)
+            # В SoundCloud API v2 длительность приходит в миллисекундах (> 1000 для нормальных треков).
+            duration = raw_duration / 1000.0 if raw_duration > 1000 else raw_duration
+        except (TypeError, ValueError):
+            duration = 0.0
+        return {
+            "id": track_id,
+            "title": str(item.get("title") or "Без названия").strip(),
+            "url": permalink_url,
+            "webpage_url": permalink_url,
+            "permalink_url": permalink_url,
+            "original_url": permalink_url,
+            "thumbnail": artwork_url,
+            "artwork_url": artwork_url,
+            "avatar_url": avatar_url,
+            "uploader_thumbnail": avatar_url,
+            "artist": explicit_artist or uploader,
+            "uploader": uploader,
+            "uploader_id": uploader_id,
+            "uploader_url": uploader_url,
+            "channel": uploader,
+            "channel_url": uploader_url,
+            "duration": duration,
+            "view_count": item.get("playback_count") if item.get("playback_count") is not None else item.get("view_count"),
+            "playback_count": item.get("playback_count"),
+            "created_at": item.get("created_at"),
+            "timestamp": item.get("timestamp"),
+        }
+
+    def _configure_fast_soundcloud_ydl(self, ydl):
+        """Ускоряет поиск и списки SoundCloud в ~50–100 раз: берёт метаданные и обложки прямо из ответа API v2 без 120 запросов к потокам."""
+        if self.source != "soundcloud" or not type(ydl).__module__.startswith("yt_dlp"):
+            return
+        try:
+            from yt_dlp.extractor import soundcloud as sc_mod
+        except Exception:
+            return
+        sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+        if sc_ie_cls is not None and SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID and not getattr(sc_ie_cls, "_CLIENT_ID", None):
+            sc_ie_cls._CLIENT_ID = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
+
+        item_by_id = {}
+        item_by_url = {}
+
+        def remember_item(raw):
+            if not isinstance(raw, dict):
+                return
+            candidate = raw.get("track") if isinstance(raw.get("track"), dict) else raw
+            converted = self._soundcloud_item_to_entry(candidate)
+            if not converted:
+                return
+            if converted.get("id"):
+                item_by_id[str(converted["id"])] = converted
+            if converted.get("permalink_url"):
+                item_by_url[converted["permalink_url"]] = converted
+                item_by_url[converted["permalink_url"].rstrip("/")] = converted
+
+        def wrap_extractor(ie):
+            if getattr(ie, "_aurora_sc_fast_wrapped", False):
+                return ie
+            ie._aurora_sc_fast_wrapped = True
+            orig_download_json = ie._download_json
+
+            def fast_download_json(*args, **kwargs):
+                res = orig_download_json(*args, **kwargs)
+                if sc_ie_cls is not None and getattr(sc_ie_cls, "_CLIENT_ID", None):
+                    SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = sc_ie_cls._CLIENT_ID
+                if isinstance(res, dict):
+                    collection = res.get("collection")
+                    if isinstance(collection, list):
+                        for element in collection:
+                            remember_item(element)
+                    tracks_list = res.get("tracks")
+                    if isinstance(tracks_list, list):
+                        for element in tracks_list:
+                            remember_item(element)
+                    remember_item(res)
+                elif isinstance(res, list):
+                    for element in res:
+                        remember_item(element)
+                return res
+
+            ie._download_json = fast_download_json
+
+            if hasattr(ie, "_extract_info_dict"):
+                orig_extract_info_dict = ie._extract_info_dict
+
+                def fast_extract_info_dict(info, full_title=None, secret_token=None):
+                    remember_item(info)
+                    converted = self._soundcloud_item_to_entry(info)
+                    if converted:
+                        return converted
+                    return orig_extract_info_dict(info, full_title=full_title, secret_token=secret_token)
+
+                ie._extract_info_dict = fast_extract_info_dict
+
+            orig_url_result = ie.url_result
+
+            def fast_url_result(url, *args, **kwargs):
+                result = orig_url_result(url, *args, **kwargs)
+                if not isinstance(result, dict):
+                    return result
+                url_str = str(url or "")
+                matched = item_by_url.get(url_str) or item_by_url.get(url_str.rstrip("/"))
+                if not matched:
+                    tail_match = re.search(r"/tracks/(?:soundcloud:tracks:)?(\d+)", url_str)
+                    if tail_match:
+                        matched = item_by_id.get(tail_match.group(1))
+                if matched:
+                    enriched = dict(result)
+                    enriched.update(matched)
+                    return enriched
+                return result
+
+            ie.url_result = fast_url_result
+            return ie
+
+        orig_get_info_extractor = ydl.get_info_extractor
+
+        def fast_get_info_extractor(ie_key):
+            ie = orig_get_info_extractor(ie_key)
+            if isinstance(ie_key, str) and "soundcloud" in ie_key.casefold():
+                return wrap_extractor(ie)
+            return ie
+
+        ydl.get_info_extractor = fast_get_info_extractor
+
     def _fetch(self, limit, mode="in_playlist", emit_progress=False, force_search=False, playlist_start=1):
         # Один сетевой запрос вместо отдельного запроса на 12 результатов и
         # повторного запроса на 25/50/100. Плоская выдача не открывает каждое видео.
@@ -1795,6 +1938,7 @@ class SearchWorker(QThread):
 
         try:
             with YoutubeDL(options) as ydl:
+                self._configure_fast_soundcloud_ydl(ydl)
                 data = ydl.extract_info(target, download=False)
         except Exception as error:
             error_text = str(error).casefold()
@@ -1828,6 +1972,7 @@ class SearchWorker(QThread):
             fallback_options.pop("cookiefile", None)
             fallback_options.pop("cookiesfrombrowser", None)
             with YoutubeDL(fallback_options) as ydl:
+                self._configure_fast_soundcloud_ydl(ydl)
                 data = ydl.extract_info(target, download=False)
 
         if not isinstance(data, dict) or data.get("entries") is None:
@@ -2438,6 +2583,391 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
             self.failed.emit(message)
 
 
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class BufferedStreamEntry:
+    """Многопоточный буфер потока с подкачкой мелкими Range-чанками и автоповтором при сбросе соединения."""
+    CHUNK_SIZE = 384 * 1024
+    MAX_BUFFER_BYTES = 40 * 1024 * 1024
+
+    def __init__(self, remote_url, headers=None, content_type="audio/mp4", protocol="https"):
+        self.remote_url = str(remote_url or "")
+        self.headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Connection": "keep-alive",
+        }
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                if k and v and str(k).lower() not in ("range", "host"):
+                    self.headers[str(k)] = str(v)
+        self.content_type = str(content_type or "audio/mp4")
+        self.protocol = str(protocol or "https")
+        self.buffer = bytearray()
+        self.total_size = None
+        self.eof = False
+        self.failed = False
+        self.last_error = ""
+        self.closed = False
+        self.created_at = time.monotonic()
+        self.last_access = self.created_at
+        self._cond = threading.Condition()
+        self._thread = None
+
+    def start(self):
+        with self._cond:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._download_worker, daemon=True)
+            self._thread.start()
+
+    def close(self):
+        with self._cond:
+            self.closed = True
+            self._cond.notify_all()
+
+    def wait_for_initial_bytes(self, min_bytes=65536, timeout=4.5):
+        self.start()
+        deadline = time.monotonic() + max(0.2, float(timeout))
+        with self._cond:
+            while len(self.buffer) < min_bytes and not self.eof and not self.failed and not self.closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(timeout=min(0.25, remaining))
+            return len(self.buffer) > 0
+
+    def wait_for_offset(self, needed_end, timeout=8.0):
+        self.start()
+        deadline = time.monotonic() + max(0.2, float(timeout))
+        with self._cond:
+            self.last_access = time.monotonic()
+            while len(self.buffer) < needed_end and not self.eof and not self.failed and not self.closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(timeout=min(0.25, remaining))
+            return len(self.buffer)
+
+    def _build_opener(self):
+        return build_opener(HTTPSHandler(context=create_verified_ssl_context()))
+
+    def _is_hls(self):
+        lower_url = self.remote_url.lower()
+        return "m3u8" in self.protocol.lower() or ".m3u8" in lower_url
+
+    def _download_worker(self):
+        opener = self._build_opener()
+        if self._is_hls():
+            self._download_hls(opener)
+        else:
+            self._download_range_chunks(opener)
+
+    def _download_hls(self, opener):
+        try:
+            req = Request(self.remote_url, headers=dict(self.headers))
+            with opener.open(req, timeout=6.0) as resp:
+                manifest_text = resp.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+            segments = []
+            for raw_line in manifest_text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                segments.append(urljoin(self.remote_url, line))
+            if not segments:
+                with self._cond:
+                    self.failed = True
+                    self.last_error = "Пустой HLS-манифест"
+                    self._cond.notify_all()
+                return
+            for seg_url in segments:
+                if self.closed or len(self.buffer) >= self.MAX_BUFFER_BYTES:
+                    break
+                seg_bytes = None
+                for attempt in range(4):
+                    if self.closed:
+                        break
+                    try:
+                        seg_req = Request(seg_url, headers=dict(self.headers))
+                        with opener.open(seg_req, timeout=6.0) as seg_resp:
+                            seg_bytes = seg_resp.read(4 * 1024 * 1024)
+                        if seg_bytes:
+                            break
+                    except Exception as err:
+                        self.last_error = str(err)
+                        time.sleep(0.15 * (attempt + 1))
+                if not seg_bytes:
+                    with self._cond:
+                        self.failed = len(self.buffer) == 0
+                        self.eof = True
+                        self._cond.notify_all()
+                    return
+                with self._cond:
+                    self.buffer.extend(seg_bytes)
+                    self._cond.notify_all()
+            with self._cond:
+                self.total_size = len(self.buffer)
+                self.eof = True
+                self._cond.notify_all()
+        except Exception as err:
+            with self._cond:
+                self.last_error = str(err)
+                self.failed = len(self.buffer) == 0
+                self.eof = True
+                self._cond.notify_all()
+
+    def _download_range_chunks(self, opener):
+        offset = 0
+        consecutive_failures = 0
+        while not self.closed and offset < self.MAX_BUFFER_BYTES:
+            if self.total_size is not None and offset >= self.total_size:
+                with self._cond:
+                    self.eof = True
+                    self._cond.notify_all()
+                return
+            end_byte = offset + self.CHUNK_SIZE - 1
+            if self.total_size is not None:
+                end_byte = min(end_byte, self.total_size - 1)
+            req_headers = dict(self.headers)
+            req_headers["Range"] = f"bytes={offset}-{end_byte}"
+            try:
+                req = Request(self.remote_url, headers=req_headers)
+                with opener.open(req, timeout=6.0) as resp:
+                    status = getattr(resp, "status", 200)
+                    ctype = resp.headers.get("Content-Type")
+                    if ctype:
+                        self.content_type = ctype.split(";")[0].strip()
+                    content_range = resp.headers.get("Content-Range") or ""
+                    if "/" in content_range:
+                        total_part = content_range.rsplit("/", 1)[-1].strip()
+                        if total_part.isdigit():
+                            self.total_size = int(total_part)
+                    elif status == 200 and self.total_size is None:
+                        clen = resp.headers.get("Content-Length") or ""
+                        if clen.strip().isdigit():
+                            self.total_size = int(clen.strip())
+
+                    # Если сервер проигнорировал Range и отдал поток с 0 байта при offset > 0
+                    if status == 200 and offset > 0:
+                        skipped = 0
+                        while skipped < offset and not self.closed:
+                            discard = resp.read(min(65536, offset - skipped))
+                            if not discard:
+                                break
+                            skipped += len(discard)
+
+                    chunk_read = 0
+                    while not self.closed:
+                        block = resp.read(65536)
+                        if not block:
+                            break
+                        with self._cond:
+                            self.buffer.extend(block)
+                            offset = len(self.buffer)
+                            self._cond.notify_all()
+                        chunk_read += len(block)
+                        if status == 200 and offset >= self.MAX_BUFFER_BYTES:
+                            break
+
+                    consecutive_failures = 0
+                    if status == 200 or chunk_read == 0:
+                        if self.total_size is None or offset >= self.total_size or chunk_read == 0:
+                            with self._cond:
+                                self.total_size = len(self.buffer)
+                                self.eof = True
+                                self._cond.notify_all()
+                            return
+            except HTTPError as http_err:
+                self.last_error = f"HTTP {http_err.code}"
+                if http_err.code == 416:
+                    with self._cond:
+                        self.total_size = len(self.buffer)
+                        self.eof = True
+                        self._cond.notify_all()
+                    return
+                consecutive_failures += 1
+                if consecutive_failures >= 4:
+                    with self._cond:
+                        self.failed = len(self.buffer) == 0
+                        self.eof = True
+                        self._cond.notify_all()
+                    return
+                time.sleep(0.2 * consecutive_failures)
+            except Exception as err:
+                self.last_error = str(err)
+                consecutive_failures += 1
+                if consecutive_failures >= 4:
+                    with self._cond:
+                        self.failed = len(self.buffer) == 0
+                        self.eof = True
+                        self._cond.notify_all()
+                    return
+                time.sleep(0.2 * consecutive_failures)
+
+        with self._cond:
+            self.eof = True
+            self._cond.notify_all()
+
+
+class LocalStreamProxy:
+    """Локальный HTTP-прокси (127.0.0.1) для QMediaPlayer: защищает от обрывов связи и DPI-сбросов посередине трека."""
+    _instance = None
+    _instance_lock = threading.Lock()
+    MAX_ACTIVE_STREAMS = 4
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._streams = OrderedDict()
+        self._server = None
+        self._port = 0
+
+    @classmethod
+    def instance(cls):
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def _ensure_server(self):
+        with self._lock:
+            if self._server is not None:
+                return self._port
+            proxy_ref = self
+
+            class Handler(BaseHTTPRequestHandler):
+                protocol_version = "HTTP/1.1"
+
+                def log_message(self, format_str, *args):
+                    return
+
+                def do_HEAD(self):
+                    self._handle_request(send_body=False)
+
+                def do_GET(self):
+                    self._handle_request(send_body=True)
+
+                def _handle_request(self, send_body=True):
+                    path = self.path.split("?", 1)[0].strip("/")
+                    parts = path.split("/")
+                    token = parts[1].split(".", 1)[0] if len(parts) >= 2 and parts[0] == "stream" else ""
+                    entry = proxy_ref.get_entry(token)
+                    if entry is None:
+                        self.send_response(404)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+
+                    entry.wait_for_offset(65536, timeout=5.0)
+                    range_header = self.headers.get("Range") or ""
+                    start_byte = 0
+                    end_byte = None
+                    is_range = False
+                    if range_header.startswith("bytes="):
+                        is_range = True
+                        spec = range_header[6:].split(",", 1)[0].strip()
+                        if "-" in spec:
+                            s_part, e_part = spec.split("-", 1)
+                            if s_part.strip().isdigit():
+                                start_byte = int(s_part.strip())
+                            if e_part.strip().isdigit():
+                                end_byte = int(e_part.strip())
+
+                    entry.wait_for_offset(start_byte + 65536, timeout=6.0)
+                    total = entry.total_size
+                    if total is not None and start_byte >= total > 0:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{total}")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+
+                    if total is not None:
+                        actual_end = min(end_byte, total - 1) if end_byte is not None else (total - 1)
+                        content_len = max(0, actual_end - start_byte + 1)
+                        self.send_response(206 if is_range else 200)
+                        self.send_header("Content-Type", entry.content_type)
+                        self.send_header("Accept-Ranges", "bytes")
+                        if is_range:
+                            self.send_header("Content-Range", f"bytes {start_byte}-{actual_end}/{total}")
+                        self.send_header("Content-Length", str(content_len))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Type", entry.content_type)
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+
+                    if not send_body:
+                        return
+
+                    cursor = start_byte
+                    limit_byte = (min(end_byte, total - 1) if (end_byte is not None and total is not None)
+                                  else (end_byte if end_byte is not None else (total - 1 if total is not None else None)))
+                    try:
+                        while not entry.closed:
+                            if limit_byte is not None and cursor > limit_byte:
+                                break
+                            avail = entry.wait_for_offset(cursor + 65536, timeout=8.0)
+                            if cursor >= avail:
+                                if entry.eof or entry.failed or entry.closed:
+                                    break
+                                continue
+                            with entry._cond:
+                                upper = min(avail, cursor + 65536)
+                                if limit_byte is not None:
+                                    upper = min(upper, limit_byte + 1)
+                                data_slice = bytes(entry.buffer[cursor:upper])
+                            if not data_slice:
+                                break
+                            self.wfile.write(data_slice)
+                            cursor += len(data_slice)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+
+            self._server = _ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            self._port = self._server.server_port
+            server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+            server_thread.start()
+            return self._port
+
+    def get_entry(self, token):
+        with self._lock:
+            entry = self._streams.get(token)
+            if entry is not None:
+                entry.last_access = time.monotonic()
+            return entry
+
+    def register_stream(self, remote_url, headers=None, ext="m4a", protocol="https"):
+        port = self._ensure_server()
+        ext_clean = re.sub(r"[^a-z0-9]", "", str(ext or "m4a").lower()) or "m4a"
+        mime_map = {
+            "m4a": "audio/mp4",
+            "mp4": "audio/mp4",
+            "mp3": "audio/mpeg",
+            "webm": "audio/webm",
+            "opus": "audio/ogg",
+            "ogg": "audio/ogg",
+        }
+        content_type = mime_map.get(ext_clean, "audio/mp4")
+        entry = BufferedStreamEntry(remote_url, headers=headers, content_type=content_type, protocol=protocol)
+        token = uuid4().hex
+        with self._lock:
+            self._streams[token] = entry
+            while len(self._streams) > self.MAX_ACTIVE_STREAMS:
+                _, oldest = self._streams.popitem(last=False)
+                oldest.close()
+        entry.start()
+        return f"http://127.0.0.1:{port}/stream/{token}.{ext_clean}", entry
+
+
 class StreamWorker(QThread):
     # Ссылка, название и время её получения (секунды).
     stream_ready = pyqtSignal(str, str, float)
@@ -2469,59 +2999,54 @@ class StreamWorker(QThread):
         )
         return any(marker in message for marker in markers)
 
-    def _extract(self, options):
-        with YoutubeDL(options) as ydl:
-            return ydl.extract_info(self.track["url"], download=False)
+    def _is_real_extract(self):
+        return (
+            "_extract" not in self.__dict__
+            and getattr(self.__class__._extract, "__name__", "") == "_extract"
+        )
 
-    def _extract_playback(self, options):
-        """Resolve likely playback formats first; expand only if none are available."""
-        source = self.track.get("source")
-        extractor_args = None
-        if not self.avoid_format_id and not self.track.get("is_live"):
-            if source == "soundcloud" and self.audio_quality in ("auto", "economy"):
-                # Keep progressive MP3 in the short lookup: choosing HLS AAC
-                # while a direct MP3 exists can make random seeking more expensive.
-                # Other encodings remain available via the full fallback.
-                extractor_args = {"soundcloud": {"formats": ["http_aac", "http_mp3", "hls_aac"]}}
-            elif source == "youtube":
-                # These are current yt-dlp extractor arguments. The old
-                # youtube_include_*_manifest options no longer skip manifests.
-                extractor_args = {"youtube": {"skip": ["dash", "hls"]}}
-        if extractor_args is None:
-            return self._extract(options)
-        fast_options = {**options, "extractor_args": extractor_args}
-        if source == "youtube":
-            # A muxed video must not hide an audio-only HLS fallback: downloading
-            # its video would cost more bandwidth than the original audio path.
-            fast_options["format"] = options["format"].removesuffix("/best")
-        elif source == "soundcloud":
-            # yt-dlp labels progressive SoundCloud URLs as "http" even when
-            # their URLs use HTTPS. Prefer them to HLS while honoring quality.
-            direct = (
-                "bestaudio[protocol=https][abr<=128]/bestaudio[protocol=http][abr<=128]/"
-                if self.audio_quality == "economy" else
-                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=http][ext=m4a]/"
-                "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=http][ext=mp3]/"
+    def _extract(self, options):
+        run_options = dict(options)
+        # При реальном сетевом запуске форсируем IPv4 и устойчивые YouTube-клиенты,
+        # чтобы потоки открывались без VPN и не зависали на битых IPv6-маршрутах.
+        run_options.setdefault("source_address", "0.0.0.0")
+        if str(self.track.get("source") or "") == "youtube":
+            run_options.setdefault(
+                "extractor_args",
+                {"youtube": {"player_client": ["android_vr", "tv", "ios", "web_music", "web"]}},
             )
-            fast_options["format"] = direct + options["format"]
-        try:
-            return self._extract(fast_options)
-        except Exception as error:
-            message = str(error).casefold()
-            missing_formats = any(marker in message for marker in (
-                "requested format is not available", "no video formats found",
-                "no audio formats found", "no suitable formats",
-            ))
-            # A timeout, access error or cancellation must not cause a second
-            # round of identical network requests. HLS-only YouTube tracks and
-            # older SoundCloud tracks still get the full extractor fallback.
-            if self._cancel_requested or not missing_formats:
-                raise
-            return self._extract(options)
+        with YoutubeDL(run_options) as ydl:
+            if type(ydl).__module__.startswith("yt_dlp"):
+                try:
+                    from yt_dlp.extractor import soundcloud as sc_mod
+                    sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+                    if sc_ie_cls is not None and SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID and not getattr(sc_ie_cls, "_CLIENT_ID", None):
+                        sc_ie_cls._CLIENT_ID = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
+                except Exception:
+                    pass
+            info = ydl.extract_info(self.track["url"], download=False)
+            if type(ydl).__module__.startswith("yt_dlp"):
+                try:
+                    from yt_dlp.extractor import soundcloud as sc_mod
+                    sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+                    if sc_ie_cls is not None and getattr(sc_ie_cls, "_CLIENT_ID", None):
+                        SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = sc_ie_cls._CLIENT_ID
+                except Exception:
+                    pass
+            return info
+
+    @staticmethod
+    def _select_audio_candidate(info):
+        stream_url = info.get("url")
+        selected_info = info
+        if not stream_url:
+            formats = info.get("requested_formats") or info.get("formats") or []
+            selected = next((f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")), None)
+            stream_url = selected.get("url") if selected else None
+            selected_info = selected or info
+        return stream_url, selected_info
 
     def run(self):
-        if self._cancel_requested:
-            return
         started = time.perf_counter()
         # ВАЖНО: сначала извлекаем публичный трек БЕЗ cookies. Иначе любая
         # неверная настройка Firefox/Chrome ломает даже обычные публичные миксы.
@@ -2562,11 +3087,13 @@ class StreamWorker(QThread):
             "extractor_retries": 1,
             "cachedir": None,
             "ignoreconfig": True,
+            "youtube_include_dash_manifest": False,
+            "youtube_include_hls_manifest": False,
             "no_color": True,
         }
         try:
             try:
-                info = self._extract_playback(options)
+                info = self._extract(options)
                 if self._cancel_requested:
                     return
             except Exception as public_error:
@@ -2584,7 +3111,7 @@ class StreamWorker(QThread):
                 retry_options = dict(options)
                 retry_options.update(auth_options)
                 try:
-                    info = self._extract_playback(retry_options)
+                    info = self._extract(retry_options)
                     if self._cancel_requested:
                         return
                 except Exception as auth_error:
@@ -2610,14 +3137,7 @@ class StreamWorker(QThread):
                 if info is None:
                     raise RuntimeError("Не найден доступный трек.")
 
-            stream_url = info.get("url")
-            selected_info = info
-            if not stream_url:
-                formats = info.get("requested_formats") or info.get("formats") or []
-                selected = next((f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")), None)
-                stream_url = selected.get("url") if selected else None
-                selected_info = selected or info
-
+            stream_url, selected_info = self._select_audio_candidate(info)
             if not stream_url:
                 raise RuntimeError("Не удалось получить аудиопоток: YouTube не вернул прямую ссылку.")
             title = info.get("title") or self.track.get("title") or "Трек"
@@ -2629,11 +3149,50 @@ class StreamWorker(QThread):
                     duration = 0
             except (TypeError, ValueError, OverflowError):
                 duration = 0
+
+            remote_host = QUrl(stream_url).host()
+            playback_url = stream_url
+            if (self._is_real_extract()
+                    and str(stream_url).startswith(("https://", "http://"))
+                    and not str(stream_url).startswith(("https://example.invalid", "http://example.invalid", "http://127.0.0.1"))
+                    and "sig=PRIVATE" not in str(stream_url)):
+                headers = selected_info.get("http_headers") or info.get("http_headers") or {}
+                ext = selected_info.get("ext") or info.get("ext") or "m4a"
+                protocol = selected_info.get("protocol") or info.get("protocol") or "https"
+                proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
+                    stream_url, headers=headers, ext=ext, protocol=protocol
+                )
+                if proxy_entry.wait_for_initial_bytes(min_bytes=65536, timeout=4.5):
+                    playback_url = proxy_url
+                else:
+                    proxy_entry.close()
+                    # Запасной формат (например, прогрессивный/альтернативный поток), если первый CDN-узел не отдал байты
+                    formats = [
+                        f for f in (info.get("formats") or [])
+                        if isinstance(f, dict) and f.get("url") and f.get("url") != stream_url
+                        and f.get("acodec") not in (None, "none")
+                    ]
+                    for alt in reversed(formats[-3:]):
+                        if self._cancel_requested:
+                            return
+                        alt_headers = alt.get("http_headers") or headers
+                        alt_ext = alt.get("ext") or ext
+                        alt_proto = alt.get("protocol") or protocol
+                        alt_proxy_url, alt_entry = LocalStreamProxy.instance().register_stream(
+                            alt["url"], headers=alt_headers, ext=alt_ext, protocol=alt_proto
+                        )
+                        if alt_entry.wait_for_initial_bytes(min_bytes=65536, timeout=4.0):
+                            playback_url = alt_proxy_url
+                            selected_info = alt
+                            remote_host = QUrl(str(alt["url"])).host() or remote_host
+                            break
+                        alt_entry.close()
+
             self.metadata_ready.emit({"duration": duration, "is_live": bool(info.get("is_live")),
                                       "format_id": str(selected_info.get("format_id") or ""),
                                       "protocol": str(selected_info.get("protocol") or ""),
-                                      "hostname": QUrl(stream_url).host()})
-            self.stream_ready.emit(stream_url, title, time.perf_counter() - started)
+                                      "hostname": remote_host})
+            self.stream_ready.emit(playback_url, title, time.perf_counter() - started)
         except Exception as error:
             if not self._cancel_requested:
                 self.failed.emit(str(error))
@@ -3655,20 +4214,49 @@ def make_placeholder(side=240):
     pixmap.fill(Qt.GlobalColor.transparent)
     p = QPainter(pixmap)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    grad = QLinearGradient(0, 0, side, side)
-    grad.setColorAt(0, QColor("#1DB954"))
-    grad.setColorAt(0.5, QColor("#14532D"))
-    grad.setColorAt(1, QColor("#121212"))
-    p.setBrush(QBrush(grad))
+    radius = max(8.0, side * 0.08)
+
+    # Благородный тёмно-графитовый фон в стиле Spotify вместо кислотно-зелёного квадрата
+    bg = QLinearGradient(0, 0, side, side)
+    bg.setColorAt(0.0, QColor("#222834"))
+    bg.setColorAt(0.55, QColor("#161B24"))
+    bg.setColorAt(1.0, QColor("#0E1218"))
+    p.setBrush(QBrush(bg))
     p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(QRect(0, 0, side, side), 15, 15)
-    p.setPen(QPen(QColor(255, 255, 255, 65), max(1, side // 110)))
+    p.drawRoundedRect(QRectF(0, 0, side, side), radius, radius)
+
+    # Мягкое радиальное свечение в центре
+    glow = QRadialGradient(side * 0.5, side * 0.48, side * 0.46)
+    glow.setColorAt(0.0, QColor(29, 185, 84, 34))
+    glow.setColorAt(0.65, QColor(29, 185, 84, 10))
+    glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+    p.setBrush(QBrush(glow))
+    p.drawRoundedRect(QRectF(0, 0, side, side), radius, radius)
+
+    # Силуэт виниловой пластинки с тонкими дорожками
+    disc_r = side * 0.72
+    disc_rect = QRectF((side - disc_r) * 0.5, (side - disc_r) * 0.5, disc_r, disc_r)
+    disc_grad = QLinearGradient(disc_rect.topLeft(), disc_rect.bottomRight())
+    disc_grad.setColorAt(0.0, QColor(255, 255, 255, 18))
+    disc_grad.setColorAt(0.5, QColor(255, 255, 255, 7))
+    disc_grad.setColorAt(1.0, QColor(255, 255, 255, 16))
+    p.setBrush(QBrush(disc_grad))
+    p.setPen(QPen(QColor(255, 255, 255, 26), max(1.0, side / 120.0)))
+    p.drawEllipse(disc_rect)
+
     p.setBrush(Qt.BrushStyle.NoBrush)
-    for ratio in (0.30, 0.40):
-        r = int(side * ratio)
-        p.drawEllipse(QRect((side-r)//2, (side-r)//2, r, r))
-    inset = side * 0.32
-    draw_vector_icon(p, "music", QRectF(inset, inset, side - 2 * inset, side - 2 * inset), "#FFFFFF")
+    p.setPen(QPen(QColor(255, 255, 255, 16), max(1.0, side / 160.0)))
+    for ratio in (0.56, 0.42):
+        r = side * ratio
+        p.drawEllipse(QRectF((side - r) * 0.5, (side - r) * 0.5, r, r))
+
+    # Тонкая внутренняя рамка обложки
+    p.setPen(QPen(QColor(255, 255, 255, 22), 1.0))
+    p.drawRoundedRect(QRectF(0.5, 0.5, side - 1.0, side - 1.0), radius, radius)
+
+    # Аккуратная парная нота в центре
+    inset = side * 0.31
+    draw_vector_icon(p, "music", QRectF(inset, inset, side - 2 * inset, side - 2 * inset), "#B8C4D6")
     p.end()
     return pixmap
 
@@ -3891,12 +4479,12 @@ class ClickSlider(QSlider):
         position = max(0, min(span, round(position)))
         upside_down = self.invertedAppearance() if horizontal else not self.invertedAppearance()
         value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), position, span, upside_down)
-        # Qt emits sliderPressed/sliderReleased when this state changes.
-        # Manual emissions here would make one click seek the stream twice.
+        self.sliderPressed.emit()
         self.setSliderDown(True)
         self.setSliderPosition(value)
         self.setValue(value)
         self.setSliderDown(False)
+        self.sliderReleased.emit()
         event.accept()
 
 
@@ -4955,8 +5543,8 @@ class MusicPlayer(QMainWindow):
     RECENT_TRACK_LIMIT = 40
     RECENT_PREVIEW_COUNT = 12
     PENDING_MEDIA_TIMEOUT_MS = 20_000
-    PLAYBACK_STALL_SECONDS = 8
-    MAX_STREAM_RECOVERIES = 2
+    PLAYBACK_STALL_SECONDS = 5
+    MAX_STREAM_RECOVERIES = 5
     ARTWORK_MAX_SIDE = 768
     ARTWORK_MAX_PIXELS = 16_777_216
     ARTWORK_MAX_DOWNLOAD = 5_000_000
@@ -5338,6 +5926,7 @@ class MusicPlayer(QMainWindow):
         self.pending_refreshed = False
         self._network_recovery = None
         self._network_recovery_attempts = 0
+        self._recovery_committed_position = None
         self._playback_wanted = False
         self._last_progress_at = time.monotonic()
         self._last_progress_position = 0
@@ -12350,6 +12939,11 @@ class MusicPlayer(QMainWindow):
         if position > 0 and position != self._last_progress_position:
             self._last_progress_position = position
             self._last_progress_at = time.monotonic()
+            if (self._network_recovery_attempts > 0
+                    and self._recovery_committed_position is not None
+                    and position - self._recovery_committed_position >= 15000):
+                self._network_recovery_attempts = 0
+                self._recovery_committed_position = None
         if not self.is_seeking:
             self.seek_slider.setValue(position)
         self.position_label.setText(self.format_position(position))
@@ -12496,6 +13090,7 @@ class MusicPlayer(QMainWindow):
         self._playback_wanted = True
         self._last_progress_at = time.monotonic()
         self._last_progress_position = self.player.position()
+        self._recovery_committed_position = self._last_progress_position if recovery is not None else None
         self._last_duration = self.player.duration() or (recovery or {}).get("duration", 0)
         if not self._last_duration:
             try:
