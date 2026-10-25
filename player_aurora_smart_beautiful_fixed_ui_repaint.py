@@ -1506,7 +1506,10 @@ class SearchWorker(QThread):
     def __init__(self, query, source, sort_mode, limit, parent=None,
                  direct_url=None, cookie_file=None, cookies_from_browser=None,
                  cache_enabled=True, paginate_all=False, max_total=10000,
-                 artist_filter=None, artist_catalog=False):
+                 artist_filter=None, artist_catalog=False,
+                 radio_seed_track=None, radio_excluded_keys=None,
+                 radio_excluded_signatures=None, radio_recent_keys=None,
+                 radio_round=0, radio_artist_context=None):
         super().__init__(parent)
         self.query = str(query or "").strip()
         self.source = source
@@ -1515,7 +1518,13 @@ class SearchWorker(QThread):
         self.direct_url = str(direct_url or "").strip()
         self.cookie_file = str(cookie_file or "").strip()
         self.cookies_from_browser = str(cookies_from_browser or "").strip()
-        self.cache_enabled = bool(cache_enabled) and not bool(self.direct_url)
+        self.radio_seed_track = dict(radio_seed_track) if isinstance(radio_seed_track, dict) else None
+        self.radio_excluded_keys = set(radio_excluded_keys or ())
+        self.radio_excluded_signatures = set(radio_excluded_signatures or ())
+        self.radio_recent_keys = set(radio_recent_keys or ())
+        self.radio_round = max(0, int(radio_round or 0))
+        self.radio_artist_context = str(radio_artist_context or "").strip()
+        self.cache_enabled = bool(cache_enabled) and not bool(self.direct_url) and self.radio_seed_track is None
         self.paginate_all = bool(paginate_all)
         self.max_total = max(self.limit, int(max_total or 10000))
         self.artist_filter = str(artist_filter or "").strip()
@@ -2447,12 +2456,515 @@ class SearchWorker(QThread):
         elif not self._cancel_requested:
             self.results_ready.emit([], f"__SC_LIKES_DONE__:{total}")
 
+    @staticmethod
+    def _clean_radio_text(value):
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return ""
+        lowered = text.casefold()
+        placeholders = {
+            "исполнитель неизвестен",
+            "без названия",
+            "неизвестный исполнитель",
+            "выбранный трек",
+            "unknown artist",
+            "unknown",
+            "untitled",
+            "track",
+        }
+        if lowered in placeholders or lowered.isdigit():
+            return ""
+        return text
+
+    @classmethod
+    def _radio_song_signature(cls, track):
+        """Строит каноническую сигнатуру (artist_norm, title_norm) для отсечения перезаливов одной и той же песни."""
+        if not isinstance(track, dict):
+            return ("", "")
+        raw_title = cls._clean_radio_text(track.get("title"))
+        raw_artist = cls._clean_radio_text(
+            track.get("artist_display") or track.get("artist")
+            or track.get("uploader") or track.get("channel") or track.get("creator")
+        )
+        cleaned_title = unicodedata.normalize("NFKC", raw_title)
+        noise_pattern = (
+            r"[\(\[\{][^\)\]\}]*\b(?:"
+            r"official\s*(?:music\s*)?(?:video|audio|lyric\s*video|visualizer)?|"
+            r"music\s*video|lyric\s*video|lyrics?|audio|visualizer|live|hd|hq|4k|"
+            r"remaster(?:ed)?|slowed(?:\s*\+\s*reverb)?|reverb|sped\s*up|speed\s*up|"
+            r"nightcore|bass\s*boosted|instrumental|karaoke|cover|ost|"
+            r"клип|официальн\w*\s*(?:видео|аудио|клип)|текст(?:\s*песни)?|премьера|"
+            r"prod\.?\s*by[^\)\]\}]*"
+            r")\b[^\)\]\}]*[\)\]\}]"
+        )
+        cleaned_title = re.sub(noise_pattern, " ", cleaned_title, flags=re.IGNORECASE)
+        cleaned_title = re.sub(
+            r"\b(?:official\s*(?:music\s*)?(?:video|audio)|lyric\s*video|lyrics|visualizer|"
+            r"slowed(?:\s*\+\s*reverb)?|sped\s*up|speed\s*up|nightcore|bass\s*boosted|"
+            r"prod\.?\s*by\s+\S+)\b",
+            " ",
+            cleaned_title,
+            flags=re.IGNORECASE,
+        )
+        cleaned_title = " ".join(cleaned_title.split()).strip(" -–—|:")
+        artist_part = raw_artist
+        title_part = cleaned_title
+        if re.search(r"\s+[-–—]\s+", cleaned_title):
+            left, right = re.split(r"\s+[-–—]\s+", cleaned_title, maxsplit=1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                left_norm = cls._normalize_artist_name(left)
+                artist_norm = cls._normalize_artist_name(raw_artist)
+                if not artist_norm or left_norm == artist_norm or left_norm in artist_norm or artist_norm in left_norm:
+                    artist_part = left
+                    title_part = right
+                else:
+                    # В YouTube и SoundCloud название вида «Artist - Song» у стороннего канала-загрузчика
+                    artist_part = left
+                    title_part = right
+        title_part = re.sub(r"\b(?:feat(?:uring)?\.?|ft\.?)\s+.*$", " ", title_part, flags=re.IGNORECASE)
+        artist_parts = cls._artist_credit_parts(artist_part)
+        primary_artist = artist_parts[0] if artist_parts else artist_part
+        artist_sig = cls._normalize_artist_name(primary_artist)
+        title_sig = cls._normalize_artist_name(title_part)
+        return (artist_sig, title_sig)
+
+    @staticmethod
+    def _extract_soundcloud_slug_parts(url):
+        try:
+            parsed = urlsplit(str(url or "").strip())
+        except Exception:
+            return ("", "", "")
+        host = (parsed.netloc or "").casefold()
+        if "soundcloud.com" not in host or "api" in host:
+            return ("", "", "")
+        parts = [p for p in (parsed.path or "").split("/") if p]
+        if len(parts) < 2:
+            return ("", "", "")
+        if parts[0].casefold() in ("discover", "charts", "search", "you", "stations", "stream"):
+            return ("", "", "")
+        if parts[1].casefold() in ("sets", "likes", "tracks", "albums", "reposts", "recommended"):
+            return ("", "", "")
+        permalink = f"https://soundcloud.com/{parts[0]}/{parts[1]}"
+        user_guess = parts[0].replace("-", " ").replace("_", " ").strip()
+        title_guess = parts[1].replace("-", " ").replace("_", " ").strip()
+        return (permalink, user_guess, title_guess)
+
+    def _filter_and_diversify_radio_tracks(self, candidate_groups, seed_track):
+        """Отсекает дубликаты, перезаливы исходного трека, длинные компиляции и перемешивает выдачу."""
+        seed_url = str((seed_track or {}).get("url") or "").strip()
+        seed_key = f"{self.source}|{seed_url}" if seed_url else ""
+        seed_vid = YouTubeRatingWorker._video_id(seed_track or {}) if self.source == "youtube" else ""
+        seed_sig = self._radio_song_signature(seed_track or {})
+        seed_artist_sig, seed_title_sig = seed_sig
+        try:
+            seed_duration = float((seed_track or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            seed_duration = 0.0
+        max_allowed_duration = max(1200.0, seed_duration * 2.5) if seed_duration > 0 else 1200.0
+
+        seen_keys = set(self.radio_excluded_keys)
+        if seed_key:
+            seen_keys.add(seed_key)
+        if seed_vid:
+            seen_keys.add(seed_vid)
+            seen_keys.add(f"youtube|https://www.youtube.com/watch?v={seed_vid}")
+            seen_keys.add(f"youtube|https://music.youtube.com/watch?v={seed_vid}")
+
+        seen_sigs = set(self.radio_excluded_signatures)
+        if seed_title_sig:
+            seen_sigs.add(seed_sig)
+        seen_titles = {seed_title_sig} if len(seed_title_sig) >= 3 else set()
+        for existing_sig in self.radio_excluded_signatures:
+            if isinstance(existing_sig, tuple) and len(existing_sig) == 2 and len(existing_sig[1]) >= 4:
+                seen_titles.add(existing_sig[1])
+
+        fresh_pool = []
+        recent_pool = []
+        rng = random.Random(f"{time.time_ns()}:{self.radio_round}:{seed_url}:{self.query}")
+
+        for group in candidate_groups:
+            if not group:
+                continue
+            items = list(group)
+            # Мягкое перемешивание внутри каждой группы кандидатов, чтобы повторный
+            # запуск радио никогда не выдавал статичный одинаковый порядок.
+            if len(items) > 2:
+                band_size = 6
+                shuffled_items = []
+                for idx in range(0, len(items), band_size):
+                    band = items[idx:idx + band_size]
+                    rng.shuffle(band)
+                    shuffled_items.extend(band)
+                items = shuffled_items
+
+            for track in items:
+                if not isinstance(track, dict):
+                    continue
+                url = str(track.get("url") or "").strip()
+                if not url:
+                    continue
+                key = f"{track.get('source', self.source)}|{url}"
+                vid = YouTubeRatingWorker._video_id(track) if self.source == "youtube" else ""
+                if key in seen_keys or (vid and vid in seen_keys):
+                    continue
+                try:
+                    dur = float(track.get("duration") or 0)
+                except (TypeError, ValueError):
+                    dur = 0.0
+                if dur > max_allowed_duration:
+                    continue
+                if 0 < dur < 35:
+                    continue
+
+                sig = self._radio_song_signature(track)
+                artist_sig, title_sig = sig
+                if not title_sig:
+                    continue
+                # Исключаем перезаливы, ремиксы, slowed/lyrics-версии самого трека, по которому запущено радио.
+                if seed_title_sig and len(seed_title_sig) >= 3:
+                    if title_sig == seed_title_sig:
+                        continue
+                    if len(seed_title_sig) >= 5 and (seed_title_sig in title_sig or title_sig in seed_title_sig):
+                        if not seed_artist_sig or not artist_sig or artist_sig == seed_artist_sig:
+                            continue
+                if sig in seen_sigs:
+                    continue
+                if len(title_sig) >= 4 and title_sig in seen_titles:
+                    continue
+
+                seen_keys.add(key)
+                if vid:
+                    seen_keys.add(vid)
+                seen_sigs.add(sig)
+                if len(title_sig) >= 4:
+                    seen_titles.add(title_sig)
+
+                was_recent = (
+                    key in self.radio_recent_keys
+                    or (vid and vid in self.radio_recent_keys)
+                    or f"sig:{artist_sig}|{title_sig}" in self.radio_recent_keys
+                )
+                if was_recent:
+                    recent_pool.append((artist_sig, dict(track)))
+                else:
+                    fresh_pool.append((artist_sig, dict(track)))
+
+        def interleave_by_artist(pairs):
+            if len(pairs) <= 2:
+                return [t for _, t in pairs]
+            # Разводим треки одного и того же исполнителя, чтобы в очереди не шло
+            # 15 песен подряд от одного канала/автора.
+            max_same_in_row = 2 if self.radio_artist_context else 1
+            remaining = deque(pairs)
+            ordered = []
+            recent_artists = deque(maxlen=max_same_in_row)
+            defer_limit = len(remaining) * 2
+            deferred = 0
+            while remaining:
+                artist_sig, track = remaining.popleft()
+                if (artist_sig and len(recent_artists) == max_same_in_row
+                        and all(a == artist_sig for a in recent_artists)
+                        and deferred < defer_limit
+                        and any(a != artist_sig for a, _ in remaining)):
+                    remaining.append((artist_sig, track))
+                    deferred += 1
+                    continue
+                deferred = 0
+                ordered.append(track)
+                recent_artists.append(artist_sig)
+            return ordered
+
+        rng.shuffle(recent_pool)
+        result = interleave_by_artist(fresh_pool)
+        if len(result) < self.limit and recent_pool:
+            result.extend(interleave_by_artist(recent_pool))
+        return result[:self.limit]
+
+    def _fetch_radio_tracks(self):
+        """Собирает разнообразное радио по конкретному треку для YouTube и SoundCloud."""
+        seed = dict(self.radio_seed_track or {})
+        seed_url = str(seed.get("url") or "").strip()
+        seed_artist = self._clean_radio_text(
+            seed.get("artist_display") or seed.get("artist")
+            or seed.get("uploader") or seed.get("channel")
+        )
+        seed_title = self._clean_radio_text(seed.get("title"))
+        artist_context = self._clean_radio_text(self.radio_artist_context)
+        if re.search(r"\s+[-–—]\s+", seed_title):
+            left, right = re.split(r"\s+[-–—]\s+", seed_title, maxsplit=1)
+            if left.strip() and right.strip():
+                if not seed_artist:
+                    seed_artist = left.strip()
+                seed_title = right.strip()
+
+        candidate_groups = []
+        notes = []
+        rng = random.Random(f"{time.time_ns()}:{self.radio_round}:{seed_url}")
+
+        if self.source == "youtube":
+            video_id = YouTubeRatingWorker._video_id(seed)
+            # 1) Настоящий алгоритмический радио-микс YouTube Music по videoId.
+            try:
+                from ytmusicapi import YTMusic
+                ytm = YTMusic()
+                if not video_id and (seed_artist or seed_title):
+                    search_q = f"{seed_artist} {seed_title}".strip()
+                    found = ytm.search(search_q, filter="songs", limit=5) or []
+                    for item in found:
+                        cand_id = str((item or {}).get("videoId") or "").strip()
+                        if cand_id:
+                            video_id = cand_id
+                            break
+
+                if video_id and not self._cancel_requested:
+                    watch = ytm.get_watch_playlist(videoId=video_id, radio=True, limit=max(50, self.limit)) or {}
+                    raw_watch = watch.get("tracks") or []
+                    primary_group = []
+                    pivot_ids = []
+                    seed_artist_norm = self._normalize_artist_name(seed_artist)
+                    for entry in raw_watch:
+                        if self._cancel_requested:
+                            break
+                        norm = SupermixWorker._normalize_track(entry)
+                        if not norm:
+                            continue
+                        primary_group.append(norm)
+                        vid = str(norm.get("video_id") or "").strip()
+                        if vid and vid != video_id:
+                            cand_artist_norm = self._normalize_artist_name(norm.get("artist"))
+                            if cand_artist_norm != seed_artist_norm or len(pivot_ids) < 3:
+                                pivot_ids.append(vid)
+                    if primary_group:
+                        candidate_groups.append(primary_group)
+                        notes.append("Радио-микс YouTube Music по выбранному треку.")
+                        preview = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+                        if len(preview) >= 8 and not self._cancel_requested:
+                            self.results_ready.emit(
+                                [dict(item) for item in preview],
+                                f"Найдено {len(preview)} похожих треков; расширяю подборку…"
+                            )
+
+                    # 2) Вторая волна по связанному треку из радио-плейлиста для свежести и разнообразия.
+                    if pivot_ids and not self._cancel_requested:
+                        rng.shuffle(pivot_ids)
+                        chosen_pivots = pivot_ids[:2] if self.radio_round > 0 else pivot_ids[:1]
+                        for pivot_id in chosen_pivots:
+                            if self._cancel_requested:
+                                break
+                            try:
+                                watch2 = ytm.get_watch_playlist(videoId=pivot_id, radio=True, limit=40) or {}
+                                second_group = []
+                                for entry in watch2.get("tracks") or []:
+                                    norm = SupermixWorker._normalize_track(entry)
+                                    if norm:
+                                        second_group.append(norm)
+                                if second_group:
+                                    candidate_groups.append(second_group)
+                            except Exception:
+                                pass
+            except Exception as ytm_err:
+                logging.getLogger("aurora").info("YTMusic radio watch_playlist fallback: %s", ytm_err)
+
+            # 3) Запасной вариант через нативный плейлист YouTube Mix RD<video_id> в yt-dlp.
+            current_filtered = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+            if len(current_filtered) < 25 and video_id and not self._cancel_requested:
+                saved_direct = self.direct_url
+                try:
+                    self.direct_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+                    mix_tracks, _ = self._fetch(min(50, self.limit), "in_playlist", emit_progress=False)
+                    if mix_tracks:
+                        candidate_groups.append(mix_tracks)
+                        notes.append("Микс YouTube по выбранному треку.")
+                except Exception:
+                    pass
+                finally:
+                    self.direct_url = saved_direct
+
+            # 4) Дополнительные разнообразные поисковые запросы, если радио-плейлист вернул мало новых песен.
+            current_filtered = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+            if len(current_filtered) < 20 and not self._cancel_requested:
+                queries = []
+                target_artist = artist_context or seed_artist
+                if target_artist and seed_title:
+                    queries.extend([
+                        f"songs similar to {seed_title} {target_artist}",
+                        f"{target_artist} popular songs",
+                        f"{target_artist} radio mix",
+                        f"{target_artist} best tracks",
+                    ])
+                elif target_artist:
+                    queries.extend([
+                        f"{target_artist} popular songs",
+                        f"{target_artist} best tracks",
+                        f"{target_artist} radio mix",
+                    ])
+                elif seed_title:
+                    queries.extend([
+                        f"songs similar to {seed_title}",
+                        f"{seed_title} radio",
+                    ])
+                if not queries:
+                    queries = [self.query or "popular music hits"]
+                rng.shuffle(queries)
+                saved_query, saved_direct = self.query, self.direct_url
+                try:
+                    self.direct_url = ""
+                    for q in queries[:2]:
+                        if self._cancel_requested:
+                            break
+                        self.query = q
+                        found_tracks, _ = self._fetch(45, "in_playlist", emit_progress=False, force_search=True)
+                        if found_tracks:
+                            candidate_groups.append(found_tracks)
+                except Exception:
+                    pass
+                finally:
+                    self.query, self.direct_url = saved_query, saved_direct
+
+        elif self.source == "soundcloud":
+            permalink, slug_user, slug_title = self._extract_soundcloud_slug_parts(seed_url)
+            seed_genre = self._clean_radio_text(seed.get("genre"))
+            if not seed_artist and slug_user:
+                seed_artist = slug_user
+            if not seed_title and slug_title:
+                seed_title = slug_title
+
+            # Если у трека из кэша SoundCloud не было названия/автора или permalink, быстро догружаем метаданные.
+            if seed_url and (not permalink or not seed_title or not seed_artist) and not self._cancel_requested:
+                try:
+                    meta_opts = {
+                        **yt_dlp_tls_options(),
+                        "quiet": True,
+                        "no_warnings": True,
+                        "skip_download": True,
+                        "noplaylist": True,
+                        "extract_flat": False,
+                        "socket_timeout": 5,
+                        "retries": 1,
+                        "extractor_retries": 1,
+                        "cachedir": None,
+                        "ignoreconfig": True,
+                    }
+                    with YoutubeDL(meta_opts) as ydl:
+                        self._configure_fast_soundcloud_ydl(ydl)
+                        info = ydl.extract_info(seed_url, download=False)
+                    if isinstance(info, dict):
+                        resolved_url = str(info.get("webpage_url") or info.get("permalink_url") or "").strip()
+                        if resolved_url:
+                            p_url, p_user, p_title = self._extract_soundcloud_slug_parts(resolved_url)
+                            if p_url:
+                                permalink = p_url
+                            if not seed_artist and p_user:
+                                seed_artist = p_user
+                            if not seed_title and p_title:
+                                seed_title = p_title
+                        info_title = self._clean_radio_text(info.get("title"))
+                        info_artist = self._clean_radio_text(
+                            info.get("artist") or info.get("uploader") or info.get("channel")
+                        )
+                        info_genre = self._clean_radio_text(info.get("genre"))
+                        if info_title:
+                            seed_title = info_title
+                            seed["title"] = info_title
+                        if info_artist:
+                            seed_artist = info_artist
+                            seed["artist"] = info_artist
+                        if info_genre:
+                            seed_genre = info_genre
+                except Exception:
+                    pass
+
+            # 1) Нативная станция похожих треков SoundCloud (/recommended -> /tracks/{id}/related).
+            if permalink and not self._cancel_requested:
+                saved_direct = self.direct_url
+                try:
+                    self.direct_url = permalink.rstrip("/") + "/recommended"
+                    related_tracks, _ = self._fetch(max(50, self.limit), "in_playlist", emit_progress=False)
+                    if related_tracks:
+                        candidate_groups.append(related_tracks)
+                        notes.append("Рекомендации SoundCloud по выбранному треку.")
+                        preview = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+                        if len(preview) >= 6 and not self._cancel_requested:
+                            self.results_ready.emit(
+                                [dict(item) for item in preview],
+                                f"Найдено {len(preview)} похожих треков SoundCloud; расширяю подборку…"
+                            )
+                        # При повторном запуске или пополнении берём также рекомендации от одного из связанных треков.
+                        if (self.radio_round > 0 or len(preview) < 25) and not self._cancel_requested:
+                            pivot_permalinks = []
+                            for rel in related_tracks[:12]:
+                                rel_perm, _, _ = self._extract_soundcloud_slug_parts(rel.get("url"))
+                                if rel_perm and rel_perm.casefold() != permalink.casefold():
+                                    pivot_permalinks.append(rel_perm)
+                            if pivot_permalinks:
+                                rng.shuffle(pivot_permalinks)
+                                self.direct_url = pivot_permalinks[0].rstrip("/") + "/recommended"
+                                rel2, _ = self._fetch(40, "in_playlist", emit_progress=False)
+                                if rel2:
+                                    candidate_groups.append(rel2)
+                except Exception as sc_rel_err:
+                    logging.getLogger("aurora").info("SoundCloud /recommended fallback: %s", sc_rel_err)
+                finally:
+                    self.direct_url = saved_direct
+
+            # 2) Разнообразный поиск по артисту/жанру/связанным трекам (с отсечением дублей самой песни).
+            current_filtered = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+            if len(current_filtered) < 25 and not self._cancel_requested:
+                target_artist = artist_context or seed_artist
+                queries = []
+                if target_artist and seed_genre:
+                    queries.append(f"{target_artist} {seed_genre}")
+                if target_artist:
+                    queries.extend([
+                        f"{target_artist} tracks",
+                        f"{target_artist} popular",
+                        f"{target_artist} mix",
+                    ])
+                if seed_title and target_artist:
+                    queries.append(f"{target_artist} {seed_title}")
+                elif seed_title:
+                    queries.append(f"{seed_title} mix")
+                if seed_genre:
+                    queries.append(f"{seed_genre} music")
+                if not queries:
+                    queries = [self._clean_radio_text(self.query) or "electronic music"]
+                rng.shuffle(queries)
+                saved_query, saved_direct = self.query, self.direct_url
+                try:
+                    self.direct_url = ""
+                    for q in queries[:2]:
+                        if self._cancel_requested:
+                            break
+                        self.query = q
+                        found_tracks, _ = self._fetch(50, "in_playlist", emit_progress=False, force_search=True)
+                        if found_tracks:
+                            candidate_groups.append(found_tracks)
+                except Exception:
+                    pass
+                finally:
+                    self.query, self.direct_url = saved_query, saved_direct
+
+        final_tracks = self._filter_and_diversify_radio_tracks(candidate_groups, seed)
+        summary_note = " ".join(dict.fromkeys(n for n in notes if n)).strip() or "Подборка похожих треков готова."
+        return final_tracks, summary_note
+
     def run(self):
         self._search_started_at = time.perf_counter()
         logging.getLogger("aurora").info("Поиск начат: source=%s; limit=%d", self.source, self.limit)
         try:
             if self.paginate_all:
                 self._run_paginated()
+                return
+            if self.radio_seed_track is not None:
+                tracks, note = self._fetch_radio_tracks()
+                if self._cancel_requested:
+                    return
+                if tracks:
+                    self.results_ready.emit(tracks, note or "Радио готово.")
+                else:
+                    self.results_ready.emit([], note or "Источник не вернул подходящих треков для радио.")
                 return
             # Кэш показывает прошлую выдачу сразу; кэш каталога артиста отделён
             # от обычного yt-dlp поиска по тому же тексту.
@@ -6496,16 +7008,20 @@ class MusicPlayer(QMainWindow):
         self.supermix_retry_timer.setSingleShot(True)
         self.supermix_retry_timer.timeout.connect(self.maybe_refill_supermix)
         self.radio_mode_active = False
+        self.radio_seed_track = None
         self.radio_refill_worker = None
         self.radio_refill_attempt_key = ""
         self.radio_refill_added_urls = set()
         self.radio_refill_next_allowed_at = 0.0
         self.radio_refill_round = 0
+        self.radio_launch_counter = 0
         self.radio_refill_added_count = 0
         self.radio_refill_last_error = ""
         self._radio_refill_failed_attempts = 0
         self.radio_artist_context = ""
         self.radio_seen_urls = set()
+        self.radio_seen_signatures = set()
+        self.radio_recent_history = deque(maxlen=300)
         self._radio_waiting_for_tracks = False
         self._finish_transition_pending = False
         self._finish_guard_url = ""
@@ -8513,13 +9029,15 @@ class MusicPlayer(QMainWindow):
         # EndOfMedia. Поэтому у поиска есть почти вся длительность текущего трека.
         self.radio_mode_active = True
         self.queue_mode = "radio"
+        self.radio_seed_track = dict(current)
         self.radio_artist_context = str(
             getattr(self, "active_artist_profile", "") or ""
         ).strip() if self.artist_profile_open else ""
-        self.radio_seen_urls = {
-            self.radio_track_key(item) for item in self.queue_tracks if isinstance(item, dict)
-        }
-        self.radio_seen_urls.add(self.radio_track_key(current))
+        self.radio_seen_urls = set()
+        self.radio_seen_signatures = set()
+        for item in self.queue_tracks:
+            self._remember_radio_track(item)
+        self._remember_radio_track(current)
         self.radio_refill_attempt_key = ""
         self.radio_refill_next_allowed_at = 0.0
         self._radio_refill_failed_attempts = 0
@@ -8632,10 +9150,12 @@ class MusicPlayer(QMainWindow):
                     return
             self.radio_mode_active = True
             self.queue_mode = "radio"
-            self.radio_seen_urls = {
-                self.radio_track_key(item) for item in self.queue_tracks if isinstance(item, dict)
-            }
-            self.radio_seen_urls.add(self.radio_track_key(last_track))
+            self.radio_seed_track = dict(last_track)
+            self.radio_seen_urls = set()
+            self.radio_seen_signatures = set()
+            for item in self.queue_tracks:
+                self._remember_radio_track(item)
+            self._remember_radio_track(last_track)
             self.radio_refill_attempt_key = ""
             self.radio_refill_next_allowed_at = 0.0
             self._radio_refill_failed_attempts = 0
@@ -11551,6 +12071,11 @@ class MusicPlayer(QMainWindow):
         if item is None:
             return
         track = item.data(Qt.ItemDataRole.UserRole)
+        row = list_widget.itemWidget(item)
+        if isinstance(row, TrackRow) and isinstance(getattr(row, "track", None), dict):
+            merged = dict(track) if isinstance(track, dict) else {}
+            merged.update({k: v for k, v in row.track.items() if v not in (None, "")})
+            track = merged
         if not isinstance(track, dict):
             return
         menu = self.make_context_menu()
@@ -12001,14 +12526,14 @@ class MusicPlayer(QMainWindow):
         """Запускает бесконечное радио с приоритетом текущего артиста."""
         source = self.current_source
         tracks = [track for track in self.source_results.get(source, [])
-                  if isinstance(track, dict) and track.get("url")]
+                  if isinstance(track, dict) and track.get("url") and not self.is_disliked(track)]
         if not tracks:
             self.set_status("Сначала дождись загрузки треков исполнителя.", source)
             return
         artist = str(getattr(self, "active_artist_profile", "") or "").strip()
         artist_key = artist.casefold()
-        seed = next((track for track in tracks
-                     if str(track.get("artist", "")).casefold() == artist_key), tracks[0])
+        matching = [track for track in tracks if str(track.get("artist", "")).casefold() == artist_key] or tracks
+        seed = random.choice(matching[:min(12, len(matching))])
         self.start_radio(dict(seed), artist_context=artist or str(seed.get("artist") or ""))
 
     def search_artist_name(self, artist, source):
@@ -12075,9 +12600,69 @@ class MusicPlayer(QMainWindow):
                 self.fade_to_page(self.browse_page)
         self.start_search()
 
+    def _enrich_track_for_radio(self, track):
+        """Дополняет трек самыми свежими метаданными из коллекций плеера перед запуском радио."""
+        if not isinstance(track, dict):
+            return {}
+        enriched = dict(track)
+        url = str(enriched.get("url") or "").strip()
+        source = str(enriched.get("source") or "").strip()
+        if url:
+            pools = [
+                [self.current_track] if isinstance(self.current_track, dict) else [],
+                [self.requested_track] if isinstance(self.requested_track, dict) else [],
+                self.queue_tracks,
+                self.source_results.get(source, []) if source else [],
+                self.youtube_liked_tracks,
+                self.soundcloud_liked_tracks,
+                list(self.favorites.values()),
+                getattr(self, "recent_tracks", []),
+            ]
+            for pool in pools:
+                for candidate in pool:
+                    if not isinstance(candidate, dict) or str(candidate.get("url") or "").strip() != url:
+                        continue
+                    for k, v in candidate.items():
+                        if v in (None, ""):
+                            continue
+                        if k == "title" and str(v).strip() == "Без названия" and SearchWorker._clean_radio_text(enriched.get("title")):
+                            continue
+                        if k == "artist" and str(v).strip() == "Исполнитель неизвестен" and SearchWorker._clean_radio_text(enriched.get("artist")):
+                            continue
+                        if not enriched.get(k) or enriched.get(k) in ("Без названия", "Исполнитель неизвестен"):
+                            enriched[k] = v
+        if source == "youtube" and not enriched.get("video_id"):
+            vid = YouTubeRatingWorker._video_id(enriched)
+            if vid:
+                enriched["video_id"] = vid
+        if source == "soundcloud":
+            _, slug_user, slug_title = SearchWorker._extract_soundcloud_slug_parts(url)
+            if not SearchWorker._clean_radio_text(enriched.get("artist")) and slug_user:
+                enriched["artist"] = slug_user
+            if not SearchWorker._clean_radio_text(enriched.get("title")) and slug_title:
+                enriched["title"] = slug_title
+        return enriched
+
+    def _remember_radio_track(self, track):
+        if not isinstance(track, dict):
+            return
+        key = self.radio_track_key(track)
+        if key:
+            self.radio_seen_urls.add(key)
+            self.radio_recent_history.append(key)
+        vid = YouTubeRatingWorker._video_id(track) if track.get("source") == "youtube" else ""
+        if vid:
+            self.radio_seen_urls.add(vid)
+            self.radio_recent_history.append(vid)
+        sig = SearchWorker._radio_song_signature(track)
+        if sig[1]:
+            self.radio_seen_signatures.add(sig)
+            self.radio_recent_history.append(f"sig:{sig[0]}|{sig[1]}")
+
     def start_radio(self, track, artist_context=None):
-        """Запускает радио; для профиля артиста сохраняет контекст для будущих пополнений."""
+        """Запускает радио по конкретному треку; для профиля артиста сохраняет контекст для будущих пополнений."""
         self._stop_supermix_session()
+        track = self._enrich_track_for_radio(track)
         if track.get("source") not in ("youtube", "soundcloud"):
             QMessageBox.information(self, "Радио", "Радио доступно для треков YouTube и SoundCloud.")
             return
@@ -12087,25 +12672,29 @@ class MusicPlayer(QMainWindow):
             self.radio_refill_worker.cancel()
         self.radio_refill_worker = None
         self.radio_mode_active = False
+        self.radio_seed_track = dict(track)
         self.radio_refill_attempt_key = ""
         self.radio_refill_added_urls = set()
         self.radio_refill_added_count = 0
         self.radio_refill_last_error = ""
         self._radio_refill_failed_attempts = 0
         self.radio_refill_round = 0
+        self.radio_launch_counter = getattr(self, "radio_launch_counter", 0) + 1
         self.radio_refill_next_allowed_at = 0.0
-        self.radio_artist_context = str(artist_context or "").strip()
+        self.radio_artist_context = SearchWorker._clean_radio_text(artist_context)
         self.radio_seen_urls = set()
+        self.radio_seen_signatures = set()
+        self._remember_radio_track(track)
         self._radio_waiting_for_tracks = False
         self._radio_retry_scheduled = False
         if self.radio_dialog is not None:
             self.radio_dialog.hide()
             self.radio_dialog.deleteLater()
             self.radio_dialog = None
-        artist = str(track.get("artist") or "").strip()
-        title = str(track.get("title") or "").strip()
+        artist = SearchWorker._clean_radio_text(track.get("artist_display") or track.get("artist"))
+        title = SearchWorker._clean_radio_text(track.get("title"))
         query = (f"{self.radio_artist_context} mix" if self.radio_artist_context
-                 else f"{artist} {title} mix").strip()
+                 else f"{artist} {title}".strip()).strip()
         if not query:
             query = title or artist or "popular music mix"
         self.radio_candidates = []
@@ -12115,12 +12704,21 @@ class MusicPlayer(QMainWindow):
         if track.get("thumbnail"):
             self.request_image(track.get("thumbnail"), dialog.cover)
         dialog.show_animated()
-        self.set_status(f"Радио: ищу похожие треки по запросу «{query}»…", track.get("source"))
+        display_label = f"{artist} — {title}".strip(" —") or query
+        self.set_status(f"Радио: подбираю похожие треки к «{display_label}»…", track.get("source"))
         auth_kwargs = self.youtube_auth_kwargs() if track.get("source") == "youtube" else self.soundcloud_auth_kwargs()
-        # Радио не использует кэш поисковой выдачи: повтор запроса должен находить
-        # новые треки, иначе в бесконечном режиме приходят одни и те же URL.
-        worker = SearchWorker(query, track.get("source"), "relevance", 75, self,
-                              cache_enabled=False, **auth_kwargs)
+        excluded_keys = set(self.radio_seen_urls) | set(self.disliked_track_keys)
+        worker = SearchWorker(
+            query, track.get("source"), "relevance", 75, self,
+            cache_enabled=False,
+            radio_seed_track=track,
+            radio_excluded_keys=excluded_keys,
+            radio_excluded_signatures=set(self.radio_seen_signatures),
+            radio_recent_keys=set(self.radio_recent_history),
+            radio_round=self.radio_launch_counter - 1,
+            radio_artist_context=self.radio_artist_context,
+            **auth_kwargs,
+        )
         self.radio_worker = worker
         worker.results_ready.connect(lambda results, note, w=worker: self.on_radio_results(w, results, note))
         worker.failed.connect(lambda error, w=worker: self.on_radio_error(w, error))
@@ -12180,16 +12778,31 @@ class MusicPlayer(QMainWindow):
         self.radio_mode_active = True
         self.queue_mode = "radio"
         self.radio_seen_urls = set()
+        self.radio_seen_signatures = set()
+        if isinstance(self.radio_seed_track, dict):
+            self._remember_radio_track(self.radio_seed_track)
         self.radio_refill_attempt_key = ""
         self.radio_refill_added_count = 0
         self.radio_refill_next_allowed_at = 0.0
         self._radio_refill_failed_attempts = 0
         self._radio_waiting_for_tracks = False
-        for track in tracks[:75]:
+        for track in tracks:
+            key = self.radio_track_key(track)
+            vid = YouTubeRatingWorker._video_id(track) if track.get("source") == "youtube" else ""
+            sig = SearchWorker._radio_song_signature(track)
+            if key in self.radio_seen_urls or (vid and vid in self.radio_seen_urls):
+                continue
+            if sig[1] and sig in self.radio_seen_signatures:
+                continue
             queued = dict(track)
             queued["queue_id"] = uuid4().hex
             self.queue_tracks.append(queued)
-            self.radio_seen_urls.add(self.radio_track_key(queued))
+            self._remember_radio_track(queued)
+            if len(self.queue_tracks) >= 75:
+                break
+        if not self.queue_tracks:
+            self.set_status("В радио не осталось новых треков.")
+            return
         self.refresh_queue_list()
         self.update_queue_count()
         self.toggle_queue_if_hidden()
@@ -12218,49 +12831,69 @@ class MusicPlayer(QMainWindow):
             return
         if self.radio_refill_worker is not None and self.radio_refill_worker.isRunning():
             return
-        seed = self.requested_track or self.current_track or (self.queue_tracks[-1] if self.queue_tracks else None)
-        if not isinstance(seed, dict):
+        # Выбираем опорный трек для пополнения: чередуем последний трек очереди,
+        # текущий трек и исходный трек радио, чтобы подборка не зацикливалась.
+        seed_candidates = []
+        if self.queue_tracks:
+            tail_slice = self.queue_tracks[-min(5, len(self.queue_tracks)):]
+            seed_candidates.extend(reversed(tail_slice))
+        if isinstance(self.current_track, dict):
+            seed_candidates.append(self.current_track)
+        if isinstance(self.requested_track, dict):
+            seed_candidates.append(self.requested_track)
+        if isinstance(self.radio_seed_track, dict):
+            seed_candidates.append(self.radio_seed_track)
+        valid_seeds = [
+            self._enrich_track_for_radio(s) for s in seed_candidates
+            if isinstance(s, dict) and s.get("source") in ("youtube", "soundcloud")
+        ]
+        if not valid_seeds:
             return
+        seed = valid_seeds[self.radio_refill_round % len(valid_seeds)]
         source = str(seed.get("source", ""))
-        if source not in ("youtube", "soundcloud"):
-            return
-        anchor_key = self.radio_track_key(seed)
+        anchor_key = f"{self.radio_track_key(seed)}|{self.radio_refill_round}"
         if anchor_key == self.radio_refill_attempt_key:
             return
         self.radio_refill_attempt_key = anchor_key
-        query = f"{str(seed.get('artist') or '').strip()} {str(seed.get('title') or '').strip()} mix".strip()
-        if not query:
-            return
-        seed_artist = str(seed.get("artist") or "").strip()
-        seed_title = str(seed.get("title") or "").strip()
-        artist_context = str(getattr(self, "radio_artist_context", "") or "").strip()
+        seed_artist = SearchWorker._clean_radio_text(seed.get("artist_display") or seed.get("artist"))
+        seed_title = SearchWorker._clean_radio_text(seed.get("title"))
+        artist_context = SearchWorker._clean_radio_text(getattr(self, "radio_artist_context", ""))
         if artist_context:
             query_variants = [
-                f"{artist_context} mix",
                 f"{artist_context} popular songs",
-                f"{artist_context} songs",
-                f"{artist_context} related artists mix",
-                f"{seed_artist} {seed_title} mix",
-                f"songs similar to {seed_title} {seed_artist}",
+                f"{artist_context} radio mix",
+                f"{artist_context} related artists",
+                f"{seed_artist} {seed_title}".strip(),
+                f"songs similar to {seed_title} {seed_artist}".strip(),
             ]
         else:
             query_variants = [
-                f"{seed_artist} {seed_title} mix",
-                f"{seed_artist} related songs",
-                f"songs similar to {seed_title} {seed_artist}",
-                f"{seed_artist} popular songs",
-                f"{seed_title} similar tracks",
+                f"{seed_artist} {seed_title}".strip(),
+                f"{seed_artist} related songs".strip(),
+                f"songs similar to {seed_title} {seed_artist}".strip(),
+                f"{seed_artist} popular songs".strip(),
+                f"{seed_title} similar tracks".strip(),
             ]
-        query_variants = [query.strip() for query in query_variants if query.strip()]
+        query_variants = [q.strip() for q in query_variants if q.strip()]
         if not query_variants:
             query_variants = [seed_title or seed_artist or "popular music mix"]
         self.radio_refill_round += 1
         query = query_variants[(self.radio_refill_round - 1) % len(query_variants)]
         auth_kwargs = self.youtube_auth_kwargs() if source == "youtube" else self.soundcloud_auth_kwargs()
-        # Каждая попытка делает свежий запрос: кэш радио часто возвращает только
-        # предыдущую подборку, которая уже полностью присутствует в очереди.
-        worker = SearchWorker(query, source, "relevance", 75, self,
-                              cache_enabled=False, **auth_kwargs)
+        for queued_item in self.queue_tracks:
+            self._remember_radio_track(queued_item)
+        excluded_keys = set(self.radio_seen_urls) | set(self.disliked_track_keys)
+        worker = SearchWorker(
+            query, source, "relevance", 75, self,
+            cache_enabled=False,
+            radio_seed_track=seed,
+            radio_excluded_keys=excluded_keys,
+            radio_excluded_signatures=set(self.radio_seen_signatures),
+            radio_recent_keys=set(self.radio_recent_history),
+            radio_round=self.radio_refill_round,
+            radio_artist_context=artist_context,
+            **auth_kwargs,
+        )
         self.radio_refill_worker = worker
         self.radio_refill_added_urls = set()
         self.radio_refill_added_count = 0
@@ -12292,9 +12925,13 @@ class MusicPlayer(QMainWindow):
             if not isinstance(track, dict) or self.is_disliked(track):
                 continue
             key = self.radio_track_key(track)
-            if not track.get("url") or key in self.radio_seen_urls:
+            vid = YouTubeRatingWorker._video_id(track) if track.get("source") == "youtube" else ""
+            sig = SearchWorker._radio_song_signature(track)
+            if not track.get("url") or key in self.radio_seen_urls or (vid and vid in self.radio_seen_urls):
                 continue
-            self.radio_seen_urls.add(key)
+            if sig[1] and sig in self.radio_seen_signatures:
+                continue
+            self._remember_radio_track(track)
             self.radio_refill_added_urls.add(key)
             queued = dict(track)
             queued["queue_id"] = uuid4().hex
@@ -12399,6 +13036,11 @@ class MusicPlayer(QMainWindow):
         if item is None:
             return
         track = item.data(Qt.ItemDataRole.UserRole)
+        row = self.source_list.itemWidget(item)
+        if isinstance(row, TrackRow) and isinstance(getattr(row, "track", None), dict):
+            merged = dict(track) if isinstance(track, dict) else {}
+            merged.update({k: v for k, v in row.track.items() if v not in (None, "")})
+            track = merged
         if not isinstance(track, dict):
             return
         menu = self.make_context_menu()
