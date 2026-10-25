@@ -1311,7 +1311,8 @@ class SpotifyPlaylistCard(QPushButton):
         painter.setBrush(background)
         painter.drawRoundedRect(bounds, 14, 14)
         side = self.width() - 28
-        cover = QRectF(14, 14, side, side)
+        cover_h = max(80.0, self.height() - 64.0)
+        cover = QRectF(14, 14, side, cover_h)
         artwork = self._cover_pixmap if self._cover_pixmap is not None else self._artwork
         if artwork is not None and not artwork.isNull():
             # Soft shadow under the square album artwork inside the card
@@ -1322,9 +1323,11 @@ class SpotifyPlaylistCard(QPushButton):
             path.addRoundedRect(cover, 10, 10)
             painter.save()
             painter.setClipPath(path)
-            scaled = self._cover_for_size(artwork, side)
-            pixels = side * scaled.devicePixelRatioF()
-            crop = QRectF((scaled.width() - pixels) / 2, (scaled.height() - pixels) / 2, pixels, pixels)
+            scaled = self._cover_for_size(artwork, max(side, cover_h))
+            dpr = scaled.devicePixelRatioF()
+            pw = side * dpr
+            ph = cover_h * dpr
+            crop = QRectF((scaled.width() - pw) / 2, (scaled.height() - ph) / 2, pw, ph)
             painter.drawPixmap(cover, scaled, crop)
             if active or self._hover > 0:
                 vignette = QLinearGradient(cover.topLeft(), cover.bottomLeft())
@@ -4193,8 +4196,8 @@ class SidebarMediaItem(QPushButton):
             painter.setBrush(bg)
             painter.drawRoundedRect(rect, 9.0, 9.0)
 
-        right_pad = 20 if self._playing else 8
-        text_left = 51
+        right_pad = 18 if self._playing else 5
+        text_left = 48
         text_w = max(20, int(self.width() - text_left - right_pad))
 
         title_font = QFont(self.font())
@@ -4234,12 +4237,17 @@ class SidebarMediaItem(QPushButton):
 
 
 class MarqueeLabel(QLabel):
-    """Спокойный заголовок трека без дёрганья и без точки: длинный текст аккуратно сокращается троеточием."""
-    MAX_NATURAL_WIDTH = 215
+    """Заголовок трека с аккуратным троеточием в покое и плавной прокруткой при наведении."""
+    MAX_NATURAL_WIDTH = 310
 
     def __init__(self, text="", parent=None):
         super().__init__(parent)
         self._full_text = ""
+        self._offset = 0.0
+        self._hovered = False
+        self._marquee_timer = QTimer(self)
+        self._marquee_timer.setInterval(30)
+        self._marquee_timer.timeout.connect(self._step_marquee)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.setMaximumWidth(self.MAX_NATURAL_WIDTH)
@@ -4247,15 +4255,45 @@ class MarqueeLabel(QLabel):
 
     def setText(self, text):
         self._full_text = str(text or "")
+        self._offset = 0.0
         super().setText(self._full_text)
         self.updateGeometry()
         self.update()
+
+    def _step_marquee(self):
+        fm = QFontMetrics(self.font())
+        overflow = fm.horizontalAdvance(self._full_text) - self.contentsRect().width()
+        if not self._hovered or overflow <= 4:
+            self._offset = 0.0
+            self._marquee_timer.stop()
+            self.update()
+            return
+        cycle = overflow + 48.0
+        self._offset = (self._offset + 1.1) % cycle
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        fm = QFontMetrics(self.font())
+        if fm.horizontalAdvance(self._full_text) > self.contentsRect().width() + 4:
+            self._offset = 0.0
+            self._marquee_timer.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._marquee_timer.stop()
+        if self._offset != 0.0:
+            self._offset = 0.0
+            self.update()
+        super().leaveEvent(event)
 
     def sizeHint(self):
         base = super().sizeHint()
         fm = QFontMetrics(self.font())
         text_w = fm.horizontalAdvance(self._full_text) + 4 if self._full_text else 40
-        return QSize(min(self.MAX_NATURAL_WIDTH, max(36, text_w)), base.height())
+        max_w = max(self.MAX_NATURAL_WIDTH, self.maximumWidth())
+        return QSize(min(max_w, max(36, text_w)), base.height())
 
     def minimumSizeHint(self):
         return QSize(36, super().minimumSizeHint().height())
@@ -4269,8 +4307,13 @@ class MarqueeLabel(QLabel):
         painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
         fm = QFontMetrics(self.font())
         baseline = rect.top() + (rect.height() - fm.height()) // 2 + fm.ascent()
-        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(16, rect.width()))
-        painter.drawText(rect.left(), baseline, elided)
+        full_w = fm.horizontalAdvance(self._full_text)
+        if self._hovered and full_w > rect.width() + 4 and self._offset > 0:
+            shift = min(float(full_w - rect.width() + 12), self._offset)
+            painter.drawText(int(rect.left() - shift), baseline, self._full_text)
+        else:
+            elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(16, rect.width()))
+            painter.drawText(rect.left(), baseline, elided)
         painter.end()
 
 
@@ -4491,6 +4534,48 @@ class TrackRow(QWidget):
         layout.addLayout(text_column, 1)
 
         if compact:
+            if not removable:
+                src = self.track.get("source")
+                self.source_label = QLabel(
+                    "YouTube" if src == "youtube" else "SoundCloud" if src == "soundcloud" else "Файл",
+                    self,
+                )
+                self.source_label.setObjectName("sourceText")
+                self.source_label.setFixedWidth(78)
+                self.source_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.source_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                layout.addWidget(self.source_label)
+
+                dur_str = human_time(self.track.get("duration"))
+                self.duration_label = QLabel(dur_str, self)
+                self.duration_label.setObjectName("durationText")
+                self.duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.duration_label.setFixedWidth(42 if dur_str else 4)
+                self.duration_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                layout.addWidget(self.duration_label)
+
+                self.favorite_button = QPushButton("", self)
+                self.favorite_button.setObjectName("rowFavorite")
+                self.favorite_button.setIcon(control_icon(
+                    "heart" if is_favorite else "heart-outline",
+                    "#1DB954" if is_favorite else "#B3B3B3", 22
+                ))
+                self.favorite_button.setIconSize(QSize(19, 19))
+                self.favorite_button.setFixedSize(32, 32)
+                self.favorite_button.setCheckable(True)
+                self.favorite_button.setChecked(bool(is_favorite))
+                self.favorite_button.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.favorite_button.setToolTip("Убрать из лайков" if is_favorite else "Добавить в лайки")
+                layout.addWidget(self.favorite_button)
+
+                self.menu_button = QPushButton("⋯", self)
+                self.menu_button.setObjectName("rowRemove")
+                self.menu_button.setFixedSize(28, 28)
+                self.menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.menu_button.setToolTip("Действия с треком")
+                self.menu_button.setProperty("revealed", False)
+                layout.addWidget(self.menu_button)
+
             # An unparented button becomes a native top-level window on show().
             # Set its owner before visibility changes to avoid a 28x28 flash.
             self.remove_button = QPushButton("×", self)
@@ -4645,6 +4730,10 @@ class TrackRow(QWidget):
             self.remove_button.setProperty("revealed", revealed)
             self.remove_button.style().unpolish(self.remove_button)
             self.remove_button.style().polish(self.remove_button)
+        if self.compact and hasattr(self, "menu_button"):
+            self.menu_button.setProperty("revealed", revealed)
+            self.menu_button.style().unpolish(self.menu_button)
+            self.menu_button.style().polish(self.menu_button)
 
     def enterEvent(self, event):
         self._reveal_queue_action(True)
@@ -4663,6 +4752,7 @@ class TrackRow(QWidget):
                 button for button in (
                     getattr(self, "play_button", None),
                     getattr(self, "favorite_button", None),
+                    getattr(self, "menu_button", None),
                     getattr(self, "remove_button", None),
                     getattr(self, "artist_label", None),
                 ) if button is not None
@@ -4894,6 +4984,17 @@ def control_icon(name, color="#D4CDD5", side=32):
             p.setBrush(QColor(color))
             p.drawPath(path)
             p.drawRoundedRect(18, 5, 8, 12, 2, 2)
+    elif name == "mini":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(5, 7, 22, 18, 3, 3)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(15, 14, 9, 8, 1.8, 1.8)
+    elif name == "lyrics":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(12, 5, 8, 12, 4, 4)
+        p.drawArc(9, 9, 14, 12, 0, -180 * 16)
+        p.drawLine(16, 21, 16, 26)
+        p.drawLine(12, 26, 20, 26)
     p.end()
     return QIcon(pix)
 
@@ -4907,37 +5008,80 @@ def control_icon(name, color="#D4CDD5", side=32):
 # -------------------------------------------------------------
 
 class ClickSlider(QSlider):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+        self._hover_x = None
+
+    def leaveEvent(self, event):
+        self._hover_x = None
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._hover_x = event.position().x()
+        if self.objectName() == "seekSlider" and self.maximum() > self.minimum():
+            rail_left = 6.0
+            rail_w = max(1.0, self.width() - 12.0)
+            ratio = max(0.0, min(1.0, (self._hover_x - rail_left) / rail_w))
+            hover_ms = int(self.minimum() + ratio * (self.maximum() - self.minimum()))
+            hover_str = human_time(hover_ms / 1000.0) or "0:00"
+            total_str = human_time(self.maximum() / 1000.0) or "0:00"
+            self.setToolTip(f"Перемотать на {hover_str} / {total_str}")
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def wheelEvent(self, event):
+        if self.maximum() == 100 and self.minimum() == 0 and self.objectName() != "seekSlider":
+            delta = event.angleDelta().y()
+            if delta != 0:
+                step = 1 if self.value() < 20 else 2
+                self.setValue(max(0, min(100, self.value() + (step if delta > 0 else -step))))
+                event.accept()
+                return
+        super().wheelEvent(event)
+
     def paintEvent(self, event):
         if self.orientation() != Qt.Orientation.Horizontal:
             return super().paintEvent(event)
         option = QStyleOptionSlider()
         self.initStyleOption(option)
         light = getattr(self.window(), "theme", "dark") == "light"
+        hovered = self.underMouse() or self.isSliderDown()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rail = QRectF(6, self.height() / 2 - 2.0, max(1, self.width() - 12), 4.0)
+        rail_h = 5.0 if hovered else 4.0
+        rail = QRectF(6, self.height() / 2 - rail_h / 2.0, max(1, self.width() - 12), rail_h)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#CFD8E3" if light else "#323B48"))
-        painter.drawRoundedRect(rail, 2.0, 2.0)
-        position = QStyle.sliderPositionFromValue(self.minimum(), self.maximum(), self.value(),
-                                                 int(rail.width()), option.upsideDown)
-        if self.isEnabled():
-            color = QColor("#21834C" if light else "#5CE092")
+        painter.drawRoundedRect(rail, rail_h / 2.0, rail_h / 2.0)
+        has_range = self.maximum() > self.minimum()
+        position = (
+            QStyle.sliderPositionFromValue(
+                self.minimum(), self.maximum(), self.value(), int(rail.width()), option.upsideDown
+            )
+            if has_range else 0
+        )
+        if self.isEnabled() or (has_range and self.value() > self.minimum()):
+            color = QColor("#1ED760" if (hovered and not light) else ("#21834C" if light else "#1DB954"))
+            if not self.isEnabled():
+                color.setAlpha(190)
             painter.setBrush(color)
             progress = QRectF(rail)
             if option.upsideDown:
                 progress.setLeft(rail.left() + position)
             else:
-                progress.setWidth(position)
-            painter.drawRoundedRect(progress, 2.0, 2.0)
+                progress.setWidth(max(0.0, float(position)))
+            painter.drawRoundedRect(progress, rail_h / 2.0, rail_h / 2.0)
             thumb_center = QPointF(rail.left() + position, rail.center().y())
-            if self.underMouse() or self.isSliderDown():
+            if hovered and self.isEnabled():
                 halo = QColor(color)
-                halo.setAlpha(55)
+                halo.setAlpha(68)
                 painter.setBrush(halo)
-                painter.drawEllipse(thumb_center, 7.0, 7.0)
+                painter.drawEllipse(thumb_center, 7.5, 7.5)
+            thumb_r = 5.4 if hovered else 4.6
             painter.setBrush(color if light else QColor("#F5F8FC"))
-            painter.drawEllipse(thumb_center, 4.8, 4.8)
+            painter.drawEllipse(thumb_center, thumb_r, thumb_r)
         painter.end()
 
     def mousePressEvent(self, event):
@@ -5214,6 +5358,209 @@ class RadioDialog(QDialog):
         if callable(callback):
             QTimer.singleShot(0, callback)
         self.deleteLater()
+
+
+class LyricsWorker(QThread):
+    """Загружает синхронизированный (LRC) или обычный текст песни из публичного каталога LRCLIB."""
+    lyrics_ready = pyqtSignal(str, list, str)
+
+    def __init__(self, track, parent=None):
+        super().__init__(parent)
+        self.track = dict(track or {})
+
+    @staticmethod
+    def _clean_query(title, artist):
+        clean_title = re.sub(r"\s*[\(\[][^\)\]]*(?:official|video|audio|lyrics|prod\.?|feat\.?|ft\.?)[^\)\]]*[\)\]]", "", str(title or ""), flags=re.IGNORECASE)
+        clean_title = re.sub(r"\s+", " ", clean_title).strip()
+        clean_artist = re.sub(r"\s*-\s*Topic$", "", str(artist or ""), flags=re.IGNORECASE).strip()
+        return clean_title or str(title or "").strip(), clean_artist
+
+    @staticmethod
+    def _parse_lrc(lrc_text):
+        lines = []
+        pattern = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\](.*)")
+        for raw in str(lrc_text or "").splitlines():
+            match = pattern.match(raw.strip())
+            if not match:
+                continue
+            minutes = int(match.group(1))
+            seconds = int(match.group(2))
+            frac = match.group(3) or "0"
+            ms = int(frac.ljust(3, "0")[:3])
+            total_ms = (minutes * 60 + seconds) * 1000 + ms
+            content = match.group(4).strip()
+            if content:
+                lines.append((total_ms, content))
+        lines.sort(key=lambda item: item[0])
+        return lines
+
+    def run(self):
+        import urllib.parse
+        import urllib.request
+
+        url_key = str(self.track.get("url") or "")
+        raw_title = str(self.track.get("title") or "")
+        raw_artist = str(self.track.get("artist_display") or self.track.get("artist") or "")
+        title, artist = self._clean_query(raw_title, raw_artist)
+        if " - " in title and (not artist or artist.casefold() in ("исполнитель неизвестен", "unknown artist")):
+            parts = title.split(" - ", 1)
+            artist, title = parts[0].strip(), parts[1].strip()
+        queries = [f"{artist} {title}".strip(), title]
+        for q in queries:
+            if not q:
+                continue
+            try:
+                api_url = "https://lrclib.net/api/search?" + urllib.parse.urlencode({"q": q})
+                req = urllib.request.Request(api_url, headers={"User-Agent": "AuroraMusicPlayer/1.2"})
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if isinstance(payload, list) and payload:
+                    best = next((item for item in payload if isinstance(item, dict) and item.get("syncedLyrics")), payload[0])
+                    synced = self._parse_lrc(best.get("syncedLyrics") or "")
+                    plain = str(best.get("plainLyrics") or "").strip()
+                    if synced or plain:
+                        self.lyrics_ready.emit(url_key, synced, plain)
+                        return
+            except Exception:
+                continue
+        self.lyrics_ready.emit(url_key, [], "")
+
+
+class LyricsDialog(QDialog):
+    """Полупрозрачная панель синхронизированного текста песни (караоке-режим с перемоткой по клику)."""
+
+    def __init__(self, player):
+        super().__init__(player)
+        self.player_window = player
+        self.setObjectName("lyricsDialog")
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setModal(False)
+        self._synced_lines = []
+        self._active_index = -1
+        self._current_url = ""
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(36, 36, 36, 36)
+        card = QFrame(self)
+        card.setObjectName("radioCard")
+        card.setMaximumWidth(640)
+        card.setMinimumWidth(460)
+        self.card = card
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(28, 22, 28, 24)
+        card_layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        badge = QLabel("ТЕКСТ ПЕСНИ · LYRICS")
+        badge.setObjectName("radioBrand")
+        top.addWidget(badge)
+        top.addStretch(1)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.close)
+        top.addWidget(close_btn)
+        card_layout.addLayout(top)
+
+        self.title_label = QLabel("Ничего не играет")
+        self.title_label.setObjectName("radioTrackTitle")
+        self.title_label.setWordWrap(True)
+        card_layout.addWidget(self.title_label)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("radioStatus")
+        card_layout.addWidget(self.status_label)
+
+        self.lines_list = QListWidget()
+        self.lines_list.setObjectName("lyricsList")
+        self.lines_list.setWordWrap(True)
+        self.lines_list.setSpacing(4)
+        self.lines_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lines_list.itemClicked.connect(self._on_line_clicked)
+        card_layout.addWidget(self.lines_list, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card, 1)
+        row.addStretch(1)
+        root.addLayout(row, 1)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(8, 10, 14, 195))
+        painter.end()
+
+    def set_track_loading(self, track):
+        self._current_url = str((track or {}).get("url") or "")
+        self._synced_lines = []
+        self._active_index = -1
+        title = str((track or {}).get("title") or "Без названия")
+        artist = str((track or {}).get("artist_display") or (track or {}).get("artist") or "")
+        self.title_label.setText(f"{title} — {artist}" if artist else title)
+        self.status_label.setText("Ищем синхронизированный текст…")
+        self.status_label.show()
+        self.lines_list.clear()
+
+    def set_lyrics(self, url, synced_lines, plain_text):
+        if url != self._current_url:
+            return
+        self.lines_list.clear()
+        self._synced_lines = list(synced_lines or [])
+        self._active_index = -1
+        if self._synced_lines:
+            self.status_label.setText("Нажми на любую строчку, чтобы перемотать к ней")
+            for ms, text in self._synced_lines:
+                item = QListWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, ms)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                font = QFont(self.font())
+                font.setPointSize(12)
+                font.setWeight(QFont.Weight.DemiBold)
+                item.setFont(font)
+                self.lines_list.addItem(item)
+            self.sync_position(self.player_window.player.position())
+        elif plain_text:
+            self.status_label.setText("Текст без таймкодов")
+            for raw_line in plain_text.splitlines():
+                item = QListWidgetItem(raw_line or " ")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.lines_list.addItem(item)
+        else:
+            self.status_label.setText("Текст для этого трека не найден в базе LRCLIB.")
+
+    def sync_position(self, position_ms):
+        if not self._synced_lines or not self.isVisible():
+            return
+        idx = -1
+        for i, (ms, _) in enumerate(self._synced_lines):
+            if position_ms + 180 >= ms:
+                idx = i
+            else:
+                break
+        if idx == self._active_index:
+            return
+        self._active_index = idx
+        light = getattr(self.player_window, "theme", "dark") == "light"
+        for i in range(self.lines_list.count()):
+            item = self.lines_list.item(i)
+            font = item.font()
+            if i == idx:
+                font.setPointSize(14)
+                font.setWeight(QFont.Weight.ExtraBold)
+                item.setForeground(QColor("#167A40" if light else "#5CE092"))
+            else:
+                font.setPointSize(11)
+                font.setWeight(QFont.Weight.Medium)
+                item.setForeground(QColor("#647285" if light else "#8E9BAE"))
+            item.setFont(font)
+        if 0 <= idx < self.lines_list.count():
+            self.lines_list.scrollToItem(self.lines_list.item(idx), QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _on_line_clicked(self, item):
+        ms = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(ms, int) and self.player_window.player.isSeekable():
+            self.player_window.player.setPosition(ms)
 
 
 class SettingsDialog(QDialog):
@@ -6072,7 +6419,9 @@ class MusicPlayer(QMainWindow):
                 self.toggle_favorite(track)
 
     def escape_shortcut(self):
-        if self.view_stack.currentWidget() is self.cover_page:
+        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
+            self.lyrics_dialog.close()
+        elif self.view_stack.currentWidget() is self.cover_page:
             self.close_cover_view()
         elif self.queue_open:
             self.toggle_queue()
@@ -6080,6 +6429,45 @@ class MusicPlayer(QMainWindow):
             dialog = self.radio_dialog
             self.radio_dialog = None
             dialog.fade_out()
+
+    def toggle_lyrics_dialog(self):
+        dialog = getattr(self, "lyrics_dialog", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.close()
+            return
+        track = self.current_track or self.requested_track
+        if not isinstance(track, dict) or not track.get("url"):
+            self.show_toast("Включи трек, чтобы открыть синхронизированный текст песни.")
+            return
+        if dialog is None:
+            dialog = LyricsDialog(self)
+            self.lyrics_dialog = dialog
+        dialog.setGeometry(self.geometry())
+        dialog.show()
+        dialog.raise_()
+        self._request_lyrics_for_track(track)
+
+    def _request_lyrics_for_track(self, track):
+        dialog = getattr(self, "lyrics_dialog", None)
+        if dialog is None or not dialog.isVisible() or not isinstance(track, dict):
+            return
+        url = str(track.get("url") or "")
+        cached = getattr(self, "_lyrics_cache", {}).get(url)
+        dialog.set_track_loading(track)
+        if cached is not None:
+            dialog.set_lyrics(url, cached[0], cached[1])
+            return
+        worker = LyricsWorker(track, self)
+        self._lyrics_worker = worker
+        def _done(track_url, synced, plain):
+            if not hasattr(self, "_lyrics_cache"):
+                self._lyrics_cache = {}
+            self._lyrics_cache[track_url] = (synced, plain)
+            if getattr(self, "lyrics_dialog", None) is not None:
+                self.lyrics_dialog.set_lyrics(track_url, synced, plain)
+        worker.lyrics_ready.connect(_done)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -6098,8 +6486,22 @@ class MusicPlayer(QMainWindow):
         if hasattr(self, "toast"):
             self.toast.show_message(message, duration)
 
+    def _sync_bottom_bar_side_widths(self):
+        if not hasattr(self, "bottom_track_info") or not hasattr(self, "bottom_right_tools"):
+            return
+        side_w = max(360, min(460, (self.width() - 520) // 2))
+        self.bottom_track_info.setFixedWidth(side_w)
+        self.bottom_right_tools.setFixedWidth(side_w)
+        label_max = max(220, side_w - 116)
+        self.bottom_labels_box.setMaximumWidth(label_max)
+        self.bottom_title.setMaximumWidth(label_max)
+        self.bottom_artist.setMaximumWidth(max(215, label_max - 5))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._sync_bottom_bar_side_widths()
+        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
+            self.lyrics_dialog.setGeometry(self.geometry())
         if hasattr(self, "cover_page") and not self._force_exit:
             QTimer.singleShot(0, self.refresh_current_track_views)
             self._position_expanded_cover()
@@ -7148,10 +7550,13 @@ class MusicPlayer(QMainWindow):
         for button in (self.bottom_artist, self.expanded_artist):
             button.setEnabled(bool(name))
             button.setCursor(Qt.CursorShape.PointingHandCursor if name else Qt.CursorShape.ArrowCursor)
-            max_w = 215 if button is self.bottom_artist else max(40, button.width() - 8)
+            max_w = max(215, self.bottom_artist.maximumWidth()) if button is self.bottom_artist else max(40, button.width() - 8)
             button.setText(button.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, max_w))
             button.setToolTip(f"Открыть исполнителя: {name}" if name else display)
             button.setAccessibleName(f"Открыть исполнителя: {name}" if name else display)
+        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible() and available:
+            if getattr(self.lyrics_dialog, "_current_url", "") != str(track.get("url") or ""):
+                self._request_lyrics_for_track(track)
         if self.view_stack.currentWidget() is self.cover_page:
             if not available:
                 self.close_cover_view()
@@ -7210,6 +7615,7 @@ class MusicPlayer(QMainWindow):
 
         # 1. Левая колонка: Обложка + (Название / Исполнитель) + Сердечко сразу рядом с текстом.
         track_info = QWidget()
+        self.bottom_track_info = track_info
         track_info.setFixedWidth(360)
         info = QHBoxLayout(track_info)
         info.setContentsMargins(0, 0, 0, 0)
@@ -7229,8 +7635,9 @@ class MusicPlayer(QMainWindow):
         info.addWidget(self.bottom_cover)
 
         labels_box = QWidget(track_info)
+        self.bottom_labels_box = labels_box
         labels_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        labels_box.setMaximumWidth(220)
+        labels_box.setMaximumWidth(244)
         labels = QVBoxLayout(labels_box)
         labels.setContentsMargins(0, 2, 0, 2)
         labels.setSpacing(2)
@@ -7241,7 +7648,7 @@ class MusicPlayer(QMainWindow):
         self.bottom_artist.setObjectName("bottomArtistLink")
         self.bottom_artist.setFlat(True)
         self.bottom_artist.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        self.bottom_artist.setMaximumWidth(215)
+        self.bottom_artist.setMaximumWidth(238)
         self.bottom_artist.clicked.connect(self.open_current_artist)
         labels.addWidget(self.bottom_title)
         labels.addWidget(self.bottom_artist)
@@ -7339,13 +7746,18 @@ class MusicPlayer(QMainWindow):
         base.addWidget(central_controls, 1, Qt.AlignmentFlag.AlignVCenter)
         base.addStretch(1)
 
-        # 3. Правая колонка Spotify: Очередь + Громкость + Меню (выровнены по вертикали).
+        # 3. Правая колонка Spotify: Текст песни + Мини-плеер + Очередь + Громкость + Меню.
         right_tools = QWidget()
+        self.bottom_right_tools = right_tools
         right_tools.setFixedWidth(360)
         right_row = QHBoxLayout(right_tools)
         right_row.setContentsMargins(0, 0, 0, 0)
-        right_row.setSpacing(8)
+        right_row.setSpacing(6)
         right_row.addStretch(1)
+        self.bottom_lyrics_button = tool_button("lyrics", "Синхронизированный текст песни (Lyrics)")
+        self.bottom_lyrics_button.clicked.connect(self.toggle_lyrics_dialog)
+        self.bottom_mini_button = tool_button("mini", "Мини-плеер поверх окон (Ctrl+M)")
+        self.bottom_mini_button.clicked.connect(self.show_mini_player)
         self.bottom_queue_button = tool_button("queue", "Показать / скрыть очередь")
         volume_icon = QLabel()
         self.volume_icon = volume_icon
@@ -7353,7 +7765,7 @@ class MusicPlayer(QMainWindow):
         self.volume_slider = ClickSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(int(round(self.volume * 100)))
-        self.volume_slider.setFixedWidth(104)
+        self.volume_slider.setFixedWidth(96)
         self.volume_value_label = QLabel(f"{int(round(self.volume * 100))}%")
         self.volume_value_label.setObjectName("timeText")
         self.volume_value_label.setFixedWidth(32)
@@ -7361,12 +7773,14 @@ class MusicPlayer(QMainWindow):
         self.menu_button = tool_button("menu", "Действия с треком и настройки")
         self.menu_button.setIcon(QIcon())
         self.menu_button.setText("⋯")
+        right_row.addWidget(self.bottom_lyrics_button)
+        right_row.addWidget(self.bottom_mini_button)
         right_row.addWidget(self.bottom_queue_button)
-        right_row.addSpacing(4)
+        right_row.addSpacing(2)
         right_row.addWidget(volume_icon)
         right_row.addWidget(self.volume_slider)
         right_row.addWidget(self.volume_value_label)
-        right_row.addSpacing(4)
+        right_row.addSpacing(2)
         right_row.addWidget(self.menu_button)
         base.addWidget(right_tools, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -7473,10 +7887,11 @@ class MusicPlayer(QMainWindow):
             QScrollArea#startCardsScroll,
             QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
             QWidget#startCardsWidget { background: #151921; border: none; }
-            QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; border: none; }
-            QScrollBar::handle:vertical { background: #3E4859; min-height: 28px; border-radius: 3.5px; }
-            QScrollBar::handle:vertical:hover { background: #66E099; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar:vertical { background: transparent; width: 5px; margin: 4px 1px; border: none; }
+            QScrollBar::handle:vertical { background: rgba(157, 168, 184, 68); min-height: 28px; border-radius: 2.5px; }
+            QScrollBar::handle:vertical:hover { background: #5CE092; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; height: 0px; }
 
             QLabel#startSectionTitle { color: #FFFFFF; font-size: 17pt; font-weight: 800; padding: 2px 0; }
             QPushButton#addPlaylistCard {
@@ -7680,8 +8095,8 @@ class MusicPlayer(QMainWindow):
             QScrollArea#startCardsScroll,
             QScrollArea#startCardsScroll QWidget#qt_scrollarea_viewport,
             QWidget#startCardsWidget, QListWidget { background: #FFFFFF; border: none; }
-            QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; border: none; }
-            QScrollBar::handle:vertical { background: #C2CDD9; min-height: 28px; border-radius: 3.5px; }
+            QScrollBar:vertical { background: transparent; width: 5px; margin: 4px 1px; border: none; }
+            QScrollBar::handle:vertical { background: rgba(100, 114, 133, 78); min-height: 28px; border-radius: 2.5px; }
             QScrollBar::handle:vertical:hover { background: #21834C; }
 
             QLabel#startSectionTitle, QLabel#sectionTitle, QLabel#pageTitle,
@@ -7802,6 +8217,10 @@ class MusicPlayer(QMainWindow):
             button.setIcon(control_icon(name, icon_color))
         self.shuffle_button.setIcon(control_icon("shuffle", "#1DB954" if self.shuffle_enabled else icon_color))
         self.repeat_button.setIcon(control_icon("repeat", "#1DB954" if self.repeat_mode != "off" else icon_color))
+        if hasattr(self, "bottom_lyrics_button"):
+            self.bottom_lyrics_button.setIcon(control_icon("lyrics", icon_color))
+        if hasattr(self, "bottom_mini_button"):
+            self.bottom_mini_button.setIcon(control_icon("mini", icon_color))
         self.bottom_queue_button.setIcon(control_icon("queue", "#1DB954" if self.queue_open else icon_color))
         self.volume_icon.setPixmap(control_icon("volume", icon_color).pixmap(18, 18))
         self.search_icon.setPixmap(control_icon("search", icon_color).pixmap(20, 20))
@@ -8147,8 +8566,11 @@ class MusicPlayer(QMainWindow):
                 self.bottom_title.setText(current.get("title") or "Без названия")
                 self.bottom_artist.setText(current.get("artist") or "")
                 self.show_cover(current.get("thumbnail", ""))
+                restored_duration_ms = max(0, int((current.get("duration") or 0) * 1000))
                 self.position_label.setText(self.format_position(position))
-                self.duration_label.setText(self.format_position(current.get("duration", 0) * 1000))
+                self.duration_label.setText(self.format_position(restored_duration_ms))
+                self.seek_slider.setRange(0, restored_duration_ms)
+                self.seek_slider.setValue(min(position, restored_duration_ms) if restored_duration_ms else 0)
                 self.update_bottom_track_actions()
                 self.set_status("Очередь восстановлена. Нажми ▶, чтобы продолжить с прежнего места.")
         except (OSError, ValueError, TypeError, AttributeError) as error:
@@ -9652,7 +10074,7 @@ class MusicPlayer(QMainWindow):
         self.sidebar_library_layout.addWidget(supermix_item)
         self.sidebar_library_items.append(supermix_item)
 
-        shuffle_item = SidebarMediaItem("Перемешать лайки", "Микс • Случайный порядок", "shuffle", self.sidebar_library_widget)
+        shuffle_item = SidebarMediaItem("Перемешать лайки", "Микс • Из твоих лайков", "shuffle", self.sidebar_library_widget)
         shuffle_item.track_key = "__shuffle__"
         shuffle_item.clicked.connect(lambda checked=False, src=source: self.play_personal_mix(src))
         self.sidebar_library_layout.addWidget(shuffle_item)
@@ -9739,15 +10161,17 @@ class MusicPlayer(QMainWindow):
         horizontal = len(self.start_cards) == 1 and not self.start_cards[0].tile_mode
         if horizontal:
             columns = 1
-        side = width - 2 if horizontal else min(224, (width - (columns - 1) * 16) // columns)
-        signature = (columns, side, len(self.start_cards))
+        max_tile_w = 340 if columns == 3 else 224
+        card_w = width - 2 if horizontal else min(max_tile_w, (width - (columns - 1) * 16 - 4) // columns)
+        card_h = 148 if horizontal else min(224, card_w) + 52
+        signature = (columns, card_w, card_h, len(self.start_cards))
         if signature == getattr(self, "_home_layout_signature", None):
             return
         self._home_layout_signature = signature
         while self.home_tiles_layout.count():
             self.home_tiles_layout.takeAt(0)
         for index, card in enumerate(self.start_cards):
-            card.setFixedSize(side, 148 if horizontal else side + 50)
+            card.setFixedSize(card_w, card_h)
             self.home_tiles_layout.addWidget(card, index // columns, index % columns,
                                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         for column in range(4):
@@ -9834,12 +10258,44 @@ class MusicPlayer(QMainWindow):
         requested = self.requested_track if isinstance(self.requested_track, dict) else None
         requested_url = str((requested or {}).get("url") or "")
         requested_source = str((requested or {}).get("source") or "")
+        duration_lookup = {}
+        for pool in (self.youtube_liked_tracks, self.soundcloud_liked_tracks, list(self.favorites.values()), self.queue_tracks):
+            for item in pool:
+                if isinstance(item, dict) and item.get("url") and item.get("duration"):
+                    duration_lookup[str(item["url"])] = item["duration"]
         for track in tracks:
-            row = TrackRow(track, compact=True, removable=False, parent=self.recent_rows_widget)
+            enriched = dict(track)
+            if not enriched.get("duration") and str(enriched.get("url") or "") in duration_lookup:
+                enriched["duration"] = duration_lookup[str(enriched["url"])]
+            is_fav = (
+                self.is_youtube_music_liked(enriched)
+                if enriched.get("source") == "youtube"
+                else self.is_favorite(enriched)
+            )
+            row = TrackRow(enriched, compact=True, is_favorite=is_fav, removable=False, parent=self.recent_rows_widget)
             row.setFixedHeight(64)
             row.play_requested.connect(lambda selected: self.add_to_queue(selected, True))
             row.artist_requested.connect(
-                lambda artist_data, src=track.get("source"): self.search_artist_name(artist_data, src)
+                lambda artist_data, src=enriched.get("source"): self.search_artist_name(artist_data, src)
+            )
+            if hasattr(row, "favorite_button"):
+                if enriched.get("source") == "youtube":
+                    vid = self.youtube_video_id(enriched)
+                    row.favorite_button.setEnabled(vid not in self._youtube_rating_pending)
+                    row.favorite_button.clicked.connect(
+                        lambda checked, t=dict(enriched), b=row.favorite_button: self.set_youtube_music_like(t, checked, b)
+                    )
+                else:
+                    row.favorite_button.clicked.connect(
+                        lambda checked=False, t=dict(enriched), b=row.favorite_button: self.toggle_favorite(t, b)
+                    )
+            if hasattr(row, "menu_button"):
+                row.menu_button.clicked.connect(
+                    lambda checked=False, t=dict(enriched), b=row.menu_button: self._open_recent_row_menu(t, b)
+                )
+            row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            row.customContextMenuRequested.connect(
+                lambda pos, t=dict(enriched), r=row: self._open_recent_row_menu(t, r, pos)
             )
             matches_current = bool(
                 current_url and str(track.get("url") or "") == current_url
@@ -9862,6 +10318,19 @@ class MusicPlayer(QMainWindow):
             empty.setMinimumHeight(90)
             self.recent_rows_layout.addWidget(empty)
         self.refresh_sidebar_library()
+
+    def _open_recent_row_menu(self, track, anchor_widget, local_pos=None):
+        if not isinstance(track, dict) or not track.get("url"):
+            return
+        menu = self.make_context_menu()
+        menu.addAction("▶  Воспроизвести сейчас", lambda: self.add_to_queue(dict(track), True))
+        menu.addAction("＋  Добавить в очередь", lambda: self.add_to_queue(dict(track), False))
+        menu.addAction("📻  Запустить радио по треку", lambda: self.start_radio(dict(track)))
+        if self.artist_card_name(track):
+            menu.addAction("👤  Перейти к исполнителю", lambda: self.search_artist_name(dict(track), track.get("source")))
+        menu.addAction("🎤  Текст песни (Lyrics)", lambda: (self.add_to_queue(dict(track), True), QTimer.singleShot(150, self.toggle_lyrics_dialog)))
+        global_pos = anchor_widget.mapToGlobal(local_pos if local_pos is not None else QPoint(0, anchor_widget.height()))
+        menu.exec(global_pos)
 
     def refresh_connection_badge(self):
         """Состояние подключения и обновления относится к выбранной вкладке лайков."""
@@ -11472,6 +11941,26 @@ class MusicPlayer(QMainWindow):
                     button.repaint()
                 finally:
                     button.blockSignals(signals_were_blocked)
+
+        for row in getattr(self, "recent_rows", []):
+            row_track = getattr(row, "track", None)
+            if not isinstance(row_track, dict) or not hasattr(row, "favorite_button"):
+                continue
+            if str(row_track.get("source") or "") != "youtube":
+                continue
+            row_video_id = self.youtube_video_id(row_track)
+            if not row_video_id or (video_id is not None and row_video_id != video_id):
+                continue
+            liked = self._youtube_rating_targets.get(row_video_id, row_video_id in liked_ids)
+            pending = row_video_id in self._youtube_rating_pending
+            button = row.favorite_button
+            was_blocked = button.blockSignals(True)
+            try:
+                button.setChecked(liked)
+                button.setIcon(control_icon("heart" if liked else "heart-outline", "#1DB954" if liked else "#B3B3B3", 22))
+                button.setEnabled(not pending)
+            finally:
+                button.blockSignals(was_blocked)
 
         self.update_bottom_track_actions()
 
@@ -13430,6 +13919,8 @@ class MusicPlayer(QMainWindow):
         self.position_label.setText(self.format_position(position))
         if self.mini_player is not None and self.mini_player.isVisible():
             self.mini_player.sync_position()
+        if getattr(self, "lyrics_dialog", None) is not None and self.lyrics_dialog.isVisible():
+            self.lyrics_dialog.sync_position(position)
 
         # Проверка дешёвая: порог очереди и worker защищают от повторных запросов.
         if self.queue_mode == "supermix":
