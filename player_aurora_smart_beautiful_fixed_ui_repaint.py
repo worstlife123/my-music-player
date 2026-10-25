@@ -18,6 +18,7 @@ import json
 import threading
 import math
 import re
+import ssl
 import unicodedata
 import configparser
 from uuid import uuid4
@@ -2583,15 +2584,31 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
             self.failed.emit(message)
 
 
+def _create_stream_ssl_context():
+    """Создаёт проверенный SSLContext с учётом системных CA или certifi."""
+    ctx = ssl.create_default_context()
+    if not os.environ.get("SSL_CERT_FILE") and not os.environ.get("SSL_CERT_DIR"):
+        try:
+            import certifi
+            cafile = certifi.where()
+            if cafile and os.path.isfile(cafile):
+                ctx.load_verify_locations(cafile=cafile)
+        except Exception:
+            pass
+    return ctx
+
+
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
 
 class BufferedStreamEntry:
-    """Многопоточный буфер потока с подкачкой мелкими Range-чанками и автоповтором при сбросе соединения."""
-    CHUNK_SIZE = 384 * 1024
-    MAX_BUFFER_BYTES = 40 * 1024 * 1024
+    """Блочный буфер аудиопотока (256 КБ на блок) с поддержкой произвольного Range-доступа FFmpeg и автоповтором при сбросе соединения."""
+    BLOCK_SIZE = 256 * 1024
+    READAHEAD_BLOCKS = 16
+    MAX_CACHED_BLOCKS = 180
+    MAX_HLS_BYTES = 45 * 1024 * 1024
 
     def __init__(self, remote_url, headers=None, content_type="audio/mp4", protocol="https"):
         self.remote_url = str(remote_url or "")
@@ -2609,7 +2626,11 @@ class BufferedStreamEntry:
                     self.headers[str(k)] = str(v)
         self.content_type = str(content_type or "audio/mp4")
         self.protocol = str(protocol or "https")
-        self.buffer = bytearray()
+        self.blocks = OrderedDict()
+        self._inflight = set()
+        self._cursor_block = 0
+        self.hls_buffer = bytearray()
+        self.Sequential_mode = False
         self.total_size = None
         self.eof = False
         self.failed = False
@@ -2619,6 +2640,16 @@ class BufferedStreamEntry:
         self.last_access = self.created_at
         self._cond = threading.Condition()
         self._thread = None
+        self._ssl_ctx = None
+
+    def _build_opener(self):
+        if self._ssl_ctx is None:
+            self._ssl_ctx = _create_stream_ssl_context()
+        return build_opener(HTTPSHandler(context=self._ssl_ctx))
+
+    def _is_hls(self):
+        lower_url = self.remote_url.lower()
+        return "m3u8" in self.protocol.lower() or ".m3u8" in lower_url
 
     def start(self):
         with self._cond:
@@ -2632,42 +2663,251 @@ class BufferedStreamEntry:
             self.closed = True
             self._cond.notify_all()
 
-    def wait_for_initial_bytes(self, min_bytes=65536, timeout=4.5):
+    def wait_for_initial_bytes(self, min_bytes=32768, timeout=3.5):
         self.start()
         deadline = time.monotonic() + max(0.2, float(timeout))
         with self._cond:
-            while len(self.buffer) < min_bytes and not self.eof and not self.failed and not self.closed:
+            while not self.closed and not self.failed:
+                if self._is_hls() or self.Sequential_mode:
+                    if len(self.hls_buffer) >= min_bytes or (self.eof and len(self.hls_buffer) > 0):
+                        return True
+                else:
+                    first_block = self.blocks.get(0)
+                    if first_block and len(first_block) > 0:
+                        return True
+                if self.eof:
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                self._cond.wait(timeout=min(0.25, remaining))
-            return len(self.buffer) > 0
+                self._cond.wait(timeout=min(0.2, remaining))
+            if self._is_hls() or self.Sequential_mode:
+                return len(self.hls_buffer) > 0
+            return bool(self.blocks.get(0))
 
-    def wait_for_offset(self, needed_end, timeout=8.0):
+    def _store_block(self, block_idx, data):
+        with self._cond:
+            self.blocks[block_idx] = bytes(data)
+            self.blocks.move_to_end(block_idx)
+            while len(self.blocks) > self.MAX_CACHED_BLOCKS:
+                # Не вытесняем блок 0 (заголовок контейнера) и текущий блок курсора
+                oldest_key = next(iter(self.blocks))
+                if oldest_key in (0, self._cursor_block) and len(self.blocks) > 2:
+                    self.blocks.move_to_end(oldest_key)
+                    oldest_key = next(iter(self.blocks))
+                self.blocks.pop(oldest_key, None)
+            self._cond.notify_all()
+
+    def _fetch_block(self, block_idx, opener=None):
+        """Скачивает один блок 256 КБ по HTTP Range с до 4 попытками при сетевом сбое."""
+        with self._cond:
+            if self.closed:
+                return None
+            if block_idx in self.blocks:
+                self.blocks.move_to_end(block_idx)
+                return self.blocks[block_idx]
+            if self.total_size is not None and block_idx * self.BLOCK_SIZE >= self.total_size > 0:
+                return b""
+            while block_idx in self._inflight and not self.closed:
+                self._cond.wait(timeout=0.25)
+                if block_idx in self.blocks:
+                    return self.blocks[block_idx]
+            if self.closed:
+                return None
+            self._inflight.add(block_idx)
+
+        try:
+            if opener is None:
+                opener = self._build_opener()
+            start_byte = block_idx * self.BLOCK_SIZE
+            end_byte = start_byte + self.BLOCK_SIZE - 1
+            if self.total_size is not None and self.total_size > 0:
+                if start_byte >= self.total_size:
+                    return b""
+                end_byte = min(end_byte, self.total_size - 1)
+
+            last_err = ""
+            for attempt in range(4):
+                if self.closed:
+                    return None
+                req_headers = dict(self.headers)
+                req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+                try:
+                    req = Request(self.remote_url, headers=req_headers)
+                    with opener.open(req, timeout=5.5) as resp:
+                        status = getattr(resp, "status", 200)
+                        ctype = resp.headers.get("Content-Type")
+                        if ctype:
+                            self.content_type = ctype.split(";")[0].strip()
+                        content_range = resp.headers.get("Content-Range") or ""
+                        if "/" in content_range:
+                            total_part = content_range.rsplit("/", 1)[-1].strip()
+                            if total_part.isdigit():
+                                with self._cond:
+                                    self.total_size = int(total_part)
+                        elif status == 200 and self.total_size is None:
+                            clen = resp.headers.get("Content-Length") or ""
+                            if clen.strip().isdigit():
+                                with self._cond:
+                                    self.total_size = int(clen.strip())
+
+                        if status == 200 and block_idx == 0 and not content_range:
+                            # Сервер не поддерживает Range и отдаёт весь поток целиком
+                            first_chunk = resp.read(self.BLOCK_SIZE)
+                            if not first_chunk:
+                                break
+                            self._store_block(0, first_chunk)
+                            seq_idx = 1
+                            while not self.closed and seq_idx < self.MAX_CACHED_BLOCKS:
+                                nxt = resp.read(self.BLOCK_SIZE)
+                                if not nxt:
+                                    break
+                                self._store_block(seq_idx, nxt)
+                                seq_idx += 1
+                            with self._cond:
+                                if self.total_size is None:
+                                    self.total_size = sum(len(b) for b in self.blocks.values())
+                                self.eof = True
+                                self._cond.notify_all()
+                            return first_chunk
+
+                        if status == 200 and start_byte > 0:
+                            # Сервер проигнорировал Range на ненулевом смещении
+                            skipped = 0
+                            while skipped < start_byte and not self.closed:
+                                discard = resp.read(min(65536, start_byte - skipped))
+                                if not discard:
+                                    break
+                                skipped += len(discard)
+
+                        expected_len = end_byte - start_byte + 1
+                        buf = bytearray()
+                        while not self.closed and len(buf) < expected_len:
+                            chunk = resp.read(min(65536, expected_len - len(buf)))
+                            if not chunk:
+                                break
+                            buf.extend(chunk)
+
+                        if buf:
+                            data = bytes(buf)
+                            self._store_block(block_idx, data)
+                            if self.total_size is not None and start_byte + len(data) >= self.total_size:
+                                with self._cond:
+                                    self.eof = True
+                                    self._cond.notify_all()
+                            return data
+                        if self.total_size is not None and start_byte >= self.total_size:
+                            return b""
+                except HTTPError as http_err:
+                    last_err = f"HTTP {http_err.code}"
+                    if http_err.code == 416:
+                        with self._cond:
+                            if self.total_size is None and start_byte > 0:
+                                self.total_size = start_byte
+                            self.eof = True
+                            self._cond.notify_all()
+                        return b""
+                    if http_err.code in (401, 403) and block_idx == 0 and attempt >= 1:
+                        break
+                    time.sleep(0.15 * (attempt + 1))
+                except Exception as err:
+                    last_err = str(err)
+                    time.sleep(0.15 * (attempt + 1))
+
+            with self._cond:
+                self.last_error = last_err
+                if block_idx == 0 and 0 not in self.blocks:
+                    self.failed = True
+                self._cond.notify_all()
+            return None
+        finally:
+            with self._cond:
+                self._inflight.discard(block_idx)
+                self._cond.notify_all()
+
+    def read_at(self, position, length):
+        """Читает до length байт с произвольной позиции position (поддерживает перемотку и чтение атомов в конце MP4)."""
         self.start()
-        deadline = time.monotonic() + max(0.2, float(timeout))
         with self._cond:
             self.last_access = time.monotonic()
-            while len(self.buffer) < needed_end and not self.eof and not self.failed and not self.closed:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._cond.wait(timeout=min(0.25, remaining))
-            return len(self.buffer)
 
-    def _build_opener(self):
-        return build_opener(HTTPSHandler(context=create_verified_ssl_context()))
+        if self._is_hls() or self.Sequential_mode:
+            deadline = time.monotonic() + 7.0
+            with self._cond:
+                while len(self.hls_buffer) <= position and not self.eof and not self.failed and not self.closed:
+                    rem = deadline - time.monotonic()
+                    if rem <= 0:
+                        break
+                    self._cond.wait(timeout=min(0.25, rem))
+                if position >= len(self.hls_buffer):
+                    return b""
+                upper = min(len(self.hls_buffer), position + length)
+                return bytes(self.hls_buffer[position:upper])
 
-    def _is_hls(self):
-        lower_url = self.remote_url.lower()
-        return "m3u8" in self.protocol.lower() or ".m3u8" in lower_url
+        if self.total_size is not None and position >= self.total_size > 0:
+            return b""
+
+        block_idx = position // self.BLOCK_SIZE
+        offset_in_block = position % self.BLOCK_SIZE
+        with self._cond:
+            self._cursor_block = block_idx
+            self._cond.notify_all()
+
+        block_data = self._fetch_block(block_idx)
+        if not block_data or offset_in_block >= len(block_data):
+            return b""
+        upper = min(len(block_data), offset_in_block + length)
+        return block_data[offset_in_block:upper]
 
     def _download_worker(self):
-        opener = self._build_opener()
-        if self._is_hls():
-            self._download_hls(opener)
-        else:
-            self._download_range_chunks(opener)
+        try:
+            opener = self._build_opener()
+            if self._is_hls():
+                self._download_hls(opener)
+                return
+
+            # Сначала обязательно скачиваем блок 0, чтобы узнать total_size и отдать заголовок контейнера
+            first = self._fetch_block(0, opener=opener)
+            if not first:
+                with self._cond:
+                    self.failed = True
+                    self.eof = True
+                    self._cond.notify_all()
+                return
+
+            while not self.closed:
+                with self._cond:
+                    cursor = self._cursor_block
+                next_to_fetch = None
+                for candidate in range(cursor, cursor + self.READAHEAD_BLOCKS):
+                    if self.total_size is not None and candidate * self.BLOCK_SIZE >= self.total_size > 0:
+                        break
+                    with self._cond:
+                        already = candidate in self.blocks or candidate in self._inflight
+                    if not already:
+                        next_to_fetch = candidate
+                        break
+
+                if next_to_fetch is not None:
+                    data = self._fetch_block(next_to_fetch, opener=opener)
+                    if data is None and self.closed:
+                        break
+                    if data == b"":
+                        with self._cond:
+                            self.eof = True
+                            self._cond.notify_all()
+                else:
+                    with self._cond:
+                        if self.closed:
+                            break
+                        self._cond.wait(timeout=0.3)
+        except Exception as err:
+            with self._cond:
+                self.last_error = str(err)
+                if 0 not in self.blocks and len(self.hls_buffer) == 0:
+                    self.failed = True
+                self.eof = True
+                self._cond.notify_all()
 
     def _download_hls(self, opener):
         try:
@@ -2684,10 +2924,11 @@ class BufferedStreamEntry:
                 with self._cond:
                     self.failed = True
                     self.last_error = "Пустой HLS-манифест"
+                    self.eof = True
                     self._cond.notify_all()
                 return
             for seg_url in segments:
-                if self.closed or len(self.buffer) >= self.MAX_BUFFER_BYTES:
+                if self.closed or len(self.hls_buffer) >= self.MAX_HLS_BYTES:
                     break
                 seg_bytes = None
                 for attempt in range(4):
@@ -2704,115 +2945,23 @@ class BufferedStreamEntry:
                         time.sleep(0.15 * (attempt + 1))
                 if not seg_bytes:
                     with self._cond:
-                        self.failed = len(self.buffer) == 0
+                        self.failed = len(self.hls_buffer) == 0
                         self.eof = True
                         self._cond.notify_all()
                     return
                 with self._cond:
-                    self.buffer.extend(seg_bytes)
+                    self.hls_buffer.extend(seg_bytes)
                     self._cond.notify_all()
             with self._cond:
-                self.total_size = len(self.buffer)
+                self.total_size = len(self.hls_buffer)
                 self.eof = True
                 self._cond.notify_all()
         except Exception as err:
             with self._cond:
                 self.last_error = str(err)
-                self.failed = len(self.buffer) == 0
+                self.failed = len(self.hls_buffer) == 0
                 self.eof = True
                 self._cond.notify_all()
-
-    def _download_range_chunks(self, opener):
-        offset = 0
-        consecutive_failures = 0
-        while not self.closed and offset < self.MAX_BUFFER_BYTES:
-            if self.total_size is not None and offset >= self.total_size:
-                with self._cond:
-                    self.eof = True
-                    self._cond.notify_all()
-                return
-            end_byte = offset + self.CHUNK_SIZE - 1
-            if self.total_size is not None:
-                end_byte = min(end_byte, self.total_size - 1)
-            req_headers = dict(self.headers)
-            req_headers["Range"] = f"bytes={offset}-{end_byte}"
-            try:
-                req = Request(self.remote_url, headers=req_headers)
-                with opener.open(req, timeout=6.0) as resp:
-                    status = getattr(resp, "status", 200)
-                    ctype = resp.headers.get("Content-Type")
-                    if ctype:
-                        self.content_type = ctype.split(";")[0].strip()
-                    content_range = resp.headers.get("Content-Range") or ""
-                    if "/" in content_range:
-                        total_part = content_range.rsplit("/", 1)[-1].strip()
-                        if total_part.isdigit():
-                            self.total_size = int(total_part)
-                    elif status == 200 and self.total_size is None:
-                        clen = resp.headers.get("Content-Length") or ""
-                        if clen.strip().isdigit():
-                            self.total_size = int(clen.strip())
-
-                    # Если сервер проигнорировал Range и отдал поток с 0 байта при offset > 0
-                    if status == 200 and offset > 0:
-                        skipped = 0
-                        while skipped < offset and not self.closed:
-                            discard = resp.read(min(65536, offset - skipped))
-                            if not discard:
-                                break
-                            skipped += len(discard)
-
-                    chunk_read = 0
-                    while not self.closed:
-                        block = resp.read(65536)
-                        if not block:
-                            break
-                        with self._cond:
-                            self.buffer.extend(block)
-                            offset = len(self.buffer)
-                            self._cond.notify_all()
-                        chunk_read += len(block)
-                        if status == 200 and offset >= self.MAX_BUFFER_BYTES:
-                            break
-
-                    consecutive_failures = 0
-                    if status == 200 or chunk_read == 0:
-                        if self.total_size is None or offset >= self.total_size or chunk_read == 0:
-                            with self._cond:
-                                self.total_size = len(self.buffer)
-                                self.eof = True
-                                self._cond.notify_all()
-                            return
-            except HTTPError as http_err:
-                self.last_error = f"HTTP {http_err.code}"
-                if http_err.code == 416:
-                    with self._cond:
-                        self.total_size = len(self.buffer)
-                        self.eof = True
-                        self._cond.notify_all()
-                    return
-                consecutive_failures += 1
-                if consecutive_failures >= 4:
-                    with self._cond:
-                        self.failed = len(self.buffer) == 0
-                        self.eof = True
-                        self._cond.notify_all()
-                    return
-                time.sleep(0.2 * consecutive_failures)
-            except Exception as err:
-                self.last_error = str(err)
-                consecutive_failures += 1
-                if consecutive_failures >= 4:
-                    with self._cond:
-                        self.failed = len(self.buffer) == 0
-                        self.eof = True
-                        self._cond.notify_all()
-                    return
-                time.sleep(0.2 * consecutive_failures)
-
-        with self._cond:
-            self.eof = True
-            self._cond.notify_all()
 
 
 class LocalStreamProxy:
@@ -2863,7 +3012,12 @@ class LocalStreamProxy:
                         self.end_headers()
                         return
 
-                    entry.wait_for_offset(65536, timeout=5.0)
+                    if not entry.wait_for_initial_bytes(min_bytes=16384, timeout=4.0):
+                        self.send_response(502)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+
                     range_header = self.headers.get("Range") or ""
                     start_byte = 0
                     end_byte = None
@@ -2878,7 +3032,6 @@ class LocalStreamProxy:
                             if e_part.strip().isdigit():
                                 end_byte = int(e_part.strip())
 
-                    entry.wait_for_offset(start_byte + 65536, timeout=6.0)
                     total = entry.total_size
                     if total is not None and start_byte >= total > 0:
                         self.send_response(416)
@@ -2887,7 +3040,7 @@ class LocalStreamProxy:
                         self.end_headers()
                         return
 
-                    if total is not None:
+                    if total is not None and total > 0:
                         actual_end = min(end_byte, total - 1) if end_byte is not None else (total - 1)
                         content_len = max(0, actual_end - start_byte + 1)
                         self.send_response(206 if is_range else 200)
@@ -2901,7 +3054,6 @@ class LocalStreamProxy:
                     else:
                         self.send_response(200)
                         self.send_header("Content-Type", entry.content_type)
-                        self.send_header("Accept-Ranges", "bytes")
                         self.send_header("Connection", "close")
                         self.end_headers()
 
@@ -2915,16 +3067,10 @@ class LocalStreamProxy:
                         while not entry.closed:
                             if limit_byte is not None and cursor > limit_byte:
                                 break
-                            avail = entry.wait_for_offset(cursor + 65536, timeout=8.0)
-                            if cursor >= avail:
-                                if entry.eof or entry.failed or entry.closed:
-                                    break
-                                continue
-                            with entry._cond:
-                                upper = min(avail, cursor + 65536)
-                                if limit_byte is not None:
-                                    upper = min(upper, limit_byte + 1)
-                                data_slice = bytes(entry.buffer[cursor:upper])
+                            want = 65536
+                            if limit_byte is not None:
+                                want = min(want, limit_byte - cursor + 1)
+                            data_slice = entry.read_at(cursor, want)
                             if not data_slice:
                                 break
                             self.wfile.write(data_slice)
@@ -3006,16 +3152,7 @@ class StreamWorker(QThread):
         )
 
     def _extract(self, options):
-        run_options = dict(options)
-        # При реальном сетевом запуске форсируем IPv4 и устойчивые YouTube-клиенты,
-        # чтобы потоки открывались без VPN и не зависали на битых IPv6-маршрутах.
-        run_options.setdefault("source_address", "0.0.0.0")
-        if str(self.track.get("source") or "") == "youtube":
-            run_options.setdefault(
-                "extractor_args",
-                {"youtube": {"player_client": ["android_vr", "tv", "ios", "web_music", "web"]}},
-            )
-        with YoutubeDL(run_options) as ydl:
+        with YoutubeDL(options) as ydl:
             if type(ydl).__module__.startswith("yt_dlp"):
                 try:
                     from yt_dlp.extractor import soundcloud as sc_mod
@@ -3041,7 +3178,13 @@ class StreamWorker(QThread):
         selected_info = info
         if not stream_url:
             formats = info.get("requested_formats") or info.get("formats") or []
-            selected = next((f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")), None)
+            selected = next(
+                (f for f in formats if f.get("url") and f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")),
+                None,
+            ) or next(
+                (f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")),
+                None,
+            )
             stream_url = selected.get("url") if selected else None
             selected_info = selected or info
         return stream_url, selected_info
@@ -3162,17 +3305,19 @@ class StreamWorker(QThread):
                 proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
                     stream_url, headers=headers, ext=ext, protocol=protocol
                 )
-                if proxy_entry.wait_for_initial_bytes(min_bytes=65536, timeout=4.5):
+                if proxy_entry.wait_for_initial_bytes(min_bytes=32768, timeout=3.0):
                     playback_url = proxy_url
                 else:
                     proxy_entry.close()
-                    # Запасной формат (например, прогрессивный/альтернативный поток), если первый CDN-узел не отдал байты
-                    formats = [
+                    # Запасной аудиоформат (предпочитаем чистый аудиопоток без видео), если первый CDN-узел вернул ошибку
+                    raw_formats = [
                         f for f in (info.get("formats") or [])
                         if isinstance(f, dict) and f.get("url") and f.get("url") != stream_url
                         and f.get("acodec") not in (None, "none")
                     ]
-                    for alt in reversed(formats[-3:]):
+                    pure_audio = [f for f in raw_formats if f.get("vcodec") in (None, "none")]
+                    candidates = (pure_audio or raw_formats)[-2:]
+                    for alt in reversed(candidates):
                         if self._cancel_requested:
                             return
                         alt_headers = alt.get("http_headers") or headers
@@ -3181,7 +3326,7 @@ class StreamWorker(QThread):
                         alt_proxy_url, alt_entry = LocalStreamProxy.instance().register_stream(
                             alt["url"], headers=alt_headers, ext=alt_ext, protocol=alt_proto
                         )
-                        if alt_entry.wait_for_initial_bytes(min_bytes=65536, timeout=4.0):
+                        if alt_entry.wait_for_initial_bytes(min_bytes=32768, timeout=2.5):
                             playback_url = alt_proxy_url
                             selected_info = alt
                             remote_host = QUrl(str(alt["url"])).host() or remote_host
