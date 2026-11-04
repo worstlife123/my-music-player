@@ -3420,20 +3420,25 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
-class _IPv4HTTPAdapter(requests.adapters.HTTPAdapter):
-    """Привязывает исходящие соединения к IPv4 (0.0.0.0) для корректной работы zapret (winws ALT11) и защиты от зависаний IPv6."""
-    def __init__(self, source_address="0.0.0.0", *args, **kwargs):
-        self._source_address = (source_address, 0) if source_address else None
-        super().__init__(*args, **kwargs)
-
-    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        if self._source_address:
-            pool_kwargs["source_address"] = self._source_address
-        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
-
-
 def _create_keepalive_stream_session(prefer_ipv4=True):
     """Создаёт постоянную HTTP Keep-Alive сессию (как в Chromium / ytmdesktop) с поддержкой zapret DPI-desync."""
+    try:
+        import requests
+        import requests.adapters
+    except Exception:
+        return None
+
+    class _IPv4HTTPAdapter(requests.adapters.HTTPAdapter):
+        """Привязывает исходящие соединения к IPv4 (0.0.0.0) для корректной работы zapret (winws ALT11) и защиты от зависаний IPv6."""
+        def __init__(self, source_address="0.0.0.0", *args, **kwargs):
+            self._source_address = (source_address, 0) if source_address else None
+            super().__init__(*args, **kwargs)
+
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            if self._source_address:
+                pool_kwargs["source_address"] = self._source_address
+            return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
     session = requests.Session()
     ca_file = os.environ.get("SSL_CERT_FILE") or ""
     if ca_file and os.path.isfile(ca_file):
@@ -3446,9 +3451,8 @@ def _create_keepalive_stream_session(prefer_ipv4=True):
                 session.verify = cpath
         except Exception:
             pass
-    adapter_cls = _IPv4HTTPAdapter if prefer_ipv4 else requests.adapters.HTTPAdapter
     adapter = (
-        adapter_cls("0.0.0.0", pool_connections=6, pool_maxsize=12, max_retries=0)
+        _IPv4HTTPAdapter("0.0.0.0", pool_connections=6, pool_maxsize=12, max_retries=0)
         if prefer_ipv4
         else requests.adapters.HTTPAdapter(pool_connections=6, pool_maxsize=12, max_retries=0)
     )
@@ -3607,7 +3611,6 @@ class BufferedStreamEntry:
         """Добавляет параметр rn (request number) для googlevideo.com, как делает плеер YouTube Music."""
         if "googlevideo.com" not in url.lower():
             return url
-        sep = "&" if "?" in url else "?"
         cleaned = re.sub(r"([?&])rn=\d+&?", r"\1", url).rstrip("?&")
         sep = "&" if "?" in cleaned else "?"
         out = f"{cleaned}{sep}rn={req_num}"
@@ -3663,105 +3666,142 @@ class BufferedStreamEntry:
                         reset=(attempt in (2, 4)),
                         prefer_ipv4=(attempt < 5)
                     )
-                    with session.get(target_url, headers=req_headers, stream=True, timeout=(3.8, 6.5)) as resp:
-                        status = resp.status_code
-                        if status == 416:
-                            with self._cond:
-                                if self.total_size is None and start_byte > 0:
-                                    self.total_size = start_byte
-                                self.eof = True
-                                self._cond.notify_all()
-                            return b""
-                        if status >= 400:
-                            last_err = f"HTTP {status}"
-                            if status in (401, 403) and block_idx == 0 and attempt >= 2 and not self.backup_urls:
-                                break
-                            time.sleep(0.15 * (attempt + 1))
-                            continue
-
-                        ctype = resp.headers.get("Content-Type")
-                        if ctype:
-                            self.content_type = ctype.split(";")[0].strip()
-                        content_range = resp.headers.get("Content-Range") or ""
-                        if "/" in content_range:
-                            total_part = content_range.rsplit("/", 1)[-1].strip()
-                            if total_part.isdigit():
+                    if session is not None:
+                        with session.get(target_url, headers=req_headers, stream=True, timeout=(3.8, 6.5)) as resp:
+                            status = resp.status_code
+                            if status == 416:
                                 with self._cond:
-                                    self.total_size = int(total_part)
-                        elif status == 200 and self.total_size is None:
-                            clen = resp.headers.get("Content-Length") or ""
-                            if clen.strip().isdigit():
-                                with self._cond:
-                                    self.total_size = int(clen.strip())
-
-                        if status == 200 and block_idx == 0 and not content_range and "range=" not in target_url:
-                            # Сервер отдаёт весь поток целиком без Content-Range
-                            buf_all = bytearray()
-                            seq_idx = 0
-                            for raw_chunk in resp.iter_content(chunk_size=65536):
-                                if self.closed:
+                                    if self.total_size is None and start_byte > 0:
+                                        self.total_size = start_byte
+                                    self.eof = True
+                                    self._cond.notify_all()
+                                return b""
+                            if status >= 400:
+                                last_err = f"HTTP {status}"
+                                if status in (401, 403) and block_idx == 0 and attempt >= 2 and not self.backup_urls:
                                     break
-                                if not raw_chunk:
-                                    continue
-                                buf_all.extend(raw_chunk)
-                                while len(buf_all) >= self.BLOCK_SIZE and seq_idx < self.MAX_CACHED_BLOCKS:
-                                    piece = bytes(buf_all[:self.BLOCK_SIZE])
-                                    del buf_all[:self.BLOCK_SIZE]
-                                    self._store_block(seq_idx, piece)
-                                    seq_idx += 1
-                            if buf_all and not self.closed and seq_idx < self.MAX_CACHED_BLOCKS:
-                                self._store_block(seq_idx, bytes(buf_all))
-                            with self._cond:
-                                if self.total_size is None:
-                                    self.total_size = sum(len(b) for b in self.blocks.values())
-                                self.fully_buffered = True
-                                self.eof = True
-                                self._cond.notify_all()
-                            return self.blocks.get(0, b"")
+                                time.sleep(0.15 * (attempt + 1))
+                                continue
 
-                        if status == 200 and start_byte > 0 and "range=" not in target_url:
-                            # Сервер проигнорировал Range на ненулевом смещении
-                            skipped = 0
-                            iter_stream = resp.iter_content(chunk_size=65536)
-                            buf = bytearray()
+                            ctype = resp.headers.get("Content-Type")
+                            if ctype:
+                                self.content_type = ctype.split(";")[0].strip()
+                            content_range = resp.headers.get("Content-Range") or ""
+                            if "/" in content_range:
+                                total_part = content_range.rsplit("/", 1)[-1].strip()
+                                if total_part.isdigit():
+                                    with self._cond:
+                                        self.total_size = int(total_part)
+                            elif status == 200 and self.total_size is None:
+                                clen = resp.headers.get("Content-Length") or ""
+                                if clen.strip().isdigit():
+                                    with self._cond:
+                                        self.total_size = int(clen.strip())
+
+                            if status == 200 and block_idx == 0 and not content_range and "range=" not in target_url:
+                                # Сервер отдаёт весь поток целиком без Content-Range
+                                buf_all = bytearray()
+                                seq_idx = 0
+                                for raw_chunk in resp.iter_content(chunk_size=65536):
+                                    if self.closed:
+                                        break
+                                    if not raw_chunk:
+                                        continue
+                                    buf_all.extend(raw_chunk)
+                                    while len(buf_all) >= self.BLOCK_SIZE and seq_idx < self.MAX_CACHED_BLOCKS:
+                                        piece = bytes(buf_all[:self.BLOCK_SIZE])
+                                        del buf_all[:self.BLOCK_SIZE]
+                                        self._store_block(seq_idx, piece)
+                                        seq_idx += 1
+                                if buf_all and not self.closed and seq_idx < self.MAX_CACHED_BLOCKS:
+                                    self._store_block(seq_idx, bytes(buf_all))
+                                with self._cond:
+                                    if self.total_size is None:
+                                        self.total_size = sum(len(b) for b in self.blocks.values())
+                                    self.fully_buffered = True
+                                    self.eof = True
+                                    self._cond.notify_all()
+                                return self.blocks.get(0, b"")
+
+                            if status == 200 and start_byte > 0 and "range=" not in target_url:
+                                # Сервер проигнорировал Range на ненулевом смещении
+                                skipped = 0
+                                iter_stream = resp.iter_content(chunk_size=65536)
+                                buf = bytearray()
+                                expected_len = end_byte - start_byte + 1
+                                for chunk in iter_stream:
+                                    if self.closed or not chunk:
+                                        break
+                                    if skipped < start_byte:
+                                        need_skip = start_byte - skipped
+                                        if len(chunk) <= need_skip:
+                                            skipped += len(chunk)
+                                            continue
+                                        chunk = chunk[need_skip:]
+                                        skipped = start_byte
+                                    buf.extend(chunk)
+                                    if len(buf) >= expected_len:
+                                        break
+                                if buf:
+                                    data = bytes(buf[:expected_len])
+                                    self._store_block(block_idx, data)
+                                    return data
+
                             expected_len = end_byte - start_byte + 1
-                            for chunk in iter_stream:
+                            buf = bytearray()
+                            for chunk in resp.iter_content(chunk_size=65536):
                                 if self.closed or not chunk:
                                     break
-                                if skipped < start_byte:
-                                    need_skip = start_byte - skipped
-                                    if len(chunk) <= need_skip:
-                                        skipped += len(chunk)
-                                        continue
-                                    chunk = chunk[need_skip:]
-                                    skipped = start_byte
                                 buf.extend(chunk)
                                 if len(buf) >= expected_len:
                                     break
+
+                            if buf:
+                                data = bytes(buf[:expected_len])
+                                self._store_block(block_idx, data)
+                                if self.total_size is not None and start_byte + len(data) >= self.total_size:
+                                    with self._cond:
+                                        self.eof = True
+                                        self._cond.notify_all()
+                                return data
+                            if self.total_size is not None and start_byte >= self.total_size:
+                                return b""
+                    else:
+                        if opener is None:
+                            opener = self._build_opener()
+                        req = Request(target_url, headers=req_headers)
+                        with opener.open(req, timeout=6.0) as uresp:
+                            status = getattr(uresp, "status", 200)
+                            ctype = uresp.headers.get("Content-Type")
+                            if ctype:
+                                self.content_type = ctype.split(";")[0].strip()
+                            content_range = uresp.headers.get("Content-Range") or ""
+                            if "/" in content_range:
+                                total_part = content_range.rsplit("/", 1)[-1].strip()
+                                if total_part.isdigit():
+                                    with self._cond:
+                                        self.total_size = int(total_part)
+                            expected_len = end_byte - start_byte + 1
+                            buf = bytearray()
+                            while not self.closed and len(buf) < expected_len:
+                                chunk = uresp.read(min(65536, expected_len - len(buf)))
+                                if not chunk:
+                                    break
+                                buf.extend(chunk)
                             if buf:
                                 data = bytes(buf[:expected_len])
                                 self._store_block(block_idx, data)
                                 return data
-
-                        expected_len = end_byte - start_byte + 1
-                        buf = bytearray()
-                        for chunk in resp.iter_content(chunk_size=65536):
-                            if self.closed or not chunk:
-                                break
-                            buf.extend(chunk)
-                            if len(buf) >= expected_len:
-                                break
-
-                        if buf:
-                            data = bytes(buf[:expected_len])
-                            self._store_block(block_idx, data)
-                            if self.total_size is not None and start_byte + len(data) >= self.total_size:
-                                with self._cond:
-                                    self.eof = True
-                                    self._cond.notify_all()
-                            return data
-                        if self.total_size is not None and start_byte >= self.total_size:
-                            return b""
+                except HTTPError as http_err:
+                    last_err = f"HTTP {http_err.code}"
+                    if http_err.code == 416:
+                        with self._cond:
+                            if self.total_size is None and start_byte > 0:
+                                self.total_size = start_byte
+                            self.eof = True
+                            self._cond.notify_all()
+                        return b""
+                    time.sleep(0.15 * (attempt + 1))
                 except Exception as err:
                     last_err = str(err)
                     time.sleep(0.18 * (attempt + 1))
@@ -3895,9 +3935,12 @@ class BufferedStreamEntry:
 
     def _download_hls(self, opener):
         try:
+            manifest_text = ""
             session = self._get_session(prefer_ipv4=True)
-            resp = session.get(self.remote_url, headers=dict(self.headers), timeout=(4.0, 6.5))
-            manifest_text = resp.text if resp.status_code < 400 else ""
+            if session is not None:
+                resp = session.get(self.remote_url, headers=dict(self.headers), timeout=(4.0, 6.5))
+                if resp.status_code < 400:
+                    manifest_text = resp.text
             if not manifest_text:
                 req = Request(self.remote_url, headers=dict(self.headers))
                 with opener.open(req, timeout=6.0) as uresp:
@@ -3924,10 +3967,17 @@ class BufferedStreamEntry:
                         break
                     try:
                         s = self._get_session(reset=(attempt == 2), prefer_ipv4=True)
-                        seg_resp = s.get(seg_url, headers=dict(self.headers), timeout=(4.0, 6.5))
-                        if seg_resp.status_code < 400 and seg_resp.content:
-                            seg_bytes = seg_resp.content
-                            break
+                        if s is not None:
+                            seg_resp = s.get(seg_url, headers=dict(self.headers), timeout=(4.0, 6.5))
+                            if seg_resp.status_code < 400 and seg_resp.content:
+                                seg_bytes = seg_resp.content
+                                break
+                        else:
+                            seg_req = Request(seg_url, headers=dict(self.headers))
+                            with opener.open(seg_req, timeout=6.0) as seg_uresp:
+                                seg_bytes = seg_uresp.read(4 * 1024 * 1024)
+                            if seg_bytes:
+                                break
                     except Exception as err:
                         self.last_error = str(err)
                         time.sleep(0.15 * (attempt + 1))
