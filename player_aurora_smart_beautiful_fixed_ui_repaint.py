@@ -3420,44 +3420,107 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
-class BufferedStreamEntry:
-    """Блочный буфер аудиопотока (256 КБ на блок) с поддержкой произвольного Range-доступа FFmpeg и автоповтором при сбросе соединения."""
-    BLOCK_SIZE = 256 * 1024
-    READAHEAD_BLOCKS = 16
-    MAX_CACHED_BLOCKS = 180
-    MAX_HLS_BYTES = 45 * 1024 * 1024
+class _IPv4HTTPAdapter(requests.adapters.HTTPAdapter):
+    """Привязывает исходящие соединения к IPv4 (0.0.0.0) для корректной работы zapret (winws ALT11) и защиты от зависаний IPv6."""
+    def __init__(self, source_address="0.0.0.0", *args, **kwargs):
+        self._source_address = (source_address, 0) if source_address else None
+        super().__init__(*args, **kwargs)
 
-    def __init__(self, remote_url, headers=None, content_type="audio/mp4", protocol="https"):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        if self._source_address:
+            pool_kwargs["source_address"] = self._source_address
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _create_keepalive_stream_session(prefer_ipv4=True):
+    """Создаёт постоянную HTTP Keep-Alive сессию (как в Chromium / ytmdesktop) с поддержкой zapret DPI-desync."""
+    session = requests.Session()
+    ca_file = os.environ.get("SSL_CERT_FILE") or ""
+    if ca_file and os.path.isfile(ca_file):
+        session.verify = ca_file
+    elif not os.environ.get("SSL_CERT_DIR"):
+        try:
+            import certifi
+            cpath = certifi.where()
+            if cpath and os.path.isfile(cpath):
+                session.verify = cpath
+        except Exception:
+            pass
+    adapter_cls = _IPv4HTTPAdapter if prefer_ipv4 else requests.adapters.HTTPAdapter
+    adapter = (
+        adapter_cls("0.0.0.0", pool_connections=6, pool_maxsize=12, max_retries=0)
+        if prefer_ipv4
+        else requests.adapters.HTTPAdapter(pool_connections=6, pool_maxsize=12, max_retries=0)
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+class BufferedStreamEntry:
+    """Блочный буфер аудиопотока (256 КБ на блок) с постоянной Keep-Alive сессией, полной предзагрузкой трека в ОЗУ и защитой от обрывов GGC/DPI."""
+    BLOCK_SIZE = 256 * 1024
+    READAHEAD_BLOCKS = 64
+    MAX_CACHED_BLOCKS = 256
+    MAX_HLS_BYTES = 50 * 1024 * 1024
+
+    def __init__(self, remote_url, headers=None, content_type="audio/mp4", protocol="https", backup_urls=None):
         self.remote_url = str(remote_url or "")
+        self.backup_urls = [str(u) for u in (backup_urls or []) if u and str(u) != self.remote_url]
         self.headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             ),
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
             "Connection": "keep-alive",
         }
         if isinstance(headers, dict):
             for k, v in headers.items():
                 if k and v and str(k).lower() not in ("range", "host"):
                     self.headers[str(k)] = str(v)
+        lower_remote = self.remote_url.lower()
+        if "googlevideo.com" in lower_remote or "youtube.com" in lower_remote:
+            # Заголовки окружения YouTube Music Desktop (ytmdesktop)
+            self.headers.setdefault("Origin", "https://music.youtube.com")
+            self.headers.setdefault("Referer", "https://music.youtube.com/")
         self.content_type = str(content_type or "audio/mp4")
         self.protocol = str(protocol or "https")
         self.blocks = OrderedDict()
         self._inflight = set()
         self._cursor_block = 0
+        self._priority_block = None
         self.hls_buffer = bytearray()
         self.Sequential_mode = False
         self.total_size = None
         self.eof = False
+        self.fully_buffered = False
         self.failed = False
         self.last_error = ""
         self.closed = False
+        self.active_readers = 0
         self.created_at = time.monotonic()
         self.last_access = self.created_at
         self._cond = threading.Condition()
         self._thread = None
         self._ssl_ctx = None
+        self._session_lock = threading.Lock()
+        self._session = None
+        self._req_number = 0
+
+    def _get_session(self, reset=False, prefer_ipv4=True):
+        with self._session_lock:
+            if reset and self._session is not None:
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+            if self._session is None:
+                is_local = self.remote_url.startswith(("http://127.0.0.1", "https://127.0.0.1", "http://localhost", "https://localhost"))
+                self._session = _create_keepalive_stream_session(prefer_ipv4=(prefer_ipv4 and not is_local))
+            return self._session
 
     def _build_opener(self):
         if self._ssl_ctx is None:
@@ -3467,6 +3530,17 @@ class BufferedStreamEntry:
     def _is_hls(self):
         lower_url = self.remote_url.lower()
         return "m3u8" in self.protocol.lower() or ".m3u8" in lower_url
+
+    def is_complete(self):
+        with self._cond:
+            if self._is_hls() or self.Sequential_mode:
+                return bool(self.eof and len(self.hls_buffer) > 0 and not self.failed)
+            if self.fully_buffered:
+                return True
+            if self.total_size is not None and self.total_size > 0:
+                num_blocks = (self.total_size + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+                return num_blocks > 0 and all(idx in self.blocks for idx in range(num_blocks))
+            return False
 
     def start(self):
         with self._cond:
@@ -3479,8 +3553,15 @@ class BufferedStreamEntry:
         with self._cond:
             self.closed = True
             self._cond.notify_all()
+        with self._session_lock:
+            if self._session is not None:
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = None
 
-    def wait_for_initial_bytes(self, min_bytes=32768, timeout=3.5):
+    def wait_for_initial_bytes(self, min_bytes=16384, timeout=6.0):
         self.start()
         deadline = time.monotonic() + max(0.2, float(timeout))
         with self._cond:
@@ -3506,17 +3587,36 @@ class BufferedStreamEntry:
         with self._cond:
             self.blocks[block_idx] = bytes(data)
             self.blocks.move_to_end(block_idx)
+            if self._priority_block == block_idx:
+                self._priority_block = None
             while len(self.blocks) > self.MAX_CACHED_BLOCKS:
-                # Не вытесняем блок 0 (заголовок контейнера) и текущий блок курсора
                 oldest_key = next(iter(self.blocks))
                 if oldest_key in (0, self._cursor_block) and len(self.blocks) > 2:
                     self.blocks.move_to_end(oldest_key)
                     oldest_key = next(iter(self.blocks))
                 self.blocks.pop(oldest_key, None)
+            if self.total_size is not None and self.total_size > 0:
+                num_blocks = (self.total_size + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+                if num_blocks > 0 and len(self.blocks) >= num_blocks and all(i in self.blocks for i in range(num_blocks)):
+                    self.fully_buffered = True
+                    self.eof = True
             self._cond.notify_all()
 
+    @staticmethod
+    def _with_googlevideo_params(url, start_byte, end_byte, req_num, use_query_range=False):
+        """Добавляет параметр rn (request number) для googlevideo.com, как делает плеер YouTube Music."""
+        if "googlevideo.com" not in url.lower():
+            return url
+        sep = "&" if "?" in url else "?"
+        cleaned = re.sub(r"([?&])rn=\d+&?", r"\1", url).rstrip("?&")
+        sep = "&" if "?" in cleaned else "?"
+        out = f"{cleaned}{sep}rn={req_num}"
+        if use_query_range and "range=" not in out:
+            out = f"{out}&range={start_byte}-{end_byte}"
+        return out
+
     def _fetch_block(self, block_idx, opener=None):
-        """Скачивает один блок 256 КБ по HTTP Range с до 4 попытками при сетевом сбое."""
+        """Скачивает один блок 256 КБ по постоянной Keep-Alive сессии с умным обходом сбросов GGC/DPI."""
         with self._cond:
             if self.closed:
                 return None
@@ -3534,8 +3634,6 @@ class BufferedStreamEntry:
             self._inflight.add(block_idx)
 
         try:
-            if opener is None:
-                opener = self._build_opener()
             start_byte = block_idx * self.BLOCK_SIZE
             end_byte = start_byte + self.BLOCK_SIZE - 1
             if self.total_size is not None and self.total_size > 0:
@@ -3544,15 +3642,43 @@ class BufferedStreamEntry:
                 end_byte = min(end_byte, self.total_size - 1)
 
             last_err = ""
-            for attempt in range(4):
+            for attempt in range(6):
                 if self.closed:
                     return None
+                self._req_number += 1
+                # При повторных попытках пересоздаём сокет или пробуем резервный URL того же контейнера
+                active_url = self.remote_url
+                if attempt >= 4 and self.backup_urls:
+                    active_url = self.backup_urls[(attempt - 4) % len(self.backup_urls)]
+                target_url = self._with_googlevideo_params(
+                    active_url, start_byte, end_byte, self._req_number,
+                    use_query_range=(attempt in (2, 5))
+                )
                 req_headers = dict(self.headers)
-                req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+                if "range=" not in target_url:
+                    req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+
                 try:
-                    req = Request(self.remote_url, headers=req_headers)
-                    with opener.open(req, timeout=5.5) as resp:
-                        status = getattr(resp, "status", 200)
+                    session = self._get_session(
+                        reset=(attempt in (2, 4)),
+                        prefer_ipv4=(attempt < 5)
+                    )
+                    with session.get(target_url, headers=req_headers, stream=True, timeout=(3.8, 6.5)) as resp:
+                        status = resp.status_code
+                        if status == 416:
+                            with self._cond:
+                                if self.total_size is None and start_byte > 0:
+                                    self.total_size = start_byte
+                                self.eof = True
+                                self._cond.notify_all()
+                            return b""
+                        if status >= 400:
+                            last_err = f"HTTP {status}"
+                            if status in (401, 403) and block_idx == 0 and attempt >= 2 and not self.backup_urls:
+                                break
+                            time.sleep(0.15 * (attempt + 1))
+                            continue
+
                         ctype = resp.headers.get("Content-Type")
                         if ctype:
                             self.content_type = ctype.split(";")[0].strip()
@@ -3568,45 +3694,66 @@ class BufferedStreamEntry:
                                 with self._cond:
                                     self.total_size = int(clen.strip())
 
-                        if status == 200 and block_idx == 0 and not content_range:
-                            # Сервер не поддерживает Range и отдаёт весь поток целиком
-                            first_chunk = resp.read(self.BLOCK_SIZE)
-                            if not first_chunk:
-                                break
-                            self._store_block(0, first_chunk)
-                            seq_idx = 1
-                            while not self.closed and seq_idx < self.MAX_CACHED_BLOCKS:
-                                nxt = resp.read(self.BLOCK_SIZE)
-                                if not nxt:
+                        if status == 200 and block_idx == 0 and not content_range and "range=" not in target_url:
+                            # Сервер отдаёт весь поток целиком без Content-Range
+                            buf_all = bytearray()
+                            seq_idx = 0
+                            for raw_chunk in resp.iter_content(chunk_size=65536):
+                                if self.closed:
                                     break
-                                self._store_block(seq_idx, nxt)
-                                seq_idx += 1
+                                if not raw_chunk:
+                                    continue
+                                buf_all.extend(raw_chunk)
+                                while len(buf_all) >= self.BLOCK_SIZE and seq_idx < self.MAX_CACHED_BLOCKS:
+                                    piece = bytes(buf_all[:self.BLOCK_SIZE])
+                                    del buf_all[:self.BLOCK_SIZE]
+                                    self._store_block(seq_idx, piece)
+                                    seq_idx += 1
+                            if buf_all and not self.closed and seq_idx < self.MAX_CACHED_BLOCKS:
+                                self._store_block(seq_idx, bytes(buf_all))
                             with self._cond:
                                 if self.total_size is None:
                                     self.total_size = sum(len(b) for b in self.blocks.values())
+                                self.fully_buffered = True
                                 self.eof = True
                                 self._cond.notify_all()
-                            return first_chunk
+                            return self.blocks.get(0, b"")
 
-                        if status == 200 and start_byte > 0:
+                        if status == 200 and start_byte > 0 and "range=" not in target_url:
                             # Сервер проигнорировал Range на ненулевом смещении
                             skipped = 0
-                            while skipped < start_byte and not self.closed:
-                                discard = resp.read(min(65536, start_byte - skipped))
-                                if not discard:
+                            iter_stream = resp.iter_content(chunk_size=65536)
+                            buf = bytearray()
+                            expected_len = end_byte - start_byte + 1
+                            for chunk in iter_stream:
+                                if self.closed or not chunk:
                                     break
-                                skipped += len(discard)
+                                if skipped < start_byte:
+                                    need_skip = start_byte - skipped
+                                    if len(chunk) <= need_skip:
+                                        skipped += len(chunk)
+                                        continue
+                                    chunk = chunk[need_skip:]
+                                    skipped = start_byte
+                                buf.extend(chunk)
+                                if len(buf) >= expected_len:
+                                    break
+                            if buf:
+                                data = bytes(buf[:expected_len])
+                                self._store_block(block_idx, data)
+                                return data
 
                         expected_len = end_byte - start_byte + 1
                         buf = bytearray()
-                        while not self.closed and len(buf) < expected_len:
-                            chunk = resp.read(min(65536, expected_len - len(buf)))
-                            if not chunk:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if self.closed or not chunk:
                                 break
                             buf.extend(chunk)
+                            if len(buf) >= expected_len:
+                                break
 
                         if buf:
-                            data = bytes(buf)
+                            data = bytes(buf[:expected_len])
                             self._store_block(block_idx, data)
                             if self.total_size is not None and start_byte + len(data) >= self.total_size:
                                 with self._cond:
@@ -3615,21 +3762,9 @@ class BufferedStreamEntry:
                             return data
                         if self.total_size is not None and start_byte >= self.total_size:
                             return b""
-                except HTTPError as http_err:
-                    last_err = f"HTTP {http_err.code}"
-                    if http_err.code == 416:
-                        with self._cond:
-                            if self.total_size is None and start_byte > 0:
-                                self.total_size = start_byte
-                            self.eof = True
-                            self._cond.notify_all()
-                        return b""
-                    if http_err.code in (401, 403) and block_idx == 0 and attempt >= 1:
-                        break
-                    time.sleep(0.15 * (attempt + 1))
                 except Exception as err:
                     last_err = str(err)
-                    time.sleep(0.15 * (attempt + 1))
+                    time.sleep(0.18 * (attempt + 1))
 
             with self._cond:
                 self.last_error = last_err
@@ -3649,7 +3784,7 @@ class BufferedStreamEntry:
             self.last_access = time.monotonic()
 
         if self._is_hls() or self.Sequential_mode:
-            deadline = time.monotonic() + 7.0
+            deadline = time.monotonic() + 8.0
             with self._cond:
                 while len(self.hls_buffer) <= position and not self.eof and not self.failed and not self.closed:
                     rem = deadline - time.monotonic()
@@ -3667,7 +3802,19 @@ class BufferedStreamEntry:
         block_idx = position // self.BLOCK_SIZE
         offset_in_block = position % self.BLOCK_SIZE
         with self._cond:
-            self._cursor_block = block_idx
+            # ВАЖНО: когда FFmpeg при открытии MP4/M4A проверяет последние ~64 КБ файла (tail probe),
+            # не сдвигаем основной курсор предзагрузки в конец файла, чтобы не остановить фоновую
+            # докачку середины трека! Вместо этого ставим приоритетный блок.
+            is_tail_probe = (
+                self.total_size is not None
+                and self.total_size > self.BLOCK_SIZE * 3
+                and position >= self.total_size - self.BLOCK_SIZE * 2
+                and 1 not in self.blocks
+            )
+            if not is_tail_probe:
+                self._cursor_block = block_idx
+            if block_idx not in self.blocks:
+                self._priority_block = block_idx
             self._cond.notify_all()
 
         block_data = self._fetch_block(block_idx)
@@ -3695,15 +3842,35 @@ class BufferedStreamEntry:
             while not self.closed:
                 with self._cond:
                     cursor = self._cursor_block
+                    priority = self._priority_block
+                    total = self.total_size
+
                 next_to_fetch = None
-                for candidate in range(cursor, cursor + self.READAHEAD_BLOCKS):
-                    if self.total_size is not None and candidate * self.BLOCK_SIZE >= self.total_size > 0:
-                        break
+                if priority is not None:
                     with self._cond:
-                        already = candidate in self.blocks or candidate in self._inflight
-                    if not already:
-                        next_to_fetch = candidate
-                        break
+                        if priority not in self.blocks and priority not in self._inflight:
+                            if total is None or priority * self.BLOCK_SIZE < total:
+                                next_to_fetch = priority
+
+                if next_to_fetch is None:
+                    for candidate in range(cursor, cursor + self.READAHEAD_BLOCKS):
+                        if total is not None and candidate * self.BLOCK_SIZE >= total > 0:
+                            break
+                        with self._cond:
+                            already = candidate in self.blocks or candidate in self._inflight
+                        if not already:
+                            next_to_fetch = candidate
+                            break
+
+                # Если окно вокруг курсора уже скачано, докачиваем вообще все оставшиеся блоки трека от 0 до конца
+                if next_to_fetch is None and total is not None and total > 0:
+                    num_blocks = min(self.MAX_CACHED_BLOCKS, (total + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE)
+                    for candidate in range(num_blocks):
+                        with self._cond:
+                            already = candidate in self.blocks or candidate in self._inflight
+                        if not already:
+                            next_to_fetch = candidate
+                            break
 
                 if next_to_fetch is not None:
                     data = self._fetch_block(next_to_fetch, opener=opener)
@@ -3715,9 +3882,9 @@ class BufferedStreamEntry:
                             self._cond.notify_all()
                 else:
                     with self._cond:
-                        if self.closed:
+                        if self.closed or self.fully_buffered:
                             break
-                        self._cond.wait(timeout=0.3)
+                        self._cond.wait(timeout=0.35)
         except Exception as err:
             with self._cond:
                 self.last_error = str(err)
@@ -3728,9 +3895,13 @@ class BufferedStreamEntry:
 
     def _download_hls(self, opener):
         try:
-            req = Request(self.remote_url, headers=dict(self.headers))
-            with opener.open(req, timeout=6.0) as resp:
-                manifest_text = resp.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+            session = self._get_session(prefer_ipv4=True)
+            resp = session.get(self.remote_url, headers=dict(self.headers), timeout=(4.0, 6.5))
+            manifest_text = resp.text if resp.status_code < 400 else ""
+            if not manifest_text:
+                req = Request(self.remote_url, headers=dict(self.headers))
+                with opener.open(req, timeout=6.0) as uresp:
+                    manifest_text = uresp.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
             segments = []
             for raw_line in manifest_text.splitlines():
                 line = raw_line.strip()
@@ -3748,14 +3919,14 @@ class BufferedStreamEntry:
                 if self.closed or len(self.hls_buffer) >= self.MAX_HLS_BYTES:
                     break
                 seg_bytes = None
-                for attempt in range(4):
+                for attempt in range(5):
                     if self.closed:
                         break
                     try:
-                        seg_req = Request(seg_url, headers=dict(self.headers))
-                        with opener.open(seg_req, timeout=6.0) as seg_resp:
-                            seg_bytes = seg_resp.read(4 * 1024 * 1024)
-                        if seg_bytes:
+                        s = self._get_session(reset=(attempt == 2), prefer_ipv4=True)
+                        seg_resp = s.get(seg_url, headers=dict(self.headers), timeout=(4.0, 6.5))
+                        if seg_resp.status_code < 400 and seg_resp.content:
+                            seg_bytes = seg_resp.content
                             break
                     except Exception as err:
                         self.last_error = str(err)
@@ -3771,6 +3942,7 @@ class BufferedStreamEntry:
                     self._cond.notify_all()
             with self._cond:
                 self.total_size = len(self.hls_buffer)
+                self.fully_buffered = True
                 self.eof = True
                 self._cond.notify_all()
         except Exception as err:
@@ -3785,7 +3957,7 @@ class LocalStreamProxy:
     """Локальный HTTP-прокси (127.0.0.1) для QMediaPlayer: защищает от обрывов связи и DPI-сбросов посередине трека."""
     _instance = None
     _instance_lock = threading.Lock()
-    MAX_ACTIVE_STREAMS = 4
+    MAX_ACTIVE_STREAMS = 16
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -3829,7 +4001,7 @@ class LocalStreamProxy:
                         self.end_headers()
                         return
 
-                    if not entry.wait_for_initial_bytes(min_bytes=16384, timeout=4.0):
+                    if not entry.wait_for_initial_bytes(min_bytes=16384, timeout=6.0):
                         self.send_response(502)
                         self.send_header("Content-Length", "0")
                         self.end_headers()
@@ -3880,6 +4052,8 @@ class LocalStreamProxy:
                     cursor = start_byte
                     limit_byte = (min(end_byte, total - 1) if (end_byte is not None and total is not None)
                                   else (end_byte if end_byte is not None else (total - 1 if total is not None else None)))
+                    with entry._cond:
+                        entry.active_readers += 1
                     try:
                         while not entry.closed:
                             if limit_byte is not None and cursor > limit_byte:
@@ -3894,12 +4068,24 @@ class LocalStreamProxy:
                             cursor += len(data_slice)
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         return
+                    finally:
+                        with entry._cond:
+                            entry.active_readers = max(0, entry.active_readers - 1)
+                            entry.last_access = time.monotonic()
 
             self._server = _ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             self._port = self._server.server_port
             server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
             server_thread.start()
             return self._port
+
+    @staticmethod
+    def _extract_token_from_url(url):
+        text = str(url or "").split("?", 1)[0].strip("/")
+        if "/stream/" not in text:
+            return ""
+        tail = text.rsplit("/stream/", 1)[-1]
+        return tail.split(".", 1)[0].strip()
 
     def get_entry(self, token):
         with self._lock:
@@ -3908,7 +4094,15 @@ class LocalStreamProxy:
                 entry.last_access = time.monotonic()
             return entry
 
-    def register_stream(self, remote_url, headers=None, ext="m4a", protocol="https"):
+    def get_entry_by_url(self, url):
+        token = self._extract_token_from_url(url)
+        return self.get_entry(token) if token else None
+
+    def is_stream_url_alive(self, url):
+        entry = self.get_entry_by_url(url)
+        return bool(entry is not None and not entry.closed and not entry.failed)
+
+    def register_stream(self, remote_url, headers=None, ext="m4a", protocol="https", backup_urls=None):
         port = self._ensure_server()
         ext_clean = re.sub(r"[^a-z0-9]", "", str(ext or "m4a").lower()) or "m4a"
         mime_map = {
@@ -3920,13 +4114,35 @@ class LocalStreamProxy:
             "ogg": "audio/ogg",
         }
         content_type = mime_map.get(ext_clean, "audio/mp4")
-        entry = BufferedStreamEntry(remote_url, headers=headers, content_type=content_type, protocol=protocol)
+        entry = BufferedStreamEntry(
+            remote_url, headers=headers, content_type=content_type,
+            protocol=protocol, backup_urls=backup_urls,
+        )
         token = uuid4().hex
+        now = time.monotonic()
         with self._lock:
             self._streams[token] = entry
-            while len(self._streams) > self.MAX_ACTIVE_STREAMS:
-                _, oldest = self._streams.popitem(last=False)
-                oldest.close()
+            if len(self._streams) > self.MAX_ACTIVE_STREAMS:
+                removable = [
+                    k for k, v in self._streams.items()
+                    if k != token and v.active_readers <= 0 and (now - v.last_access) > 45.0
+                ]
+                for k in removable:
+                    if len(self._streams) <= self.MAX_ACTIVE_STREAMS:
+                        break
+                    old = self._streams.pop(k, None)
+                    if old is not None:
+                        old.close()
+                while len(self._streams) > self.MAX_ACTIVE_STREAMS + 6:
+                    oldest_key = next(
+                        (k for k, v in self._streams.items() if k != token and v.active_readers <= 0),
+                        None,
+                    )
+                    if oldest_key is None:
+                        break
+                    old = self._streams.pop(oldest_key, None)
+                    if old is not None:
+                        old.close()
         entry.start()
         return f"http://127.0.0.1:{port}/stream/{token}.{ext_clean}", entry
 
@@ -4006,14 +4222,22 @@ class StreamWorker(QThread):
             selected_info = selected or info
         return stream_url, selected_info
 
+    def _auth_options(self):
+        auth_options = {}
+        if self.cookie_file and Path(self.cookie_file).is_file():
+            auth_options["cookiefile"] = self.cookie_file
+        elif self.cookies_from_browser:
+            auth_options["cookiesfrombrowser"] = parse_cookies_from_browser(self.cookies_from_browser)
+        return auth_options
+
     def run(self):
         started = time.perf_counter()
         # ВАЖНО: сначала извлекаем публичный трек БЕЗ cookies. Иначе любая
         # неверная настройка Firefox/Chrome ломает даже обычные публичные миксы.
         format_options = {
             "auto": (
-                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/"
-                "bestaudio[protocol=https]/bestaudio[protocol=http]/"
+                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
+                "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "high": (
@@ -4043,14 +4267,31 @@ class StreamWorker(QThread):
             "skip_download": True,
             "noplaylist": True,
             "socket_timeout": 7,
-            "retries": 1,
-            "extractor_retries": 1,
+            "retries": 2,
+            "extractor_retries": 2,
             "cachedir": None,
             "ignoreconfig": True,
             "youtube_include_dash_manifest": False,
             "youtube_include_hls_manifest": False,
             "no_color": True,
         }
+        is_yt = (
+            self.track.get("source") == "youtube"
+            or "youtube.com" in str(self.track.get("url") or "").lower()
+            or "youtu.be" in str(self.track.get("url") or "").lower()
+        )
+        if self._is_real_extract():
+            # Привязка к IPv4 (0.0.0.0) гарантирует, что трафик проходит через zapret (winws ALT11)
+            # и не зависает на заблокированных IPv6-маршрутах провайдера.
+            options["source_address"] = "0.0.0.0"
+            if is_yt:
+                # Клиенты без PO-Token / SABR обрывов, совместимые с YouTube Music (ytmdesktop)
+                options["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["android_vr", "tv", "ios", "web_remix", "mweb"],
+                    }
+                }
+        used_auth = False
         try:
             try:
                 info = self._extract(options)
@@ -4059,17 +4300,12 @@ class StreamWorker(QThread):
             except Exception as public_error:
                 if self._cancel_requested:
                     return
-                # Cookies пробуем ТОЛЬКО если YouTube действительно требует вход.
-                # Сбой чтения базы браузера больше не мешает публичным трекам.
-                auth_options = {}
-                if self.cookie_file and Path(self.cookie_file).is_file():
-                    auth_options["cookiefile"] = self.cookie_file
-                elif self.cookies_from_browser:
-                    auth_options["cookiesfrombrowser"] = parse_cookies_from_browser(self.cookies_from_browser)
+                auth_options = self._auth_options()
                 if not auth_options or not self._auth_may_help(public_error):
                     raise
                 retry_options = dict(options)
                 retry_options.update(auth_options)
+                used_auth = True
                 try:
                     info = self._extract(retry_options)
                     if self._cancel_requested:
@@ -4119,21 +4355,26 @@ class StreamWorker(QThread):
                 headers = selected_info.get("http_headers") or info.get("http_headers") or {}
                 ext = selected_info.get("ext") or info.get("ext") or "m4a"
                 protocol = selected_info.get("protocol") or info.get("protocol") or "https"
+                raw_formats = [
+                    f for f in (info.get("formats") or [])
+                    if isinstance(f, dict) and f.get("url") and f.get("url") != stream_url
+                    and f.get("acodec") not in (None, "none")
+                ]
+                pure_audio = [f for f in raw_formats if f.get("vcodec") in (None, "none")]
+                same_ext_backups = [
+                    str(f["url"]) for f in (pure_audio or raw_formats)
+                    if str(f.get("ext") or "") == str(ext)
+                ]
                 proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
-                    stream_url, headers=headers, ext=ext, protocol=protocol
+                    stream_url, headers=headers, ext=ext, protocol=protocol,
+                    backup_urls=same_ext_backups,
                 )
-                if proxy_entry.wait_for_initial_bytes(min_bytes=32768, timeout=3.0):
+                if proxy_entry.wait_for_initial_bytes(min_bytes=16384, timeout=6.0):
                     playback_url = proxy_url
                 else:
                     proxy_entry.close()
-                    # Запасной аудиоформат (предпочитаем чистый аудиопоток без видео), если первый CDN-узел вернул ошибку
-                    raw_formats = [
-                        f for f in (info.get("formats") or [])
-                        if isinstance(f, dict) and f.get("url") and f.get("url") != stream_url
-                        and f.get("acodec") not in (None, "none")
-                    ]
-                    pure_audio = [f for f in raw_formats if f.get("vcodec") in (None, "none")]
-                    candidates = (pure_audio or raw_formats)[-2:]
+                    candidates = (pure_audio or raw_formats)[-3:]
+                    switched = False
                     for alt in reversed(candidates):
                         if self._cancel_requested:
                             return
@@ -4143,12 +4384,40 @@ class StreamWorker(QThread):
                         alt_proxy_url, alt_entry = LocalStreamProxy.instance().register_stream(
                             alt["url"], headers=alt_headers, ext=alt_ext, protocol=alt_proto
                         )
-                        if alt_entry.wait_for_initial_bytes(min_bytes=32768, timeout=2.5):
+                        if alt_entry.wait_for_initial_bytes(min_bytes=16384, timeout=4.5):
                             playback_url = alt_proxy_url
                             selected_info = alt
                             remote_host = QUrl(str(alt["url"])).host() or remote_host
+                            switched = True
                             break
                         alt_entry.close()
+
+                    # Если без cookies все потоки вернули 403/таймаут, а cookies настроены — перезапрашиваем с авторизацией
+                    if not switched and not used_auth:
+                        auth_options = self._auth_options()
+                        if auth_options:
+                            retry_options = dict(options)
+                            retry_options.update(auth_options)
+                            try:
+                                auth_info = self._extract(retry_options)
+                                if auth_info and not self._cancel_requested:
+                                    auth_url, auth_sel = self._select_audio_candidate(auth_info)
+                                    if auth_url:
+                                        a_headers = auth_sel.get("http_headers") or auth_info.get("http_headers") or headers
+                                        a_ext = auth_sel.get("ext") or auth_info.get("ext") or ext
+                                        a_proto = auth_sel.get("protocol") or auth_info.get("protocol") or protocol
+                                        a_proxy_url, a_entry = LocalStreamProxy.instance().register_stream(
+                                            auth_url, headers=a_headers, ext=a_ext, protocol=a_proto
+                                        )
+                                        if a_entry.wait_for_initial_bytes(min_bytes=16384, timeout=5.0):
+                                            playback_url = a_proxy_url
+                                            selected_info = auth_sel
+                                            remote_host = QUrl(str(auth_url)).host() or remote_host
+                                            switched = True
+                                        else:
+                                            a_entry.close()
+                            except Exception:
+                                pass
 
             self.metadata_ready.emit({"duration": duration, "is_live": bool(info.get("is_live")),
                                       "format_id": str(selected_info.get("format_id") or ""),
@@ -6023,22 +6292,24 @@ class SettingsDialog(QDialog):
         self.download_dir_field = QLineEdit()
         self.download_dir_field.setObjectName("settingsPathField")
         self.download_dir_field.setReadOnly(True)
+        self.download_dir_field.setMinimumWidth(280)
         self.download_dir_choose = QPushButton("Выбрать папку…")
         self.download_dir_choose.setObjectName("settingsPicker")
         self.download_dir_choose.clicked.connect(self.choose_download_dir)
-        self.download_dir_open = QPushButton("Открыть")
+        self.download_dir_open = QPushButton("Открыть папку")
         self.download_dir_open.setObjectName("settingsPicker")
         self.download_dir_open.clicked.connect(self.open_download_dir_from_settings)
         self.download_dir_reset = QPushButton("По умолчанию")
         self.download_dir_reset.setObjectName("settingsPicker")
         self.download_dir_reset.clicked.connect(self.reset_download_dir)
-        dl_path_row = QHBoxLayout()
-        dl_path_row.setSpacing(8)
-        dl_path_row.addWidget(self.download_dir_field, 1)
-        dl_path_row.addWidget(self.download_dir_choose, 0)
-        dl_path_row.addWidget(self.download_dir_open, 0)
-        dl_path_row.addWidget(self.download_dir_reset, 0)
-        general_layout.addLayout(self._form_row("Папка загрузки", dl_path_row))
+        general_layout.addLayout(self._form_row("Папка загрузки", self.download_dir_field))
+        dl_btn_row = QHBoxLayout()
+        dl_btn_row.setSpacing(8)
+        dl_btn_row.addStretch(1)
+        dl_btn_row.addWidget(self.download_dir_choose, 0)
+        dl_btn_row.addWidget(self.download_dir_open, 0)
+        dl_btn_row.addWidget(self.download_dir_reset, 0)
+        general_layout.addLayout(dl_btn_row)
         self.update_download_dir_ui()
         general_layout.addSpacing(4)
         self._add_group_label(general_layout, "ПАНЕЛИ")
@@ -6354,13 +6625,13 @@ class SettingsDialog(QDialog):
 
     def update_download_dir_ui(self):
         default_dir = str(app_cache_directory() / "downloads")
-        active_path = self.download_dir_draft or default_dir
         if self.download_dir_draft:
             self.download_dir_field.setText(self.download_dir_draft)
             self.download_dir_field.setToolTip(f"Выбранная папка загрузки:\n{self.download_dir_draft}")
         else:
-            self.download_dir_field.setText(f"По умолчанию ({default_dir})")
+            self.download_dir_field.setText(f"Стандартная папка: {default_dir}")
             self.download_dir_field.setToolTip(f"Папка по умолчанию:\n{default_dir}")
+        self.download_dir_field.setCursorPosition(0)
         self.download_dir_reset.setEnabled(bool(self.download_dir_draft))
 
     def choose_wallpaper(self):
@@ -14101,6 +14372,11 @@ class MusicPlayer(QMainWindow):
         if time.monotonic() - cached["saved"] > self.stream_cache_ttl:
             self.stream_cache.pop(track_url, None)
             return None
+        url_str = str(cached.get("url") or "")
+        if url_str.startswith("http://127.0.0.1:") and "/stream/" in url_str:
+            if not LocalStreamProxy.instance().is_stream_url_alive(url_str):
+                self.stream_cache.pop(track_url, None)
+                return None
         return cached
 
     def save_stream(self, track_url, stream_url, title):
@@ -14232,11 +14508,21 @@ class MusicPlayer(QMainWindow):
         worker.start()
 
     def preload_in_qt(self, track, media_url):
-        """Загружаем источник в резервном проигрывателе, не включая звук."""
+        """Загружаем локальный источник в резервном проигрывателе, а для HTTP-прокси прогреваем буфер в ОЗУ."""
         if self.requested_track is not None or self.pending_slot is not None:
             return
         if self.fade_timer.isActive():
             QTimer.singleShot(120, self.prepare_next_track)
+            return
+        if not media_url.isLocalFile():
+            # Для сетевых потоков (LocalStreamProxy) данные уже предзагружаются в ОЗУ
+            # потоком BufferedStreamEntry. Не открываем сокет QMediaPlayer за несколько минут
+            # до старта, чтобы FFmpeg на Windows не уходил в StalledMedia на паузе.
+            url_str = media_url.toString()
+            if url_str.startswith("http://127.0.0.1:") and "/stream/" in url_str:
+                entry = LocalStreamProxy.instance().get_entry_by_url(url_str)
+                if entry is not None:
+                    entry.start()
             return
         slot = self.idle_slot()
         player = self.players[slot]
@@ -14549,14 +14835,31 @@ class MusicPlayer(QMainWindow):
     def _ended_early(self):
         duration = self.playback_duration_ms()
         position = self._last_progress_position
-        return duration > 0 and position > 0 and duration - position > 3000
+        if duration <= 0 or position <= 0:
+            return False
+        src_url = self.player.source().toString()
+        if src_url.startswith("http://127.0.0.1:") and "/stream/" in src_url:
+            entry = LocalStreamProxy.instance().get_entry_by_url(src_url)
+            if entry is not None and entry.is_complete() and not entry.failed:
+                return False
+        qt_dur = self.player.duration()
+        if qt_dur > 0 and abs(qt_dur - duration) <= 4500 and qt_dur - position <= 1200:
+            return False
+        return duration - position > 3000
 
     def check_playback_health(self):
         """Recover a frozen network stream; pauses and user selections are exempt."""
         if (self._force_exit or not self._playback_wanted or not self._remote_playback()
                 or self.is_seeking or self.requested_track is not None
                 or self.pending_slot is not None
+                or self._finish_transition_pending
+                or getattr(self, "_radio_waiting_for_tracks", False)
+                or getattr(self, "_soundcloud_queue_waiting", False)
+                or bool(self.supermix_session and self.supermix_session.get("waiting"))
                 or self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState):
+            return
+        if (self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
+                and not self._ended_early()):
             return
         duration = self.playback_duration_ms()
         if duration > 0 and self._last_progress_position >= duration - 800:
