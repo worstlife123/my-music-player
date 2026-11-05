@@ -4936,7 +4936,10 @@ class ClickableLabel(QLabel):
         # В компактном режиме (очередь / недавно слушал) поверх обложки уже рисуется CompactNowPlayingBadge
         if is_compact and (is_current or is_loading):
             return
-        if not self._hover_overlay and not (is_row and not is_compact and is_current):
+        # В обычных строках (поиск, лайки, плейлисты) справа уже есть кнопка Play,
+        # поэтому на обложке рисуем медальон только когда трек сейчас играет (эквалайзер).
+        show_hover_play = bool(self._hover_overlay and is_compact)
+        if not show_hover_play and not (is_row and not is_compact and is_current):
             return
 
         painter = QPainter(self)
@@ -6364,7 +6367,7 @@ class TrackRow(QWidget):
         super().hideEvent(event)
 
     def _reveal_queue_action(self, revealed):
-        if hasattr(self, "thumbnail_label"):
+        if self.compact and hasattr(self, "thumbnail_label"):
             self.thumbnail_label.set_hover_overlay(revealed)
         if hasattr(self, "play_button"):
             self.play_button.setProperty("revealed", revealed)
@@ -9328,8 +9331,8 @@ class MusicPlayer(QMainWindow):
         table_title = QLabel("Название")
         table_source = QLabel("Источник")
         table_source.setFixedWidth(94)
-        table_duration = QLabel("Длительность")
-        table_duration.setFixedWidth(45)
+        table_duration = QLabel("Время")
+        table_duration.setFixedWidth(48)
         table_duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         for label in (table_num, table_title, table_source, table_duration):
             label.setObjectName("tableHeaderText")
