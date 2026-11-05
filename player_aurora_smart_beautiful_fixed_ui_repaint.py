@@ -8960,11 +8960,8 @@ class MusicPlayer(QMainWindow):
         root_widget.set_appearance(self.theme, self.wallpaper_dim)
         root_widget.setObjectName("root")
         root = QVBoxLayout(root_widget)
-        root.setContentsMargins(14, 10, 14, 12)
-        root.setSpacing(10)
-
-        self.top_chrome_bar = self.create_top_bar()
-        root.addWidget(self.top_chrome_bar)
+        root.setContentsMargins(14, 14, 14, 12)
+        root.setSpacing(12)
 
         # Две постоянные колонки: навигация и каталог.
         # Очередь — выдвижная панель, которая изначально имеет ширину 0.
@@ -8990,166 +8987,6 @@ class MusicPlayer(QMainWindow):
         self.last_library_page = self.browse_page
         self.toast = Toast(self)
         self.install_shortcuts()
-
-    def create_top_bar(self):
-        bar = QFrame()
-        bar.setObjectName("auroraTopBar")
-        bar.setFixedHeight(36)
-        bar.mousePressEvent = self._top_bar_mouse_press
-        bar.mouseMoveEvent = self._top_bar_mouse_move
-        bar.mouseReleaseEvent = self._top_bar_mouse_release
-        bar.mouseDoubleClickEvent = lambda e: (
-            self.showNormal() if self.isMaximized() else self.showMaximized()
-        ) if e.button() == Qt.MouseButton.LeftButton else None
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 3, 8, 3)
-        layout.setSpacing(6)
-
-        brand_dot = QLabel("●")
-        brand_dot.setObjectName("topBrandDot")
-        brand_label = QLabel("AURORA")
-        brand_label.setObjectName("topBrandTitle")
-        brand_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        brand_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(brand_dot)
-        layout.addWidget(brand_label)
-        layout.addSpacing(8)
-
-        def make_pill(text, tooltip, checked, slot):
-            btn = QPushButton(text)
-            btn.setObjectName("topBarToggle")
-            btn.setCheckable(True)
-            btn.setChecked(checked)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFixedHeight(26)
-            btn.setToolTip(tooltip)
-            btn.clicked.connect(slot)
-            return btn
-
-        self.viz_toggle_btn = make_pill(
-            "〰 Спектр",
-            "Живой аудиоспектр на нижней панели и звуковая волна в полосе перемотки",
-            self.visualizer_enabled,
-            self.toggle_visualizer_mode,
-        )
-        self.chameleon_toggle_btn = make_pill(
-            "🎨 Хамелеон",
-            "Адаптивный цвет интерфейса и подсветки под обложку текущего трека",
-            self.chameleon_enabled,
-            self.toggle_chameleon_mode,
-        )
-        self.vinyl_toggle_btn = make_pill(
-            "💿 Винил",
-            "Вращающаяся виниловая пластинка при открытии крупной обложки трека",
-            self.vinyl_enabled,
-            self.toggle_vinyl_mode,
-        )
-        self.frameless_toggle_btn = make_pill(
-            "⛶ Без рамки",
-            "Скрыть стандартную системную рамку окна для полного погружения",
-            self.frameless_enabled,
-            self.toggle_frameless_mode,
-        )
-        for b in (self.viz_toggle_btn, self.chameleon_toggle_btn, self.vinyl_toggle_btn, self.frameless_toggle_btn):
-            layout.addWidget(b)
-
-        layout.addStretch(1)
-
-        self.top_window_controls = QWidget(bar)
-        win_layout = QHBoxLayout(self.top_window_controls)
-        win_layout.setContentsMargins(0, 0, 0, 0)
-        win_layout.setSpacing(4)
-        self.win_min_btn = QPushButton("—")
-        self.win_min_btn.setObjectName("topWinButton")
-        self.win_min_btn.setFixedSize(28, 24)
-        self.win_min_btn.setToolTip("Свернуть")
-        self.win_min_btn.clicked.connect(self.showMinimized)
-        self.win_max_btn = QPushButton("□")
-        self.win_max_btn.setObjectName("topWinButton")
-        self.win_max_btn.setFixedSize(28, 24)
-        self.win_max_btn.setToolTip("Развернуть / восстановить")
-        self.win_max_btn.clicked.connect(
-            lambda: self.showNormal() if self.isMaximized() else self.showMaximized()
-        )
-        self.win_close_btn = QPushButton("✕")
-        self.win_close_btn.setObjectName("topWinCloseButton")
-        self.win_close_btn.setFixedSize(28, 24)
-        self.win_close_btn.setToolTip("Закрыть")
-        self.win_close_btn.clicked.connect(self.close)
-        for wb in (self.win_min_btn, self.win_max_btn, self.win_close_btn):
-            wb.setCursor(Qt.CursorShape.PointingHandCursor)
-            win_layout.addWidget(wb)
-        self.top_window_controls.setVisible(self.frameless_enabled)
-        layout.addWidget(self.top_window_controls)
-        return bar
-
-    def _top_bar_mouse_press(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            handle = self.windowHandle()
-            if handle is not None and hasattr(handle, "startSystemMove"):
-                try:
-                    if handle.startSystemMove():
-                        return
-                except Exception:
-                    pass
-            self._top_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def _top_bar_mouse_move(self, event):
-        if self._top_drag_offset is not None and (event.buttons() & Qt.MouseButton.LeftButton):
-            if not self.isMaximized():
-                self.move(event.globalPosition().toPoint() - self._top_drag_offset)
-
-    def _top_bar_mouse_release(self, event):
-        self._top_drag_offset = None
-
-    def toggle_visualizer_mode(self, checked=False):
-        self.visualizer_enabled = bool(self.viz_toggle_btn.isChecked())
-        self.settings.setValue("visualizer_enabled", "true" if self.visualizer_enabled else "false")
-        if hasattr(self, "player_bar"):
-            playing = (
-                hasattr(self, "player")
-                and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-            )
-            self.player_bar.sync_visualizer_state(playing)
-            self.player_bar.update()
-        if hasattr(self, "seek_slider"):
-            self.seek_slider.update()
-
-    def toggle_chameleon_mode(self, checked=False):
-        self.chameleon_enabled = bool(self.chameleon_toggle_btn.isChecked())
-        self.settings.setValue("chameleon_enabled", "true" if self.chameleon_enabled else "false")
-        if hasattr(self, "player_bar"):
-            self.player_bar.update()
-        if hasattr(self, "seek_slider"):
-            self.seek_slider.update()
-        if hasattr(self, "volume_slider"):
-            self.volume_slider.update()
-        self.update_playing_row_highlight()
-
-    def toggle_vinyl_mode(self, checked=False):
-        self.vinyl_enabled = bool(self.vinyl_toggle_btn.isChecked())
-        self.settings.setValue("vinyl_enabled", "true" if self.vinyl_enabled else "false")
-        if hasattr(self, "expanded_cover"):
-            self.expanded_cover.sync_vinyl_state()
-            self.expanded_cover._render_cover()
-            if self.expanded_cover.isVisible():
-                self._position_expanded_cover()
-
-    def toggle_frameless_mode(self, checked=False):
-        self.frameless_enabled = bool(self.frameless_toggle_btn.isChecked())
-        geom = self.geometry()
-        was_max = self.isMaximized()
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, self.frameless_enabled)
-        if hasattr(self, "top_window_controls"):
-            self.top_window_controls.setVisible(self.frameless_enabled)
-        self.show()
-        if was_max:
-            self.showMaximized()
-        else:
-            self.setGeometry(geom)
-            if not self.frameless_enabled:
-                apply_native_title_bar(self, self.theme)
 
     def create_sidebar(self):
         self.sidebar = QFrame()
@@ -10174,30 +10011,6 @@ class MusicPlayer(QMainWindow):
             QLabel#connectionBadge { color: #9DA8B8; font-size: 11px; padding: 6px; }
             QLabel#connectionBadge[connected="true"] { color: #66E099; }
 
-            QFrame#auroraTopBar {
-                background: rgba(17, 20, 26, 178);
-                border: 1px solid rgba(255, 255, 255, 16);
-                border-radius: 12px;
-            }
-            QLabel#topBrandDot { color: #1ED760; font-size: 12px; font-weight: 900; }
-            QLabel#topBrandTitle { color: #E8EEF6; font-size: 11px; font-weight: 800; letter-spacing: 1.6px; }
-            QPushButton#topBarToggle {
-                background: rgba(255, 255, 255, 10); color: #9DA8B8;
-                border: 1px solid rgba(255, 255, 255, 14);
-                border-radius: 13px; padding: 2px 11px; font-size: 11px; font-weight: 700;
-            }
-            QPushButton#topBarToggle:hover { background: rgba(255, 255, 255, 22); color: #FFFFFF; }
-            QPushButton#topBarToggle:checked {
-                background: rgba(29, 185, 84, 38); color: #66E099;
-                border: 1px solid rgba(92, 224, 146, 85);
-            }
-            QPushButton#topWinButton, QPushButton#topWinCloseButton {
-                background: transparent; color: #A2AEBF; border: none; border-radius: 7px;
-                padding: 0; font-size: 12px; font-weight: 700;
-            }
-            QPushButton#topWinButton:hover { background: rgba(255, 255, 255, 22); color: #FFFFFF; }
-            QPushButton#topWinCloseButton:hover { background: #E04352; color: #FFFFFF; }
-
             QFrame#likesHeroHeader {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(27, 68, 52, 168), stop:0.55 rgba(23, 33, 45, 178), stop:1 rgba(18, 23, 31, 186));
                 border: 1px solid rgba(92, 224, 146, 48);
@@ -10519,16 +10332,6 @@ class MusicPlayer(QMainWindow):
             QPushButton#rowFavorite:checked { color: #167A40; background: rgba(29, 185, 84, 20); }
             QPushButton#rowRemove { background: transparent; color: transparent; }
             QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #E1E8F0; color: #243140; }
-            QFrame#auroraTopBar {
-                background: rgba(255, 255, 255, 205); border: 1px solid #D5DEE8; border-radius: 12px;
-            }
-            QLabel#topBrandTitle { color: #18202A; }
-            QPushButton#topBarToggle {
-                background: rgba(20, 28, 38, 8); color: #546275; border: 1px solid #D5DEE8;
-            }
-            QPushButton#topBarToggle:checked {
-                background: #E1F3E8; color: #167A40; border-color: #8FD1A8;
-            }
             QFrame#likesHeroHeader {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #E4F4EA, stop:1 #FFFFFF);
                 border: 1px solid #C2E5D0; border-radius: 16px;
