@@ -4878,6 +4878,13 @@ class ClickableLabel(QLabel):
         super().__init__(*args, **kwargs)
         self._press_pos = None
         self._dragged = False
+        self._hover_overlay = False
+
+    def set_hover_overlay(self, hovered):
+        hovered = bool(hovered)
+        if self._hover_overlay != hovered:
+            self._hover_overlay = hovered
+            self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4917,21 +4924,157 @@ class ClickableLabel(QLabel):
             return
         super().mouseReleaseEvent(event)
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._hover_overlay and self.objectName() == "rowCover":
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRectF(self.rect())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(8, 12, 18, 152))
+            painter.drawRoundedRect(rect, 8.0, 8.0)
+            win = self.window()
+            accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if getattr(win, "chameleon_enabled", True) else QColor("#1ED760")
+            cx, cy = rect.center().x(), rect.center().y()
+            painter.setBrush(accent)
+            painter.drawEllipse(QPointF(cx, cy), 12.5, 12.5)
+            painter.setBrush(QColor("#09120D"))
+            tri = QPolygonF([
+                QPointF(cx - 3.2, cy - 5.2),
+                QPointF(cx - 3.2, cy + 5.2),
+                QPointF(cx + 5.4, cy),
+            ])
+            painter.drawPolygon(tri)
+            painter.end()
+
+
+class LikesCollageCover(QWidget):
+    """Коллаж 2×2 из обложек любимых треков или неоновая градиентная эмблема для шапки раздела «Лайки»."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(112, 112)
+        self._covers = []
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_covers(self, pixmaps):
+        valid = [pm for pm in (pixmaps or []) if isinstance(pm, QPixmap) and not pm.isNull()][:4]
+        keys = tuple(pm.cacheKey() for pm in valid)
+        old_keys = tuple(pm.cacheKey() for pm in self._covers)
+        if keys != old_keys:
+            self._covers = valid
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        box = QRectF(4.0, 4.0, self.width() - 8.0, self.height() - 8.0)
+        radius = 16.0
+
+        # Мягкая глубокая тень
+        painter.setPen(Qt.PenStyle.NoPen)
+        for dy, expand, alpha in ((4.0, 2.5, 36), (2.0, 1.0, 58)):
+            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.drawRoundedRect(box.adjusted(-expand, dy - expand, expand, dy + expand), radius + 1.5, radius + 1.5)
+
+        clip = QPainterPath()
+        clip.addRoundedRect(box, radius, radius)
+        painter.save()
+        painter.setClipPath(clip)
+
+        grad = QLinearGradient(box.topLeft(), box.bottomRight())
+        grad.setColorAt(0.0, QColor("#5B3DF5"))
+        grad.setColorAt(0.52, QColor("#246B6B"))
+        grad.setColorAt(1.0, QColor("#1DB954"))
+        painter.fillPath(clip, grad)
+
+        if len(self._covers) >= 4:
+            half_w = box.width() / 2.0
+            half_h = box.height() / 2.0
+            cells = (
+                QRectF(box.left(), box.top(), half_w, half_h),
+                QRectF(box.left() + half_w, box.top(), half_w, half_h),
+                QRectF(box.left(), box.top() + half_h, half_w, half_h),
+                QRectF(box.left() + half_w, box.top() + half_h, half_w, half_h),
+            )
+            for cell, pm in zip(cells, self._covers[:4]):
+                sw, sh = float(pm.width()), float(pm.height())
+                s = min(sw, sh)
+                src = QRectF((sw - s) / 2.0, (sh - s) / 2.0, s, s)
+                painter.drawPixmap(cell, pm, src)
+            painter.setPen(QPen(QColor(15, 20, 28, 150), 1.4))
+            painter.drawLine(QPointF(box.center().x(), box.top()), QPointF(box.center().x(), box.bottom()))
+            painter.drawLine(QPointF(box.left(), box.center().y()), QPointF(box.right(), box.center().y()))
+        elif self._covers:
+            pm = self._covers[0]
+            sw, sh = float(pm.width()), float(pm.height())
+            s = min(sw, sh)
+            src = QRectF((sw - s) / 2.0, (sh - s) / 2.0, s, s)
+            painter.drawPixmap(box, pm, src)
+            painter.fillRect(box, QColor(12, 18, 26, 55))
+
+        # Центральный стеклянный медальон с сердечком
+        cx, cy = box.center().x(), box.center().y()
+        badge_r = 18.0 if self._covers else 26.0
+        painter.setPen(QPen(QColor(255, 255, 255, 65), 1.2))
+        painter.setBrush(QColor(14, 20, 28, 195 if self._covers else 110))
+        painter.drawEllipse(QPointF(cx, cy), badge_r, badge_r)
+        heart_side = badge_r * 1.15
+        draw_vector_icon(
+            painter, "heart",
+            QRectF(cx - heart_side / 2.0, cy - heart_side / 2.0, heart_side, heart_side),
+            "#1ED760" if self._covers else "#FFFFFF",
+        )
+        painter.restore()
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.1))
+        painter.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5)
+        painter.end()
+
 
 class ExpandedArtwork(QLabel):
-    """Компактное квадратное фото обложки со скруглёнными краями, раскрывающееся над миниатюрой внизу."""
+    """Крупная обложка со скруглёнными краями и вращающейся виниловой пластинкой над миниатюрой внизу."""
     clicked = pyqtSignal()
-    SQUARE_SIDE = 168
+    SQUARE_SIDE = 186
     CORNER_RADIUS = 16.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._source = None
         self._scale_key = None
+        self._vinyl_angle = 0.0
+        self._vinyl_timer = QTimer(self)
+        self._vinyl_timer.setInterval(36)
+        self._vinyl_timer.timeout.connect(self._step_vinyl)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Свернуть обложку (Esc)")
+
+    def _step_vinyl(self):
+        if not self.isVisible():
+            self._vinyl_timer.stop()
+            return
+        win = self.window()
+        playing = bool(
+            win is not None
+            and hasattr(win, "player")
+            and win.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        if playing and getattr(win, "vinyl_enabled", True):
+            self._vinyl_angle = (self._vinyl_angle + 1.65) % 360.0
+            self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._vinyl_timer.isActive():
+            self._vinyl_timer.start()
+
+    def hideEvent(self, event):
+        self._vinyl_timer.stop()
+        super().hideEvent(event)
 
     def set_artwork(self, pixmap):
         self._source = pixmap
@@ -4946,7 +5089,10 @@ class ExpandedArtwork(QLabel):
         self.setProperty("requested_image", "")
 
     def target_size(self):
-        return QSize(self.SQUARE_SIDE + 12, self.SQUARE_SIDE + 12)
+        win = self.window()
+        vinyl_on = getattr(win, "vinyl_enabled", True)
+        extra_w = 78 if vinyl_on else 12
+        return QSize(self.SQUARE_SIDE + extra_w, self.SQUARE_SIDE + 16)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -4980,36 +5126,115 @@ class ExpandedArtwork(QLabel):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        avail = QRectF(self.rect()).adjusted(6.0, 4.0, -6.0, -8.0)
+        avail = QRectF(self.rect()).adjusted(6.0, 6.0, -6.0, -10.0)
         side = min(avail.width(), avail.height())
         if side <= 4:
             painter.end()
             return
+        win = self.window()
+        vinyl_on = bool(getattr(win, "vinyl_enabled", True) and avail.width() >= side + 32)
+        left_x = avail.left() + 2.0 if vinyl_on else (avail.center().x() - side / 2.0)
         target = QRectF(
-            avail.center().x() - side / 2.0,
+            left_x,
             avail.center().y() - side / 2.0,
             side,
             side,
         )
         radius = min(self.CORNER_RADIUS, side * 0.22)
-        # Мягкая тёмная тень под квадратной обложкой
+        sw = float(src.width())
+        sh = float(src.height())
+        crop_side = min(sw, sh)
+        src_rect = QRectF((sw - crop_side) / 2.0, (sh - crop_side) / 2.0, crop_side, crop_side)
+
+        # 1. Атмосферное свечение цвета обложки позади конверта
+        accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if getattr(win, "chameleon_enabled", True) else QColor("#1ED760")
+        glow_color = QColor(accent)
+        glow_color.setAlpha(46)
         painter.setPen(Qt.PenStyle.NoPen)
-        for dy, expand, alpha in ((4.0, 2.0, 30), (2.5, 1.0, 46), (1.0, 0.0, 64)):
+        painter.setBrush(glow_color)
+        painter.drawRoundedRect(target.adjusted(-4.0, -2.0, 4.0, 5.0), radius + 4.0, radius + 4.0)
+
+        # 2. Вращающаяся виниловая пластинка, выступающая справа из-за обложки
+        if vinyl_on:
+            disc_d = side * 0.92
+            disc_cx = min(avail.right() - disc_d / 2.0 - 2.0, target.right() + disc_d * 0.34)
+            disc_cy = target.center().y()
+            disc_rect = QRectF(disc_cx - disc_d / 2.0, disc_cy - disc_d / 2.0, disc_d, disc_d)
+
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 110))
+            painter.drawEllipse(disc_rect.adjusted(-1.0, 3.0, 2.0, 4.0))
+
+            disc_grad = QRadialGradient(disc_cx, disc_cy, disc_d / 2.0)
+            disc_grad.setColorAt(0.0, QColor("#232834"))
+            disc_grad.setColorAt(0.38, QColor("#12151C"))
+            disc_grad.setColorAt(0.88, QColor("#090B0F"))
+            disc_grad.setColorAt(1.0, QColor("#1D232E"))
+            painter.setBrush(QBrush(disc_grad))
+            painter.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+            painter.drawEllipse(disc_rect)
+
+            painter.translate(disc_cx, disc_cy)
+            painter.rotate(self._vinyl_angle)
+
+            # Блик и дорожки винила
+            sheen = QPolygonF([
+                QPointF(0, 0),
+                QPointF(-disc_d * 0.45, -disc_d * 0.16),
+                QPointF(-disc_d * 0.16, -disc_d * 0.45),
+            ])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 18))
+            painter.drawPolygon(sheen)
+            sheen2 = QPolygonF([
+                QPointF(0, 0),
+                QPointF(disc_d * 0.45, disc_d * 0.16),
+                QPointF(disc_d * 0.16, disc_d * 0.45),
+            ])
+            painter.drawPolygon(sheen2)
+
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for gr_idx, ratio in enumerate((0.86, 0.76, 0.66, 0.56, 0.47)):
+                gr_r = (disc_d / 2.0) * ratio
+                pen = QPen(QColor(255, 255, 255, 24 if gr_idx % 2 == 0 else 13), 0.9)
+                pen.setDashPattern([18.0, 8.0])
+                painter.setPen(pen)
+                painter.drawEllipse(QPointF(0, 0), gr_r, gr_r)
+
+            # Круглое яблоко пластинки из обложки трека
+            label_r = disc_d * 0.19
+            label_rect = QRectF(-label_r, -label_r, label_r * 2.0, label_r * 2.0)
+            label_clip = QPainterPath()
+            label_clip.addEllipse(label_rect)
+            painter.save()
+            painter.setClipPath(label_clip)
+            painter.drawPixmap(label_rect, src, src_rect)
+            painter.restore()
+
+            painter.setPen(QPen(accent, 1.4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(label_rect)
+
+            # Центральное отверстие шпинделя
+            painter.setPen(QPen(QColor(255, 255, 255, 90), 1.0))
+            painter.setBrush(QColor("#0B0D12"))
+            painter.drawEllipse(QPointF(0, 0), 4.2, 4.2)
+            painter.restore()
+
+        # 3. Мягкая тёмная тень под квадратной обложкой
+        painter.setPen(Qt.PenStyle.NoPen)
+        for dy, expand, alpha in ((4.0, 2.0, 34), (2.5, 1.0, 52), (1.0, 0.0, 72)):
             painter.setBrush(QColor(0, 0, 0, alpha))
             painter.drawRoundedRect(target.adjusted(-expand, dy - expand, expand, dy + expand), radius + 1.0, radius + 1.0)
         clip = QPainterPath()
         clip.addRoundedRect(target, radius, radius)
         painter.save()
         painter.setClipPath(clip)
-        # Центральный квадратный кроп (cover-fit без чёрных полос и без искажения пропорций)
-        sw = float(src.width())
-        sh = float(src.height())
-        crop_side = min(sw, sh)
-        src_rect = QRectF((sw - crop_side) / 2.0, (sh - crop_side) / 2.0, crop_side, crop_side)
         painter.drawPixmap(target, src, src_rect)
         painter.restore()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0))
+        painter.setPen(QPen(QColor(255, 255, 255, 38), 1.1))
         painter.drawRoundedRect(target.adjusted(0.5, 0.5, -0.5, -0.5), max(1.0, radius - 0.5), max(1.0, radius - 0.5))
         painter.end()
 
@@ -5655,7 +5880,8 @@ class TrackIndexIndicator(QLabel):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        accent = QColor("#1DB954")
+        win = self.window()
+        accent = getattr(win, "chameleon_bright", QColor("#1DB954")) if getattr(win, "chameleon_enabled", True) else QColor("#1DB954")
 
         if self._loading:
             size = min(self.width(), self.height()) - 6.0
@@ -5664,7 +5890,9 @@ class TrackIndexIndicator(QLabel):
             cy = self.height() / 2.0
             rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
 
-            ring_pen = QPen(QColor(29, 185, 84, 48), 1.8)
+            ring_color = QColor(accent)
+            ring_color.setAlpha(48)
+            ring_pen = QPen(ring_color, 1.8)
             ring_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(ring_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -5731,14 +5959,17 @@ class CompactNowPlayingBadge(QLabel):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(12, 16, 22, 215))
         painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0), 5.0, 5.0)
-        accent = QColor("#1DB954")
+        win = self.window()
+        accent = getattr(win, "chameleon_bright", QColor("#1DB954")) if getattr(win, "chameleon_enabled", True) else QColor("#1DB954")
 
         if self._loading:
             size = 10.5
             cx = self.width() / 2.0
             cy = self.height() / 2.0
             rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
-            ring_pen = QPen(QColor(29, 185, 84, 55), 1.5)
+            ring_color = QColor(accent)
+            ring_color.setAlpha(55)
+            ring_pen = QPen(ring_color, 1.5)
             painter.setPen(ring_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(rect)
@@ -5843,8 +6074,23 @@ class TrackRow(QWidget):
         )
         self.artist_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.artist_label.setMinimumHeight(17)
+        artist_row = QHBoxLayout()
+        artist_row.setContentsMargins(0, 0, 0, 0)
+        artist_row.setSpacing(6)
+        src_kind = str(self.track.get("source") or "")
+        badge_text = "YT" if src_kind == "youtube" else "SC" if src_kind == "soundcloud" else "HQ" if src_kind == "local" else ""
+        if self.track.get("local_path"):
+            badge_text = f"{badge_text} • ✓" if badge_text else "✓"
+        if badge_text:
+            self.source_badge = QLabel(badge_text, self)
+            self.source_badge.setObjectName("trackSourceBadge")
+            self.source_badge.setProperty("sourceKind", src_kind or "local")
+            self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.source_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            artist_row.addWidget(self.source_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        artist_row.addWidget(self.artist_label, 1)
         text_column.addWidget(self.title_label)
-        text_column.addWidget(self.artist_label)
+        text_column.addLayout(artist_row)
         layout.addLayout(text_column, 1)
 
         if compact:
@@ -5925,9 +6171,11 @@ class TrackRow(QWidget):
             layout.addWidget(self.duration_label)
             self.play_button = QPushButton()
             self.play_button.setObjectName("rowPlay")
+            self.play_button.setProperty("revealed", False)
             self.play_button.setIcon(control_icon("play", "#A7A7A7", 14))
             self.play_button.setIconSize(QSize(14, 14))
             self.play_button.setFixedSize(32, 32)
+            self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.play_button.setToolTip("Воспроизвести")
             self.favorite_button = QPushButton("")
             self.favorite_button.setObjectName("rowFavorite")
@@ -5937,6 +6185,7 @@ class TrackRow(QWidget):
             self.favorite_button.setFixedSize(36, 36)
             self.favorite_button.setCheckable(True)
             self.favorite_button.setChecked(bool(is_favorite))
+            self.favorite_button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.favorite_button.setToolTip("Убрать из лайков" if is_favorite else "Добавить в лайки")
             layout.addWidget(self.play_button)
             layout.addWidget(self.favorite_button)
@@ -5999,6 +6248,7 @@ class TrackRow(QWidget):
         if (current_changed or animation_changed) and animate and not self._loading:
             self._eq_phase = 0
         self._sync_indicator_state()
+        self.update()
 
     def set_loading(self, loading: bool):
         """Показывает плавный спиннер, пока выбранный трек подготавливается к запуску."""
@@ -6040,6 +6290,12 @@ class TrackRow(QWidget):
         super().hideEvent(event)
 
     def _reveal_queue_action(self, revealed):
+        if hasattr(self, "thumbnail_label"):
+            self.thumbnail_label.set_hover_overlay(revealed)
+        if hasattr(self, "play_button"):
+            self.play_button.setProperty("revealed", revealed)
+            self.play_button.style().unpolish(self.play_button)
+            self.play_button.style().polish(self.play_button)
         if self.compact and self.removable:
             self.remove_button.setProperty("revealed", revealed)
             self.remove_button.style().unpolish(self.remove_button)
@@ -6056,6 +6312,23 @@ class TrackRow(QWidget):
     def leaveEvent(self, event):
         self._reveal_queue_action(False)
         super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._is_current:
+            win = self.window()
+            if getattr(win, "chameleon_enabled", True) and hasattr(win, "chameleon_accent"):
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+                fill = QColor(win.chameleon_accent)
+                fill.setAlpha(42 if self.underMouse() else 28)
+                border = QColor(win.chameleon_bright)
+                border.setAlpha(115 if self.underMouse() else 76)
+                painter.setBrush(fill)
+                painter.setPen(QPen(border, 1.1))
+                painter.drawRoundedRect(rect, 9.0, 9.0)
+                painter.end()
 
     def _is_action_widget(self, child):
         if child is None:
@@ -6690,15 +6963,13 @@ class ClickSlider(QSlider):
             return super().paintEvent(event)
         option = QStyleOptionSlider()
         self.initStyleOption(option)
-        light = getattr(self.window(), "theme", "dark") == "light"
+        win = self.window()
+        light = getattr(win, "theme", "dark") == "light"
         hovered = self.underMouse() or self.isSliderDown()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rail_h = 5.0 if hovered else 4.0
         rail = QRectF(6, self.height() / 2 - rail_h / 2.0, max(1, self.width() - 12), rail_h)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#CFD8E3" if light else "#323B48"))
-        painter.drawRoundedRect(rail, rail_h / 2.0, rail_h / 2.0)
         has_range = self.maximum() > self.minimum()
         position = (
             QStyle.sliderPositionFromValue(
@@ -6706,24 +6977,69 @@ class ClickSlider(QSlider):
             )
             if has_range else 0
         )
+        chameleon_on = getattr(win, "chameleon_enabled", True)
+        base_accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if chameleon_on else QColor("#1ED760" if hovered and not light else ("#21834C" if light else "#1DB954"))
+        color = QColor(base_accent)
+        if not self.isEnabled():
+            color.setAlpha(185)
+
+        is_seek = self.objectName() == "seekSlider"
+        viz_on = getattr(win, "visualizer_enabled", True)
+        if is_seek and viz_on and rail.width() >= 90:
+            # Красивая звуковая волна (SoundCloud / Yandex Music style) с уникальным профилем трека
+            seed = int(getattr(self, "_wave_seed", 42) or 42)
+            bar_step = 5.2
+            num_bars = max(16, int(rail.width() // bar_step))
+            bar_w = 2.5
+            cy = self.height() / 2.0
+            max_amp = max(4.5, min(7.2, self.height() * 0.45)) if hovered else max(3.6, min(5.8, self.height() * 0.36))
+            unplayed_col = QColor("#B9C5D4" if light else "#384354")
+            if not light:
+                unplayed_col.setAlpha(155)
+            hover_x = self._hover_x if (hovered and self._hover_x is not None) else -1.0
+            painter.setPen(Qt.PenStyle.NoPen)
+            for idx in range(num_bars):
+                bx = rail.left() + idx * (rail.width() / max(1, num_bars))
+                norm = idx / max(1.0, float(num_bars - 1))
+                envelope = math.sin(norm * math.pi) ** 0.35
+                wave = (
+                    0.46
+                    + 0.28 * abs(math.sin(idx * 0.63 + seed * 0.17))
+                    + 0.26 * abs(math.cos(idx * 1.19 + seed * 0.41))
+                )
+                amp = max(1.8, max_amp * min(1.0, wave * (0.45 + 0.55 * envelope)))
+                played = (bx - rail.left()) <= position and (self.isEnabled() or (has_range and self.value() > self.minimum()))
+                if played:
+                    painter.setBrush(color)
+                elif hover_x >= bx and self.isEnabled():
+                    preview_col = QColor(color)
+                    preview_col.setAlpha(95)
+                    painter.setBrush(preview_col)
+                else:
+                    painter.setBrush(unplayed_col)
+                painter.drawRoundedRect(QRectF(bx, cy - amp, bar_w, amp * 2.0), 1.2, 1.2)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#CFD8E3" if light else "#323B48"))
+            painter.drawRoundedRect(rail, rail_h / 2.0, rail_h / 2.0)
+            if self.isEnabled() or (has_range and self.value() > self.minimum()):
+                painter.setBrush(color)
+                progress = QRectF(rail)
+                if option.upsideDown:
+                    progress.setLeft(rail.left() + position)
+                else:
+                    progress.setWidth(max(0.0, float(position)))
+                painter.drawRoundedRect(progress, rail_h / 2.0, rail_h / 2.0)
+
         if self.isEnabled() or (has_range and self.value() > self.minimum()):
-            color = QColor("#1ED760" if (hovered and not light) else ("#21834C" if light else "#1DB954"))
-            if not self.isEnabled():
-                color.setAlpha(190)
-            painter.setBrush(color)
-            progress = QRectF(rail)
-            if option.upsideDown:
-                progress.setLeft(rail.left() + position)
-            else:
-                progress.setWidth(max(0.0, float(position)))
-            painter.drawRoundedRect(progress, rail_h / 2.0, rail_h / 2.0)
             thumb_center = QPointF(rail.left() + position, rail.center().y())
-            if hovered and self.isEnabled():
-                halo = QColor(color)
-                halo.setAlpha(68)
-                painter.setBrush(halo)
-                painter.drawEllipse(thumb_center, 7.5, 7.5)
-            thumb_r = 5.4 if hovered else 4.6
+            if self.isEnabled():
+                for glow_r, glow_a in ((10.0, 34), (7.2, 74)) if hovered else ((7.0, 38),):
+                    halo = QColor(color)
+                    halo.setAlpha(glow_a)
+                    painter.setBrush(halo)
+                    painter.drawEllipse(thumb_center, glow_r, glow_r)
+            thumb_r = 5.6 if hovered else 4.6
             painter.setBrush(color if light else QColor("#F5F8FC"))
             painter.drawEllipse(thumb_center, thumb_r, thumb_r)
         painter.end()
@@ -7644,15 +7960,61 @@ class PlayerBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.accent = QColor("#243F35")
+        self.accent_bright = QColor("#1ED760")
+        self._viz_phase = 0.0
+        self._viz_energy = 0.0
+        self._viz_timer = QTimer(self)
+        self._viz_timer.setInterval(40)
+        self._viz_timer.timeout.connect(self._step_visualizer)
+
+    def sync_visualizer_state(self, playing=False):
+        win = self.window()
+        viz_enabled = getattr(win, "visualizer_enabled", True)
+        if playing and viz_enabled:
+            if not self._viz_timer.isActive():
+                self._viz_timer.start()
+        elif self._viz_energy > 0.01:
+            if not self._viz_timer.isActive():
+                self._viz_timer.start()
+        else:
+            self._viz_energy = 0.0
+            self._viz_timer.stop()
+            self.update()
+
+    def _step_visualizer(self):
+        win = self.window()
+        playing = bool(
+            win is not None
+            and hasattr(win, "player")
+            and win.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            and getattr(win, "visualizer_enabled", True)
+        )
+        if playing:
+            self._viz_energy = min(1.0, self._viz_energy + 0.14)
+            self._viz_phase = (self._viz_phase + 0.24) % (math.pi * 200.0)
+        else:
+            self._viz_energy = max(0.0, self._viz_energy - 0.12)
+            if self._viz_energy <= 0.01:
+                self._viz_energy = 0.0
+                self._viz_timer.stop()
+        self.update()
 
     def set_cover_accent(self, pixmap):
         if pixmap is None or pixmap.isNull():
             self.accent = QColor("#243F35")
+            self.accent_bright = QColor("#1ED760")
         else:
-            image = pixmap.toImage().scaled(8, 8)
-            colors = [image.pixelColor(x, y) for x in range(8) for y in range(8)]
-            self.accent = QColor(*(sum(getattr(c, channel)() for c in colors) // len(colors)
-                                   for channel in ("red", "green", "blue")))
+            image = pixmap.toImage().scaled(12, 12)
+            colors = [image.pixelColor(x, y) for x in range(12) for y in range(12)]
+            avg = QColor(*(sum(getattr(c, channel)() for c in colors) // len(colors)
+                           for channel in ("red", "green", "blue")))
+            self.accent = avg
+            h, s, l, _ = avg.getHsl()
+            if h < 0:
+                self.accent_bright = QColor("#1ED760")
+            else:
+                boosted = QColor.fromHsl(h, max(165, min(245, int(s * 1.45))), max(135, min(175, int(l * 1.25))))
+                self.accent_bright = boosted
         self.update()
 
     def paintEvent(self, event):
@@ -7662,24 +8024,61 @@ class PlayerBar(QFrame):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 14, 14)
         painter.setClipPath(path)
-        light = getattr(self.window(), "theme", "dark") == "light"
-        color = QColor(self.accent)
-        color.setAlpha(26 if light else 56)
-        gradient = QLinearGradient(0, 0, min(680, self.width()), self.height())
+        win = self.window()
+        light = getattr(win, "theme", "dark") == "light"
+        chameleon_on = getattr(win, "chameleon_enabled", True)
+        base_col = QColor(self.accent if chameleon_on else QColor("#1C3B2B"))
+        bright_col = QColor(self.accent_bright if chameleon_on else QColor("#1ED760"))
+
+        color = QColor(base_col)
+        color.setAlpha(32 if light else 68)
+        gradient = QLinearGradient(0, 0, min(740, self.width()), self.height())
         gradient.setColorAt(0.0, color)
-        mid = QColor(self.accent)
-        mid.setAlpha(10 if light else 22)
-        gradient.setColorAt(0.55, mid)
+        mid = QColor(bright_col)
+        mid.setAlpha(14 if light else 26)
+        gradient.setColorAt(0.52, mid)
         color.setAlpha(0)
         gradient.setColorAt(1.0, color)
         painter.fillRect(self.rect(), gradient)
-        painter.setPen(QPen(QColor(255, 255, 255, 90 if light else 18), 1))
-        painter.drawLine(14, 1, max(14, self.width() - 14), 1)
+
+        # Живой спектр-эквалайзер на фоне нижней панели во время воспроизведения
+        if self._viz_energy > 0.01 and getattr(win, "visualizer_enabled", True):
+            num_bars = 44
+            span_w = min(640.0, max(280.0, self.width() * 0.52))
+            start_x = (self.width() - span_w) / 2.0
+            step_x = span_w / num_bars
+            bar_w = max(3.0, step_x * 0.56)
+            bottom_y = float(self.height() - 2.0)
+            max_bar_h = float(self.height() * 0.44) * self._viz_energy
+            painter.setPen(Qt.PenStyle.NoPen)
+            for idx in range(num_bars):
+                norm = idx / max(1.0, float(num_bars - 1))
+                bell = math.sin(norm * math.pi) ** 0.65
+                w1 = math.sin(self._viz_phase * 1.15 + idx * 0.42)
+                w2 = math.cos(self._viz_phase * 0.78 - idx * 0.67)
+                w3 = math.sin(self._viz_phase * 1.65 + idx * 0.23)
+                level = max(0.08, (0.45 + 0.25 * w1 + 0.18 * w2 + 0.12 * w3) * bell)
+                bh = max(2.5, max_bar_h * level)
+                bx = start_x + idx * step_x
+                bar_grad = QLinearGradient(bx, bottom_y - bh, bx, bottom_y)
+                top_c = QColor(bright_col)
+                top_c.setAlpha(int((48 if light else 64) * self._viz_energy))
+                bot_c = QColor(bright_col)
+                bot_c.setAlpha(int((12 if light else 18) * self._viz_energy))
+                bar_grad.setColorAt(0.0, top_c)
+                bar_grad.setColorAt(1.0, bot_c)
+                painter.setBrush(QBrush(bar_grad))
+                painter.drawRoundedRect(QRectF(bx, bottom_y - bh, bar_w, bh), 2.0, 2.0)
+
+        top_glow = QColor(bright_col)
+        top_glow.setAlpha(68 if not light else 45)
+        painter.setPen(QPen(top_glow, 1.1))
+        painter.drawLine(16, 1, max(16, self.width() - 16), 1)
         painter.end()
 
 
 class CoverPopupPage(QWidget):
-    """Прозрачная прослойка без окон и без свечения: страница каталога остаётся видимой."""
+    """Атмосферная прослойка для раскрытой обложки с мягким свечением, карточкой трека и винил-режимом."""
     close_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -7690,7 +8089,11 @@ class CoverPopupPage(QWidget):
         self.setStyleSheet("background: transparent; border: none;")
 
     def set_cover_accent(self, pixmap):
-        return
+        if pixmap is not None and not pixmap.isNull():
+            img = pixmap.toImage().scaled(8, 8)
+            cols = [img.pixelColor(x, y) for x in range(8) for y in range(8)]
+            self.accent = QColor(*(sum(getattr(c, ch)() for c in cols) // len(cols) for ch in ("red", "green", "blue")))
+        self.update()
 
 
 class MiniPlayer(PlayerBar):
@@ -8394,6 +8797,14 @@ class MusicPlayer(QMainWindow):
         self.image_limit = 6
         self.fallback_cover = make_placeholder()
 
+        self.visualizer_enabled = self.settings.value("visualizer_enabled", "true") == "true"
+        self.chameleon_enabled = self.settings.value("chameleon_enabled", "true") == "true"
+        self.vinyl_enabled = self.settings.value("vinyl_enabled", "true") == "true"
+        self.frameless_enabled = False
+        self.chameleon_accent = QColor("#1DB954")
+        self.chameleon_bright = QColor("#1ED760")
+        self._top_drag_offset = None
+
         self._likes_search_query = ""
         self.build_ui()
         self.rebuild_start_cards()
@@ -8530,8 +8941,11 @@ class MusicPlayer(QMainWindow):
         root_widget.set_appearance(self.theme, self.wallpaper_dim)
         root_widget.setObjectName("root")
         root = QVBoxLayout(root_widget)
-        root.setContentsMargins(14, 14, 14, 12)
-        root.setSpacing(12)
+        root.setContentsMargins(14, 10, 14, 12)
+        root.setSpacing(10)
+
+        self.top_chrome_bar = self.create_top_bar()
+        root.addWidget(self.top_chrome_bar)
 
         # Две постоянные колонки: навигация и каталог.
         # Очередь — выдвижная панель, которая изначально имеет ширину 0.
@@ -8557,6 +8971,166 @@ class MusicPlayer(QMainWindow):
         self.last_library_page = self.browse_page
         self.toast = Toast(self)
         self.install_shortcuts()
+
+    def create_top_bar(self):
+        bar = QFrame()
+        bar.setObjectName("auroraTopBar")
+        bar.setFixedHeight(36)
+        bar.mousePressEvent = self._top_bar_mouse_press
+        bar.mouseMoveEvent = self._top_bar_mouse_move
+        bar.mouseReleaseEvent = self._top_bar_mouse_release
+        bar.mouseDoubleClickEvent = lambda e: (
+            self.showNormal() if self.isMaximized() else self.showMaximized()
+        ) if e.button() == Qt.MouseButton.LeftButton else None
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 3, 8, 3)
+        layout.setSpacing(6)
+
+        brand_dot = QLabel("●")
+        brand_dot.setObjectName("topBrandDot")
+        brand_label = QLabel("AURORA")
+        brand_label.setObjectName("topBrandTitle")
+        brand_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        brand_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(brand_dot)
+        layout.addWidget(brand_label)
+        layout.addSpacing(8)
+
+        def make_pill(text, tooltip, checked, slot):
+            btn = QPushButton(text)
+            btn.setObjectName("topBarToggle")
+            btn.setCheckable(True)
+            btn.setChecked(checked)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(26)
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(slot)
+            return btn
+
+        self.viz_toggle_btn = make_pill(
+            "〰 Спектр",
+            "Живой аудиоспектр на нижней панели и звуковая волна в полосе перемотки",
+            self.visualizer_enabled,
+            self.toggle_visualizer_mode,
+        )
+        self.chameleon_toggle_btn = make_pill(
+            "🎨 Хамелеон",
+            "Адаптивный цвет интерфейса и подсветки под обложку текущего трека",
+            self.chameleon_enabled,
+            self.toggle_chameleon_mode,
+        )
+        self.vinyl_toggle_btn = make_pill(
+            "💿 Винил",
+            "Вращающаяся виниловая пластинка при открытии крупной обложки трека",
+            self.vinyl_enabled,
+            self.toggle_vinyl_mode,
+        )
+        self.frameless_toggle_btn = make_pill(
+            "⛶ Без рамки",
+            "Скрыть стандартную системную рамку окна для полного погружения",
+            self.frameless_enabled,
+            self.toggle_frameless_mode,
+        )
+        for b in (self.viz_toggle_btn, self.chameleon_toggle_btn, self.vinyl_toggle_btn, self.frameless_toggle_btn):
+            layout.addWidget(b)
+
+        layout.addStretch(1)
+
+        self.top_window_controls = QWidget(bar)
+        win_layout = QHBoxLayout(self.top_window_controls)
+        win_layout.setContentsMargins(0, 0, 0, 0)
+        win_layout.setSpacing(4)
+        self.win_min_btn = QPushButton("—")
+        self.win_min_btn.setObjectName("topWinButton")
+        self.win_min_btn.setFixedSize(28, 24)
+        self.win_min_btn.setToolTip("Свернуть")
+        self.win_min_btn.clicked.connect(self.showMinimized)
+        self.win_max_btn = QPushButton("□")
+        self.win_max_btn.setObjectName("topWinButton")
+        self.win_max_btn.setFixedSize(28, 24)
+        self.win_max_btn.setToolTip("Развернуть / восстановить")
+        self.win_max_btn.clicked.connect(
+            lambda: self.showNormal() if self.isMaximized() else self.showMaximized()
+        )
+        self.win_close_btn = QPushButton("✕")
+        self.win_close_btn.setObjectName("topWinCloseButton")
+        self.win_close_btn.setFixedSize(28, 24)
+        self.win_close_btn.setToolTip("Закрыть")
+        self.win_close_btn.clicked.connect(self.close)
+        for wb in (self.win_min_btn, self.win_max_btn, self.win_close_btn):
+            wb.setCursor(Qt.CursorShape.PointingHandCursor)
+            win_layout.addWidget(wb)
+        self.top_window_controls.setVisible(self.frameless_enabled)
+        layout.addWidget(self.top_window_controls)
+        return bar
+
+    def _top_bar_mouse_press(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.windowHandle()
+            if handle is not None and hasattr(handle, "startSystemMove"):
+                try:
+                    if handle.startSystemMove():
+                        return
+                except Exception:
+                    pass
+            self._top_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def _top_bar_mouse_move(self, event):
+        if self._top_drag_offset is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            if not self.isMaximized():
+                self.move(event.globalPosition().toPoint() - self._top_drag_offset)
+
+    def _top_bar_mouse_release(self, event):
+        self._top_drag_offset = None
+
+    def toggle_visualizer_mode(self, checked=False):
+        self.visualizer_enabled = bool(self.viz_toggle_btn.isChecked())
+        self.settings.setValue("visualizer_enabled", "true" if self.visualizer_enabled else "false")
+        if hasattr(self, "player_bar"):
+            playing = (
+                hasattr(self, "player")
+                and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            )
+            self.player_bar.sync_visualizer_state(playing)
+            self.player_bar.update()
+        if hasattr(self, "seek_slider"):
+            self.seek_slider.update()
+
+    def toggle_chameleon_mode(self, checked=False):
+        self.chameleon_enabled = bool(self.chameleon_toggle_btn.isChecked())
+        self.settings.setValue("chameleon_enabled", "true" if self.chameleon_enabled else "false")
+        if hasattr(self, "player_bar"):
+            self.player_bar.update()
+        if hasattr(self, "seek_slider"):
+            self.seek_slider.update()
+        if hasattr(self, "volume_slider"):
+            self.volume_slider.update()
+        self.update_playing_row_highlight()
+
+    def toggle_vinyl_mode(self, checked=False):
+        self.vinyl_enabled = bool(self.vinyl_toggle_btn.isChecked())
+        self.settings.setValue("vinyl_enabled", "true" if self.vinyl_enabled else "false")
+        if hasattr(self, "expanded_cover"):
+            self.expanded_cover.sync_vinyl_state()
+            self.expanded_cover._render_cover()
+            if self.expanded_cover.isVisible():
+                self._position_expanded_cover()
+
+    def toggle_frameless_mode(self, checked=False):
+        self.frameless_enabled = bool(self.frameless_toggle_btn.isChecked())
+        geom = self.geometry()
+        was_max = self.isMaximized()
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, self.frameless_enabled)
+        if hasattr(self, "top_window_controls"):
+            self.top_window_controls.setVisible(self.frameless_enabled)
+        self.show()
+        if was_max:
+            self.showMaximized()
+        else:
+            self.setGeometry(geom)
+            if not self.frameless_enabled:
+                apply_native_title_bar(self, self.theme)
 
     def create_sidebar(self):
         self.sidebar = QFrame()
@@ -8869,24 +9443,68 @@ class MusicPlayer(QMainWindow):
         likes.setContentsMargins(8, 8, 8, 8)
         likes.setSpacing(12)
 
-        likes_header = QHBoxLayout()
+        self.likes_hero_header = QFrame(self.likes_page)
+        self.likes_hero_header.setObjectName("likesHeroHeader")
+        self.likes_hero_header.setMinimumHeight(136)
+        self.likes_hero_header.setMaximumHeight(156)
+        hero_layout = QHBoxLayout(self.likes_hero_header)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(18)
+
+        self.likes_collage_cover = LikesCollageCover(self.likes_hero_header)
+        hero_layout.addWidget(self.likes_collage_cover, 0, Qt.AlignmentFlag.AlignVCenter)
+
         heading_text = QVBoxLayout()
-        heading_text.setSpacing(4)
+        heading_text.setContentsMargins(0, 0, 0, 0)
+        heading_text.setSpacing(3)
+        likes_eyebrow = QLabel("КОЛЛЕКЦИЯ · ИЗБРАННОЕ")
+        likes_eyebrow.setObjectName("artistVerified")
         likes_title = QLabel("Лайки")
         likes_title.setObjectName("pageTitle")
         self.likes_title = QLabel("Твоя любимая музыка")
         self.likes_title.setObjectName("mutedText")
+        heading_text.addWidget(likes_eyebrow)
         heading_text.addWidget(likes_title)
         heading_text.addWidget(self.likes_title)
-        likes_header.addLayout(heading_text)
-        likes_header.addStretch(1)
+
+        hero_actions = QHBoxLayout()
+        hero_actions.setContentsMargins(0, 4, 0, 0)
+        hero_actions.setSpacing(8)
+        self.likes_play_all_button = QPushButton("Слушать")
+        self.likes_play_all_button.setObjectName("artistShuffleButton")
+        self.likes_play_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.likes_play_all_button.setIcon(control_icon("play", "#101010", 18))
+        self.likes_play_all_button.setIconSize(QSize(16, 16))
+        self.likes_play_all_button.setMinimumHeight(32)
+        self.likes_play_all_button.setToolTip("Запустить воспроизведение текущей вкладки лайков")
+        self.likes_play_all_button.clicked.connect(lambda checked=False: self.play_active_likes_tab(shuffle=False))
+
+        self.likes_shuffle_all_button = QPushButton("Перемешать")
+        self.likes_shuffle_all_button.setObjectName("artistMixButton")
+        self.likes_shuffle_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.likes_shuffle_all_button.setIcon(control_icon("shuffle", "#66E099", 18))
+        self.likes_shuffle_all_button.setIconSize(QSize(16, 16))
+        self.likes_shuffle_all_button.setMinimumHeight(32)
+        self.likes_shuffle_all_button.setToolTip("Перемешать любимые треки и начать воспроизведение")
+        self.likes_shuffle_all_button.clicked.connect(lambda checked=False: self.play_active_likes_tab(shuffle=True))
+        hero_actions.addWidget(self.likes_play_all_button)
+        hero_actions.addWidget(self.likes_shuffle_all_button)
+        hero_actions.addStretch(1)
+        heading_text.addLayout(hero_actions)
+        hero_layout.addLayout(heading_text, 1)
+
+        right_controls = QVBoxLayout()
+        right_controls.setContentsMargins(0, 0, 0, 0)
+        right_controls.setSpacing(8)
+        top_badges = QHBoxLayout()
+        top_badges.setSpacing(8)
         self.connection_badge = QLabel("● Локально")
         self.connection_badge.setObjectName("connectionBadge")
-        likes_header.addWidget(self.connection_badge)
+        top_badges.addWidget(self.connection_badge)
         self.sync_account_button = QPushButton("⟳  YouTube")
         self.sync_account_button.setObjectName("filterButton")
         self.sync_account_button.setToolTip("Синхронизировать лайки YouTube Music")
-        likes_header.addWidget(self.sync_account_button)
+        top_badges.addWidget(self.sync_account_button)
         self.likes_settings_button = QPushButton("⚙")
         self.likes_settings_button.setObjectName("themeButton")
         self.likes_settings_button.setFixedSize(38, 38)
@@ -8895,9 +9513,11 @@ class MusicPlayer(QMainWindow):
         self.likes_settings_menu = QMenu(self)
         self.likes_settings_menu.setObjectName("darkMenu")
         self.likes_settings_button.setMenu(self.likes_settings_menu)
-        likes_header.addWidget(self.likes_settings_button)
-        likes.addLayout(likes_header)
-        likes.addSpacing(8)
+        top_badges.addWidget(self.likes_settings_button)
+        right_controls.addLayout(top_badges)
+        right_controls.addStretch(1)
+        hero_layout.addLayout(right_controls)
+        likes.addWidget(self.likes_hero_header)
 
         account_card = QFrame()
         account_card.setObjectName("likesAccountCard")
@@ -8957,6 +9577,7 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.addTab(self.youtube_likes_list, "YouTube Music · 0")
         self.likes_tabs.addTab(self.soundcloud_likes_list, "SoundCloud · 0")
         self.likes_tabs.addTab(self.likes_list, "Мои лайки · 0")
+        self.likes_tabs.currentChanged.connect(self._update_likes_collage)
         likes.addWidget(self.likes_tabs, 1)
         self.view_stack.addWidget(self.likes_page)
 
@@ -9124,9 +9745,17 @@ class MusicPlayer(QMainWindow):
         header.addWidget(self.queue_toggle)
         layout.addLayout(header)
 
+        queue_meta_row = QHBoxLayout()
+        queue_meta_row.setContentsMargins(0, 0, 0, 0)
+        queue_meta_row.setSpacing(6)
         self.queue_count = QLabel("0 треков")
         self.queue_count.setObjectName("mutedText")
-        layout.addWidget(self.queue_count)
+        self.queue_source_badge = QLabel("Очередь")
+        self.queue_source_badge.setObjectName("queueSourceBadge")
+        queue_meta_row.addWidget(self.queue_count)
+        queue_meta_row.addStretch(1)
+        queue_meta_row.addWidget(self.queue_source_badge)
+        layout.addLayout(queue_meta_row)
         self.queue_list = DroppableTrackListWidget("queue")
         self.queue_list.setObjectName("queueList")
         self.queue_list.setSpacing(2)
@@ -9256,6 +9885,7 @@ class MusicPlayer(QMainWindow):
         self._cover_expand_anim.stop()
         self._cover_expand_progress = 0.0
         self.expanded_cover.show()
+        self.expanded_cover.sync_vinyl_state()
         self._position_expanded_cover()
         self._cover_expand_anim.setStartValue(0.0)
         self._cover_expand_anim.setEndValue(1.0)
@@ -9265,6 +9895,7 @@ class MusicPlayer(QMainWindow):
         if self.view_stack.currentWidget() is self.cover_page:
             self._cover_expand_anim.stop()
             self.expanded_cover.hide()
+            self.expanded_cover.sync_vinyl_state()
             page = self._cover_return_page
             if page not in (self.browse_page, self.likes_page, getattr(self, "playlist_page", None)):
                 page = self.last_library_page
@@ -9524,6 +10155,55 @@ class MusicPlayer(QMainWindow):
             QLabel#connectionBadge { color: #9DA8B8; font-size: 11px; padding: 6px; }
             QLabel#connectionBadge[connected="true"] { color: #66E099; }
 
+            QFrame#auroraTopBar {
+                background: rgba(17, 20, 26, 178);
+                border: 1px solid rgba(255, 255, 255, 16);
+                border-radius: 12px;
+            }
+            QLabel#topBrandDot { color: #1ED760; font-size: 12px; font-weight: 900; }
+            QLabel#topBrandTitle { color: #E8EEF6; font-size: 11px; font-weight: 800; letter-spacing: 1.6px; }
+            QPushButton#topBarToggle {
+                background: rgba(255, 255, 255, 10); color: #9DA8B8;
+                border: 1px solid rgba(255, 255, 255, 14);
+                border-radius: 13px; padding: 2px 11px; font-size: 11px; font-weight: 700;
+            }
+            QPushButton#topBarToggle:hover { background: rgba(255, 255, 255, 22); color: #FFFFFF; }
+            QPushButton#topBarToggle:checked {
+                background: rgba(29, 185, 84, 38); color: #66E099;
+                border: 1px solid rgba(92, 224, 146, 85);
+            }
+            QPushButton#topWinButton, QPushButton#topWinCloseButton {
+                background: transparent; color: #A2AEBF; border: none; border-radius: 7px;
+                padding: 0; font-size: 12px; font-weight: 700;
+            }
+            QPushButton#topWinButton:hover { background: rgba(255, 255, 255, 22); color: #FFFFFF; }
+            QPushButton#topWinCloseButton:hover { background: #E04352; color: #FFFFFF; }
+
+            QFrame#likesHeroHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(27, 68, 52, 168), stop:0.55 rgba(23, 33, 45, 178), stop:1 rgba(18, 23, 31, 186));
+                border: 1px solid rgba(92, 224, 146, 48);
+                border-radius: 16px;
+            }
+            QLabel#trackSourceBadge {
+                background: rgba(255, 255, 255, 15); color: #9DA8B8;
+                border: 1px solid rgba(255, 255, 255, 18);
+                border-radius: 6px; padding: 1px 5px; font-size: 9px; font-weight: 800; letter-spacing: 0.4px;
+            }
+            QLabel#trackSourceBadge[sourceKind="YT"] {
+                background: rgba(255, 62, 85, 28); color: #FF8A98; border-color: rgba(255, 92, 112, 54);
+            }
+            QLabel#trackSourceBadge[sourceKind="SC"] {
+                background: rgba(255, 115, 36, 30); color: #FFA26B; border-color: rgba(255, 136, 68, 58);
+            }
+            QLabel#trackSourceBadge[sourceKind="OK"] {
+                background: rgba(29, 185, 84, 34); color: #66E099; border-color: rgba(92, 224, 146, 68);
+            }
+            QLabel#queueSourceBadge {
+                background: rgba(29, 185, 84, 28); color: #66E099;
+                border: 1px solid rgba(92, 224, 146, 52);
+                border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700;
+            }
+
             QFrame#artistHeader {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1E2938, stop:1 #161B23);
                 border: 1px solid #283241;
@@ -9597,13 +10277,14 @@ class MusicPlayer(QMainWindow):
             QPushButton#playButton:pressed { background: #169C46; }
 
             QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove {
-                background: #1F2632; color: #A2AEBF; border-radius: 8px;
+                background: transparent; color: #A2AEBF; border: none; border-radius: 17px;
                 font-size: 13px; padding: 2px; font-weight: 700;
             }
+            QPushButton#rowPlay[revealed="true"] { background: rgba(255, 255, 255, 16); color: #F2F5F9; }
             QPushButton#rowPlay:hover { background: #1DB954; color: #0D1912; }
-            QPushButton#rowFavorite { font-size: 21px; color: #A2AEBF; }
-            QPushButton#rowFavorite:checked { color: #5CE092; background: #193025; }
-            QPushButton#rowFavorite:hover { background: #283241; color: #66E099; }
+            QPushButton#rowFavorite { font-size: 21px; color: #A2AEBF; background: transparent; }
+            QPushButton#rowFavorite:checked { color: #5CE092; background: rgba(29, 185, 84, 22); }
+            QPushButton#rowFavorite:hover { background: rgba(255, 255, 255, 18); color: #66E099; }
             QPushButton#rowRemove { background: transparent; color: transparent; }
             QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #2B3442; color: #F2F5F9; }
             QPushButton#rowRemove:hover { background: #384456; color: #FFFFFF; }
@@ -9808,13 +10489,31 @@ class MusicPlayer(QMainWindow):
             QPushButton#bottomFavorite:checked:hover { background: rgba(29, 185, 84, 22); }
             QPushButton#bottomDislike:checked { background: #F7E6E6; }
 
-            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove,
+            QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove {
+                background: transparent; color: #263342; border: none; border-radius: 17px;
+            }
+            QPushButton#rowPlay[revealed="true"] { background: rgba(20, 28, 38, 12); }
+            QPushButton#rowPlay:hover { background: #1DB954; color: #FFFFFF; }
             QPushButton#filterButton, QPushButton#themeButton {
                 background: #EFF3F7; color: #263342; border-color: #D5DEE8;
             }
-            QPushButton#rowFavorite:checked { color: #167A40; background: #E1F3E8; }
+            QPushButton#rowFavorite:checked { color: #167A40; background: rgba(29, 185, 84, 20); }
             QPushButton#rowRemove { background: transparent; color: transparent; }
             QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #E1E8F0; color: #243140; }
+            QFrame#auroraTopBar {
+                background: rgba(255, 255, 255, 205); border: 1px solid #D5DEE8; border-radius: 12px;
+            }
+            QLabel#topBrandTitle { color: #18202A; }
+            QPushButton#topBarToggle {
+                background: rgba(20, 28, 38, 8); color: #546275; border: 1px solid #D5DEE8;
+            }
+            QPushButton#topBarToggle:checked {
+                background: #E1F3E8; color: #167A40; border-color: #8FD1A8;
+            }
+            QFrame#likesHeroHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #E4F4EA, stop:1 #FFFFFF);
+                border: 1px solid #C2E5D0; border-radius: 16px;
+            }
             QPushButton#transportButton { color: #4E5C6E; }
             QPushButton#transportButton:hover, QPushButton#iconButton:hover { background: #EBF0F6; color: #167A40; }
             QPushButton#transportButton:checked { background: #E1F3E8; color: #167A40; }
@@ -11542,6 +12241,7 @@ class MusicPlayer(QMainWindow):
         self.likes_title.setText(f"{combined_count} треков в библиотеке")
         self.refresh_home_likes_counts({"youtube": youtube_count, "soundcloud": soundcloud_count})
         self.refresh_connection_badge()
+        self._update_likes_collage()
 
     def on_soundcloud_account_error(self, kind, worker, error):
         if self.soundcloud_profile_workers.get(kind) is not worker:
@@ -14315,6 +15015,7 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.setTabText(2, f"Мои лайки · {len(local_tracks)}")
         self.likes_title.setText(f"{len(combined)} треков в библиотеке")
         self.refresh_home_likes_counts({"youtube": len(youtube_tracks), "soundcloud": len(soundcloud_tracks)})
+        self._update_likes_collage()
 
         if self.youtube_auth_mode == "browser" and self.youtube_auth_browser:
             profile_suffix = f" · профиль {self.youtube_auth_profile}" if self.youtube_auth_profile else ""
@@ -16346,22 +17047,107 @@ class MusicPlayer(QMainWindow):
                     else:
                         self.set_pixmap_safe(label, pixmap)
                     if label is getattr(self, "bottom_cover", None):
-                        self.player_bar.set_cover_accent(pixmap)
+                        self._apply_chameleon_accent(pixmap)
                     if label is getattr(self, "artist_avatar", None):
                         self._apply_artist_header_color(pixmap)
                     if label is getattr(self, "playlist_cover_label", None):
                         self._apply_playlist_header_color(pixmap)
                     if self.mini_player is not None and label is self.mini_player.cover:
                         self.mini_player.set_cover_accent(pixmap)
+            if hasattr(self, "likes_collage_cover") and url in getattr(self, "_likes_collage_urls", ()):
+                self._update_likes_collage()
         finally:
             reply.deleteLater()
             self.active_images = max(0, self.active_images - 1)
             # LRU уже удерживает кэш в заданном размере, не сбрасывая все обложки сразу.
             self.pump_images()
 
+    def _apply_chameleon_accent(self, pixmap):
+        self.player_bar.set_cover_accent(pixmap)
+        if hasattr(self, "cover_page"):
+            self.cover_page.set_cover_accent(pixmap)
+        self.chameleon_accent = QColor(self.player_bar.accent)
+        self.chameleon_bright = QColor(self.player_bar.accent_bright)
+        if hasattr(self, "seek_slider"):
+            self.seek_slider.update()
+        if hasattr(self, "volume_slider"):
+            self.volume_slider.update()
+        if hasattr(self, "expanded_cover") and self.expanded_cover.isVisible():
+            self.expanded_cover.update()
+        self.update_playing_row_highlight()
+
+    def _update_likes_collage(self, *_args):
+        if not hasattr(self, "likes_collage_cover"):
+            return
+        idx = self.likes_tabs.currentIndex() if hasattr(self, "likes_tabs") else 0
+        if idx == 0:
+            tracks = self._youtube_likes_for_display()
+        elif idx == 1:
+            tracks = [t for t in self.soundcloud_liked_tracks if isinstance(t, dict) and t.get("url")]
+        else:
+            tracks = [t for t in self.favorites.values() if isinstance(t, dict) and t.get("url")]
+        if not tracks:
+            tracks = self.get_combined_likes()
+        pixmaps = []
+        urls = []
+        for t in tracks[:12]:
+            u = normalize_artwork_url(t.get("thumbnail", ""))
+            if not u or u in urls:
+                continue
+            urls.append(u)
+            cached = self.pixmap_cache.get(u)
+            if cached is not None and not cached.isNull():
+                pixmaps.append(cached)
+            if len(pixmaps) >= 4:
+                break
+        self._likes_collage_urls = tuple(urls[:4])
+        self.likes_collage_cover.set_pixmaps(pixmaps)
+
+    def play_active_likes_tab(self, shuffle=False):
+        idx = self.likes_tabs.currentIndex() if hasattr(self, "likes_tabs") else 0
+        if idx == 0:
+            tracks = list(self._likes_tracks_for_kind("youtube") if hasattr(self, "_likes_tracks_for_kind") else self._youtube_likes_for_display())
+            if not tracks:
+                return
+            if shuffle:
+                self.shuffle_enabled = True
+                self.shuffle_button.setChecked(True)
+                chosen = random.choice(tracks)
+            else:
+                chosen = tracks[0]
+            self.play_youtube_likes_from(chosen)
+        elif idx == 1:
+            tracks = list(self._likes_tracks_for_kind("soundcloud") if hasattr(self, "_likes_tracks_for_kind") else self.soundcloud_liked_tracks)
+            tracks = [t for t in tracks if isinstance(t, dict) and t.get("url")]
+            if not tracks:
+                return
+            if shuffle:
+                self.shuffle_enabled = True
+                self.shuffle_button.setChecked(True)
+                chosen = random.choice(tracks)
+            else:
+                chosen = tracks[0]
+            self.play_soundcloud_likes_from(chosen)
+        else:
+            tracks = [dict(t) for t in self.favorites.values() if isinstance(t, dict) and t.get("url")]
+            if not tracks:
+                return
+            if shuffle:
+                random.shuffle(tracks)
+            self._stop_supermix_session()
+            self.queue_mode = "manual"
+            self.radio_mode_active = False
+            self.queue_tracks = [dict(t, queue_id=uuid4().hex) for t in tracks]
+            self.refresh_queue_list()
+            self.play_queue_index(0)
+
     def show_cover(self, url):
         # Main thumbnail and the expanded view share the existing bounded cache.
-        self.player_bar.set_cover_accent(self.pixmap_cache.get(normalize_artwork_url(url)))
+        self._apply_chameleon_accent(self.pixmap_cache.get(normalize_artwork_url(url)))
+        if hasattr(self, "seek_slider"):
+            seed_str = str((self.current_track or {}).get("url") or url or "aurora")
+            self.seek_slider._wave_seed = sum((i + 1) * ord(ch) for i, ch in enumerate(seed_str[:64]))
+            self.seek_slider.update()
         labels = [self.bottom_cover]
         if self.view_stack.currentWidget() is self.cover_page:
             labels.append(self.expanded_cover)
@@ -16549,6 +17335,21 @@ class MusicPlayer(QMainWindow):
     def update_queue_count(self):
         count = len(self.queue_tracks)
         self.queue_count.setText(f"{count} треков")
+        if hasattr(self, "queue_source_badge"):
+            mode = getattr(self, "queue_mode", "manual")
+            if getattr(self, "radio_mode_active", False):
+                badge_text = "Радиоволна"
+            elif mode == "supermix":
+                badge_text = "Супермикс"
+            elif mode == "youtube_likes":
+                badge_text = "YouTube Лайки"
+            elif mode == "soundcloud_likes":
+                badge_text = "SoundCloud Лайки"
+            elif mode == "user_playlist":
+                badge_text = "Плейлист"
+            else:
+                badge_text = "Очередь"
+            self.queue_source_badge.setText(badge_text)
         self.schedule_session_save()
 
     def clear_queue(self):
@@ -17419,9 +18220,14 @@ class MusicPlayer(QMainWindow):
     def on_slot_playback_state(self, slot, state):
         if slot != self.active_slot:
             return
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.play_button.setIcon(control_icon(
-            "pause" if state == QMediaPlayer.PlaybackState.PlayingState else "play", "#FFFFFF"
+            "pause" if playing else "play", "#FFFFFF"
         ))
+        if hasattr(self, "player_bar"):
+            self.player_bar.sync_visualizer_state(playing)
+        if hasattr(self, "expanded_cover"):
+            self.expanded_cover.sync_vinyl_state()
         self.update_playing_row_highlight()
         self.refresh_mini_player()
         self.save_playback_checkpoint()
