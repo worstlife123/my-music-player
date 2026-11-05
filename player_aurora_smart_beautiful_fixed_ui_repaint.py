@@ -33,10 +33,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, Request, build_opener
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject
+from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
-    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage,
+    QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage, QDrag,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkDiskCache
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -996,6 +996,19 @@ def draw_vector_icon(painter, kind, rect, color="#FFFFFF", accent=None):
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawLine(QPointF(-9, 0), QPointF(9, 0))
         painter.drawLine(QPointF(0, -9), QPointF(0, 9))
+    elif kind in ("folder", "📁"):
+        folder = QPainterPath()
+        folder.moveTo(-12.5, -8.5)
+        folder.lineTo(-3.2, -8.5)
+        folder.lineTo(-0.2, -5.0)
+        folder.lineTo(12.5, -5.0)
+        folder.lineTo(12.5, 9.5)
+        folder.lineTo(-12.5, 9.5)
+        folder.closeSubpath()
+        painter.setPen(QPen(color, 2.1, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(QColor(255, 255, 255, 38))
+        painter.drawPath(folder)
     else:  # универсальная парная восьмая нота (♫) — симметричный и цельный символ
         stem_pen = QPen(color, 2.35, Qt.PenStyle.SolidLine,
                         Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -4853,16 +4866,56 @@ class TrackArtworkWorker(QThread):
 # Используем обычные Qt-виджеты, никакого HTML и браузера.
 # -------------------------------------------------------------
 
+AURORA_TRACK_MIME = "application/x-aurora-track"
+AURORA_PLAYLIST_MIME = "application/x-aurora-playlist-id"
+
+
 class ClickableLabel(QLabel):
     """QLabel с сигналом клика — используется для обложки и названия трека."""
     clicked = pyqtSignal()
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._press_pos = None
+        self._dragged = False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            parent = self.parentWidget()
+            if parent is not None and parent.__class__.__name__ == "TrackRow":
+                self._press_pos = event.position().toPoint()
+                self._dragged = False
+                parent._drag_start_pos = self.mapTo(parent, self._press_pos)
+                parent._drag_in_progress = False
+                event.accept()
+                return
             self.clicked.emit()
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._press_pos is not None:
+            parent = self.parentWidget()
+            if parent is not None and hasattr(parent, "_maybe_begin_drag"):
+                mapped = self.mapTo(parent, event.position().toPoint())
+                if parent._maybe_begin_drag(mapped):
+                    self._dragged = True
+                    self._press_pos = None
+                    event.accept()
+                    return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
+            was_dragged = self._dragged
+            self._press_pos = None
+            self._dragged = False
+            if not was_dragged and self.rect().contains(event.position().toPoint()):
+                self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ExpandedArtwork(QLabel):
@@ -5085,6 +5138,8 @@ def make_service_artwork(source, pixel_size=80):
         "supermix": ("#F25C3B", "#F7B733"),
         "shuffle": ("#147A85", "#2CE0C3"),
         "playlist": ("#3B66A8", "#1E2B4F"),
+        "user_playlist": ("#1DB954", "#155734"),
+        "folder": ("#3A4B63", "#1D2634"),
         "brand": ("#160406", "#050507"),
     }
     start, end = colors.get(source, colors["brand"])
@@ -5110,6 +5165,8 @@ def make_service_artwork(source, pixel_size=80):
         "supermix": "supermix",
         "shuffle": "headphones",
         "playlist": "music",
+        "user_playlist": "music",
+        "folder": "folder",
         "brand": "music",
     }.get(source, "music")
     draw_vector_icon(painter, kind, QRectF(20, 20, 40, 40), "#FFFFFF")
@@ -5255,26 +5312,42 @@ class AnimatedNavButton(QPushButton):
 
 
 class SidebarMediaItem(QPushButton):
-    """Компактная строка «Моей медиатеки» в стиле Spotify с фото-обложкой 38×38."""
-    def __init__(self, title, subtitle, artwork_kind="likes", parent=None):
+    """Компактная строка «Моей медиатеки» в стиле Spotify с фото-обложкой 38×38 и поддержкой Drag & Drop."""
+    track_dropped = pyqtSignal(str, object)
+    playlist_dropped = pyqtSignal(str, str)
+
+    def __init__(self, title, subtitle, artwork_kind="likes", parent=None, *,
+                 playlist_id="", folder_name="", is_folder=False, folder_collapsed=False, indent_level=0):
         super().__init__(parent)
         self.setObjectName("sidebarMediaItem")
-        self.setFixedHeight(50)
+        self.setFixedHeight(46 if is_folder else 50)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.item_title = str(title or "")
         self.item_subtitle = str(subtitle or "")
+        self.playlist_id = str(playlist_id or "")
+        self.folder_name = str(folder_name or "")
+        self.is_folder = bool(is_folder)
+        self.folder_collapsed = bool(folder_collapsed)
+        self.indent_level = max(0, int(indent_level or 0))
         self._playing = False
+        self._active_selected = False
         self._pinned = False
+        self._drop_hover = False
+        self._drag_start_pos = None
         self.track_key = ""
         self.cover_label = QLabel(self)
         self.cover_label.setObjectName("sidebarMediaCover")
-        self.cover_label.setFixedSize(38, 38)
-        self.cover_label.move(6, 6)
+        side = 34 if is_folder else 38
+        self.cover_label.setFixedSize(side, side)
+        left_offset = 6 + self.indent_level * 12
+        self.cover_label.move(left_offset, (self.height() - side) // 2)
         self.cover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        default_art = make_service_artwork(artwork_kind, 76)
+        default_art = make_service_artwork(artwork_kind, side * 2)
         self.cover_label.setPixmap(default_art)
+        if self.playlist_id or self.is_folder:
+            self.setAcceptDrops(True)
         self.setAccessibleName(f"{self.item_title}: {self.item_subtitle}")
         self.setToolTip(f"{self.item_title}\n{self.item_subtitle}" if self.item_subtitle else self.item_title)
         self.setStyleSheet("QPushButton#sidebarMediaItem { border: none; padding: 0; background: transparent; }")
@@ -5294,37 +5367,154 @@ class SidebarMediaItem(QPushButton):
             self._playing = playing
             self.update()
 
+    def set_active_selected(self, selected):
+        selected = bool(selected)
+        if self._active_selected != selected:
+            self._active_selected = selected
+            self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.playlist_id and not self.is_folder:
+            self._drag_start_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            (event.buttons() & Qt.MouseButton.LeftButton)
+            and self.playlist_id
+            and not self.is_folder
+            and self._drag_start_pos is not None
+            and (event.position().toPoint() - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance()
+        ):
+            self._drag_start_pos = None
+            self.setDown(False)
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData(AURORA_PLAYLIST_MIME, self.playlist_id.encode("utf-8"))
+            mime.setText(self.item_title)
+            drag.setMimeData(mime)
+            pm = QPixmap(176, 38)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setBrush(QColor(22, 32, 42, 235))
+            p.setPen(QPen(QColor("#1DB954"), 1.3))
+            p.drawRoundedRect(QRectF(1, 1, 174, 36), 9, 9)
+            p.setPen(QColor("#F2F6FA"))
+            font = QFont(self.font())
+            font.setPixelSize(12)
+            font.setWeight(QFont.Weight.Bold)
+            p.setFont(font)
+            p.drawText(QRect(12, 0, 152, 38), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       QFontMetrics(font).elidedText(f"♫  {self.item_title}", Qt.TextElideMode.ElideRight, 152))
+            p.end()
+            drag.setPixmap(pm)
+            drag.exec(Qt.DropAction.MoveAction)
+            return
+        super().mouseMoveEvent(event)
+
+    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md is not None:
+            if self.playlist_id and md.hasFormat(AURORA_TRACK_MIME):
+                self._drop_hover = True
+                self.update()
+                event.acceptProposedAction()
+                return
+            if self.is_folder and (md.hasFormat(AURORA_PLAYLIST_MIME) or md.hasFormat(AURORA_TRACK_MIME)):
+                self._drop_hover = True
+                self.update()
+                event.acceptProposedAction()
+                return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        md = event.mimeData()
+        if md is not None and (
+            (self.playlist_id and md.hasFormat(AURORA_TRACK_MIME))
+            or (self.is_folder and (md.hasFormat(AURORA_PLAYLIST_MIME) or md.hasFormat(AURORA_TRACK_MIME)))
+        ):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        if self._drop_hover:
+            self._drop_hover = False
+            self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._drop_hover = False
+        self.update()
+        md = event.mimeData()
+        if md is None:
+            return
+        if self.is_folder and md.hasFormat(AURORA_PLAYLIST_MIME):
+            raw_pid = bytes(md.data(AURORA_PLAYLIST_MIME)).decode("utf-8", errors="ignore").strip()
+            if raw_pid:
+                self.playlist_dropped.emit(raw_pid, self.folder_name)
+                event.acceptProposedAction()
+                return
+        if md.hasFormat(AURORA_TRACK_MIME) and (self.playlist_id or self.is_folder):
+            try:
+                payload = json.loads(bytes(md.data(AURORA_TRACK_MIME)).decode("utf-8"))
+                track = payload.get("track") if isinstance(payload, dict) and "track" in payload else payload
+                if isinstance(track, dict) and track.get("url"):
+                    target_id = self.playlist_id if self.playlist_id else f"folder:{self.folder_name}"
+                    self.track_dropped.emit(target_id, track)
+                    event.acceptProposedAction()
+                    return
+            except (ValueError, TypeError):
+                pass
+        super().dropEvent(event)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         light = getattr(self.window(), "theme", "dark") == "light"
-        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        indent_px = self.indent_level * 12
+        rect = QRectF(self.rect()).adjusted(1.0 + indent_px, 1.0, -1.0, -1.0)
         hovered = self.underMouse() or self.isDown()
-        if self._playing or hovered:
+        active = self._playing or self._active_selected
+        if self._drop_hover:
+            bg = QColor("#D5F2E0" if light else "#1C3B2B")
+            border = QColor("#1DB954")
+            painter.setPen(QPen(border, 1.6))
+            painter.setBrush(bg)
+            painter.drawRoundedRect(rect, 9.0, 9.0)
+        elif active or hovered:
             if light:
-                bg = QColor("#E2F3E8" if self._playing else ("#DCE5EE" if self.isDown() else "#EDF2F7"))
-                border = QColor("#A9DBC0" if self._playing else "#D7E0EA")
+                bg = QColor("#E2F3E8" if active else ("#DCE5EE" if self.isDown() else "#EDF2F7"))
+                border = QColor("#A9DBC0" if active else "#D7E0EA")
             else:
-                bg = QColor("#162920" if self._playing else ("#222B37" if self.isDown() else "#1A212C"))
-                border = QColor("#29543D" if self._playing else "#26303F")
+                bg = QColor("#162920" if active else ("#222B37" if self.isDown() else "#1A212C"))
+                border = QColor("#29543D" if active else "#26303F")
             painter.setPen(QPen(border, 1.0))
             painter.setBrush(bg)
             painter.drawRoundedRect(rect, 9.0, 9.0)
 
-        right_pad = 18 if self._playing else 5
-        text_left = 48
+        if self._active_selected and not self._playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#1DB954"))
+            indicator = QRectF(rect.left() + 1.0, rect.top() + 10.0,
+                               3.0, max(12.0, rect.height() - 20.0))
+            painter.drawRoundedRect(indicator, 1.5, 1.5)
+
+        right_pad = 22 if (self._playing or self.is_folder) else 5
+        text_left = (46 if self.is_folder else 48) + indent_px
         text_w = max(20, int(self.width() - text_left - right_pad))
 
         title_font = QFont(self.font())
         title_font.setPixelSize(12)
-        title_font.setWeight(QFont.Weight.Bold if self._playing else QFont.Weight.DemiBold)
+        title_font.setWeight(QFont.Weight.Bold if active else QFont.Weight.DemiBold)
         painter.setFont(title_font)
-        if self._playing:
+        if self._playing or self._active_selected:
             title_color = QColor("#167A40" if light else "#1ED760")
         else:
             title_color = QColor("#141C26" if light else "#F4F7FB")
         painter.setPen(title_color)
-        title_rect = QRect(text_left, 7, text_w, 18)
+        title_rect = QRect(text_left, 5 if self.is_folder else 7, text_w, 18)
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -5332,18 +5522,27 @@ class SidebarMediaItem(QPushButton):
         )
 
         sub_font = QFont(self.font())
-        sub_font.setPixelSize(11)
+        sub_font.setPixelSize(10 if self.is_folder else 11)
         sub_font.setWeight(QFont.Weight.Medium)
         painter.setFont(sub_font)
         painter.setPen(QColor("#5C697C" if light else "#8F9BAE"))
-        sub_rect = QRect(text_left, 25, text_w, 17)
+        sub_rect = QRect(text_left, 23 if self.is_folder else 25, text_w, 16)
         painter.drawText(
             sub_rect,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             QFontMetrics(sub_font).elidedText(self.item_subtitle, Qt.TextElideMode.ElideRight, text_w),
         )
 
-        if self._playing:
+        if self.is_folder:
+            chevron = "▸" if self.folder_collapsed else "▾"
+            painter.setPen(QColor("#647285" if light else "#9DA8B8"))
+            chev_font = QFont(self.font())
+            chev_font.setPixelSize(12)
+            chev_font.setWeight(QFont.Weight.Bold)
+            painter.setFont(chev_font)
+            painter.drawText(QRect(self.width() - 20, 0, 16, self.height()),
+                             Qt.AlignmentFlag.AlignCenter, chevron)
+        elif self._playing:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#1ED760"))
             dot = QRectF(self.width() - 14, self.height() / 2 - 4, 8, 8)
@@ -5858,31 +6057,109 @@ class TrackRow(QWidget):
         self._reveal_queue_action(False)
         super().leaveEvent(event)
 
+    def _is_action_widget(self, child):
+        if child is None:
+            return False
+        action_buttons = tuple(
+            button for button in (
+                getattr(self, "play_button", None),
+                getattr(self, "favorite_button", None),
+                getattr(self, "menu_button", None),
+                getattr(self, "remove_button", None),
+                getattr(self, "artist_label", None),
+            ) if button is not None
+        )
+        return child in action_buttons
+
+    def _maybe_begin_drag(self, pos):
+        start_pos = getattr(self, "_drag_start_pos", None)
+        if start_pos is None or getattr(self, "_drag_in_progress", False):
+            return False
+        if (pos - start_pos).manhattanLength() < QApplication.startDragDistance():
+            return False
+        self._drag_in_progress = True
+        self._drag_start_pos = None
+        drag = QDrag(self)
+        mime = QMimeData()
+        payload = {
+            "track": dict(self.track),
+            "source_kind": str(getattr(self, "drag_source_kind", "") or ""),
+            "source_index": int(getattr(self, "drag_source_index", -1)),
+            "queue_id": str(self.track.get("queue_id") or ""),
+        }
+        mime.setData(AURORA_TRACK_MIME, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        mime.setText(f"{self._full_artist} — {self._full_title}")
+        drag.setMimeData(mime)
+
+        badge_w, badge_h = 248, 48
+        pm = QPixmap(badge_w, badge_h)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(QColor(20, 27, 36, 240))
+        p.setPen(QPen(QColor("#1DB954"), 1.5))
+        p.drawRoundedRect(QRectF(1, 1, badge_w - 2, badge_h - 2), 11, 11)
+        cover_pm = self.thumbnail_label.pixmap() if hasattr(self, "thumbnail_label") else None
+        if cover_pm is not None and not cover_pm.isNull():
+            p.drawPixmap(QRect(8, 6, 36, 36), cover_pm)
+        title_font = QFont(self.font())
+        title_font.setPixelSize(12)
+        title_font.setWeight(QFont.Weight.Bold)
+        p.setFont(title_font)
+        p.setPen(QColor("#F2F6FA"))
+        p.drawText(
+            QRect(52, 6, badge_w - 60, 18),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            QFontMetrics(title_font).elidedText(self._full_title, Qt.TextElideMode.ElideRight, badge_w - 60),
+        )
+        sub_font = QFont(self.font())
+        sub_font.setPixelSize(11)
+        p.setFont(sub_font)
+        p.setPen(QColor("#8F9BAE"))
+        p.drawText(
+            QRect(52, 24, badge_w - 60, 16),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            QFontMetrics(sub_font).elidedText(self._full_artist, Qt.TextElideMode.ElideRight, badge_w - 60),
+        )
+        p.end()
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(24, 24))
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+        return True
+
     def mousePressEvent(self, event):
         # Кнопки действий должны обрабатывать нажатие самостоятельно:
         # иначе клик по Play/лайку/удалению/автору может запустить строку повторно.
         if event.button() == Qt.MouseButton.LeftButton:
             child = self.childAt(event.position().toPoint())
-            action_buttons = tuple(
-                button for button in (
-                    getattr(self, "play_button", None),
-                    getattr(self, "favorite_button", None),
-                    getattr(self, "menu_button", None),
-                    getattr(self, "remove_button", None),
-                    getattr(self, "artist_label", None),
-                ) if button is not None
-            )
-            if child is None:
-                self.play_requested.emit(dict(self.track))
-                event.accept()
-                return
-            if child in action_buttons:
+            if self._is_action_widget(child):
+                self._drag_start_pos = None
                 super().mousePressEvent(event)
                 return
-            self.play_requested.emit(dict(self.track))
+            self._drag_start_pos = event.position().toPoint()
+            self._drag_in_progress = False
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & Qt.MouseButton.LeftButton) and getattr(self, "_drag_start_pos", None) is not None:
+            if self._maybe_begin_drag(event.position().toPoint()):
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = getattr(self, "_drag_in_progress", False)
+            had_press = getattr(self, "_drag_start_pos", None) is not None
+            self._drag_start_pos = None
+            self._drag_in_progress = False
+            if not was_dragging and had_press and self.rect().contains(event.position().toPoint()):
+                self.play_requested.emit(dict(self.track))
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -5892,6 +6169,115 @@ class TrackRow(QWidget):
             shortened = label.fontMetrics().elidedText(full, Qt.TextElideMode.ElideRight, width)
             if label.text() != shortened:
                 label.setText(shortened)
+
+
+class DroppableTrackListWidget(QListWidget):
+    """Список треков с поддержкой перетаскивания (Drag & Drop) для сортировки и добавления."""
+    track_dropped_at = pyqtSignal(int, object, str, int)
+    files_dropped = pyqtSignal(object)
+
+    def __init__(self, list_kind="playlist", parent=None):
+        super().__init__(parent)
+        self.list_kind = str(list_kind or "playlist")
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self._drop_row = -1
+        self._drop_indicator_y = -1
+
+    def _compute_drop_target(self, pos):
+        count = self.count()
+        if count <= 0:
+            return 0, 6
+        item = self.itemAt(pos)
+        if item is None:
+            last_rect = self.visualItemRect(self.item(count - 1))
+            if pos.y() < 12:
+                return 0, 4
+            return count, min(self.viewport().height() - 4, last_rect.bottom() + 1)
+        row = self.row(item)
+        rect = self.visualItemRect(item)
+        if pos.y() > rect.center().y():
+            return row + 1, rect.bottom() + 1
+        return row, max(2, rect.top() - 1)
+
+    def _can_accept_mime(self, md):
+        if md is None:
+            return False
+        if md.hasFormat(AURORA_TRACK_MIME):
+            return True
+        if md.hasUrls():
+            for url in md.urls():
+                if url.isLocalFile():
+                    suffix = Path(url.toLocalFile()).suffix.lower()
+                    if suffix in (".json", ".m3u", ".m3u8", ".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus"):
+                        return True
+        return False
+
+    def dragEnterEvent(self, event):
+        if self._can_accept_mime(event.mimeData()):
+            self._drop_row, self._drop_indicator_y = self._compute_drop_target(event.position().toPoint())
+            self.viewport().update()
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._can_accept_mime(event.mimeData()):
+            self._drop_row, self._drop_indicator_y = self._compute_drop_target(event.position().toPoint())
+            self.viewport().update()
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self._drop_row = -1
+        self._drop_indicator_y = -1
+        self.viewport().update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        target_row, _ = self._compute_drop_target(event.position().toPoint())
+        self._drop_row = -1
+        self._drop_indicator_y = -1
+        self.viewport().update()
+        md = event.mimeData()
+        if md is None:
+            return
+        if md.hasFormat(AURORA_TRACK_MIME):
+            try:
+                payload = json.loads(bytes(md.data(AURORA_TRACK_MIME)).decode("utf-8"))
+                if isinstance(payload, dict):
+                    track = payload.get("track") if "track" in payload else payload
+                    source_kind = str(payload.get("source_kind") or "")
+                    source_index = int(payload.get("source_index", -1))
+                    if isinstance(track, dict) and track.get("url"):
+                        self.track_dropped_at.emit(target_row, track, source_kind, source_index)
+                        event.acceptProposedAction()
+                        return
+            except (ValueError, TypeError):
+                pass
+        if md.hasUrls():
+            paths = [url.toLocalFile() for url in md.urls() if url.isLocalFile()]
+            if paths:
+                self.files_dropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._drop_indicator_y >= 0:
+            painter = QPainter(self.viewport())
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            y = int(self._drop_indicator_y)
+            w = self.viewport().width()
+            painter.setPen(QPen(QColor("#1ED760"), 2.4))
+            painter.drawLine(14, y, max(20, w - 14), y)
+            painter.setBrush(QColor("#1ED760"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(14, y), 4.0, 4.0)
+            painter.drawEllipse(QPointF(max(20, w - 14), y), 4.0, 4.0)
+            painter.end()
 
 
 def make_placeholder(side=240):
@@ -6186,6 +6572,53 @@ def control_icon(name, color="#D4CDD5", side=32):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawLine(QPointF(9.5, 9.5), QPointF(22.5, 22.5))
         p.drawLine(QPointF(22.5, 9.5), QPointF(9.5, 22.5))
+    elif name in ("playlist-add", "plus"):
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if name == "playlist-add":
+            p.drawLine(QPointF(6.0, 9.0), QPointF(19.0, 9.0))
+            p.drawLine(QPointF(6.0, 15.0), QPointF(15.0, 15.0))
+            p.drawLine(QPointF(6.0, 21.0), QPointF(13.0, 21.0))
+            p.drawLine(QPointF(18.0, 18.0), QPointF(26.0, 18.0))
+            p.drawLine(QPointF(22.0, 14.0), QPointF(22.0, 22.0))
+        else:
+            p.drawLine(QPointF(8.0, 16.0), QPointF(24.0, 16.0))
+            p.drawLine(QPointF(16.0, 8.0), QPointF(16.0, 24.0))
+    elif name == "export":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(16, 19.5), QPointF(16, 5.5))
+        p.drawLine(QPointF(10.5, 11.2), QPointF(16, 5.5))
+        p.drawLine(QPointF(21.5, 11.2), QPointF(16, 5.5))
+        tray = QPainterPath()
+        tray.moveTo(6.5, 20.5)
+        tray.lineTo(6.5, 24.5)
+        tray.quadTo(6.5, 26.0, 8.0, 26.0)
+        tray.lineTo(24.0, 26.0)
+        tray.quadTo(25.5, 26.0, 25.5, 24.5)
+        tray.lineTo(25.5, 20.5)
+        p.drawPath(tray)
+    elif name == "import":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(16, 5.5), QPointF(16, 19.5))
+        p.drawLine(QPointF(10.5, 14.2), QPointF(16, 19.8))
+        p.drawLine(QPointF(21.5, 14.2), QPointF(16, 19.8))
+        tray = QPainterPath()
+        tray.moveTo(6.5, 20.5)
+        tray.lineTo(6.5, 24.5)
+        tray.quadTo(6.5, 26.0, 8.0, 26.0)
+        tray.lineTo(24.0, 26.0)
+        tray.quadTo(25.5, 26.0, 25.5, 24.5)
+        tray.lineTo(25.5, 20.5)
+        p.drawPath(tray)
+    elif name == "edit":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        pen_path = QPainterPath()
+        pen_path.moveTo(7.5, 24.5)
+        pen_path.lineTo(12.2, 23.4)
+        pen_path.lineTo(23.8, 11.8)
+        pen_path.lineTo(20.2, 8.2)
+        pen_path.lineTo(8.6, 19.8)
+        pen_path.closeSubpath()
+        p.drawPath(pen_path)
     p.end()
     return QIcon(pix)
 
@@ -7758,6 +8191,12 @@ class MusicPlayer(QMainWindow):
         self.artwork_max_workers = 3
         self._visible_artwork_timers = {}
         self.custom_playlists = self.load_custom_playlists()
+        self.user_playlists_file = migrate_legacy_data("user_playlists.json")
+        self.user_playlist_folders = []
+        self.collapsed_playlist_folders = set()
+        self.user_playlists = self.load_user_playlists()
+        self.active_user_playlist_id = ""
+        self._playlist_search_query = ""
         self._pending_direct_url = ""
         self._radio_retry_scheduled = False
         self.youtube_sync_worker = None
@@ -8137,8 +8576,8 @@ class MusicPlayer(QMainWindow):
         self.sidebar_add_playlist_button.setObjectName("sidebarAddButton")
         self.sidebar_add_playlist_button.setFixedSize(24, 24)
         self.sidebar_add_playlist_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sidebar_add_playlist_button.setToolTip("Добавить свой плейлист")
-        self.sidebar_add_playlist_button.clicked.connect(self.add_custom_playlist_dialog)
+        self.sidebar_add_playlist_button.setToolTip("Создать плейлист, папку или импортировать из файла")
+        self.sidebar_add_playlist_button.clicked.connect(self.open_sidebar_add_menu)
         lib_header_layout.addWidget(self.sidebar_library_title, 1)
         lib_header_layout.addWidget(self.sidebar_add_playlist_button)
         side_layout.addWidget(lib_header)
@@ -8520,6 +8959,145 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.addTab(self.likes_list, "Мои лайки · 0")
         likes.addWidget(self.likes_tabs, 1)
         self.view_stack.addWidget(self.likes_page)
+
+        # Страница локального пользовательского плейлиста (с поддержкой папок, Drag & Drop и экспорта/импорта).
+        self.playlist_page = QWidget()
+        pl_layout = QVBoxLayout(self.playlist_page)
+        pl_layout.setContentsMargins(6, 6, 6, 6)
+        pl_layout.setSpacing(12)
+
+        self.playlist_header = QFrame(self.playlist_page)
+        self.playlist_header.setObjectName("artistHeader")
+        self.playlist_header.setMinimumHeight(184)
+        self.playlist_header.setMaximumHeight(214)
+        pl_header_layout = QHBoxLayout(self.playlist_header)
+        pl_header_layout.setContentsMargins(22, 14, 22, 14)
+        pl_header_layout.setSpacing(22)
+
+        self.playlist_cover_label = QLabel(self.playlist_header)
+        self.playlist_cover_label.setObjectName("rowCover")
+        self.playlist_cover_label.setFixedSize(124, 124)
+        self.playlist_cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pl_header_layout.addWidget(self.playlist_cover_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        pl_text = QVBoxLayout()
+        pl_text.setContentsMargins(0, 0, 0, 0)
+        pl_text.setSpacing(3)
+        self.playlist_folder_badge = QLabel("ЛОКАЛЬНЫЙ ПЛЕЙЛИСТ")
+        self.playlist_folder_badge.setObjectName("artistVerified")
+        pl_text.addWidget(self.playlist_folder_badge)
+
+        self.playlist_title_button = QPushButton("Мой плейлист")
+        self.playlist_title_button.setObjectName("artistNameLink")
+        self.playlist_title_button.setFlat(True)
+        self.playlist_title_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_title_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.playlist_title_button.setToolTip("Нажми, чтобы переименовать плейлист или сменить папку")
+        self.playlist_title_button.setMinimumHeight(38)
+        self.playlist_title_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.playlist_title_button.clicked.connect(lambda checked=False: self.edit_active_user_playlist())
+        pl_text.addWidget(self.playlist_title_button)
+
+        self.playlist_meta_label = QLabel("0 треков · Перетаскивай треки мышкой для сортировки")
+        self.playlist_meta_label.setObjectName("artistMeta")
+        pl_text.addWidget(self.playlist_meta_label)
+
+        pl_actions = QHBoxLayout()
+        pl_actions.setContentsMargins(0, 5, 0, 0)
+        pl_actions.setSpacing(8)
+        self.playlist_play_button = QPushButton("Слушать")
+        self.playlist_play_button.setObjectName("artistShuffleButton")
+        self.playlist_play_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_play_button.setIcon(control_icon("play", "#101010", 18))
+        self.playlist_play_button.setIconSize(QSize(16, 16))
+        self.playlist_play_button.setMinimumHeight(32)
+        self.playlist_play_button.clicked.connect(lambda checked=False: self.play_active_user_playlist(shuffle=False))
+
+        self.playlist_shuffle_button = QPushButton("Перемешать")
+        self.playlist_shuffle_button.setObjectName("artistMixButton")
+        self.playlist_shuffle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_shuffle_button.setMinimumHeight(32)
+        self.playlist_shuffle_button.clicked.connect(lambda checked=False: self.play_active_user_playlist(shuffle=True))
+
+        self.playlist_add_queue_button = QPushButton("＋ Из очереди")
+        self.playlist_add_queue_button.setObjectName("artistMixButton")
+        self.playlist_add_queue_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_add_queue_button.setMinimumHeight(32)
+        self.playlist_add_queue_button.setToolTip("Добавить треки из текущей очереди в этот плейлист")
+        self.playlist_add_queue_button.clicked.connect(lambda checked=False: self.add_current_queue_to_active_playlist())
+
+        self.playlist_export_button = QPushButton("Экспорт…")
+        self.playlist_export_button.setObjectName("artistMixButton")
+        self.playlist_export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_export_button.setMinimumHeight(32)
+        self.playlist_export_button.setToolTip("Экспортировать плейлист в файл (.json или .m3u8)")
+        self.playlist_export_button.clicked.connect(lambda checked=False: self.export_user_playlist(self.active_user_playlist_id))
+
+        self.playlist_import_button = QPushButton("Импорт…")
+        self.playlist_import_button.setObjectName("artistMixButton")
+        self.playlist_import_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_import_button.setMinimumHeight(32)
+        self.playlist_import_button.setToolTip("Импортировать треки из файла (.json, .m3u, .m3u8)")
+        self.playlist_import_button.clicked.connect(
+            lambda checked=False: self.import_user_playlist_from_file(target_playlist_id=self.active_user_playlist_id)
+        )
+
+        self.playlist_edit_button = QPushButton("Папка / Имя")
+        self.playlist_edit_button.setObjectName("artistMixButton")
+        self.playlist_edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_edit_button.setMinimumHeight(32)
+        self.playlist_edit_button.clicked.connect(lambda checked=False: self.edit_active_user_playlist())
+
+        self.playlist_delete_button = QPushButton("Удалить")
+        self.playlist_delete_button.setObjectName("textButton")
+        self.playlist_delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playlist_delete_button.clicked.connect(lambda checked=False: self.delete_user_playlist(self.active_user_playlist_id))
+
+        for btn in (
+            self.playlist_play_button,
+            self.playlist_shuffle_button,
+            self.playlist_add_queue_button,
+            self.playlist_export_button,
+            self.playlist_import_button,
+            self.playlist_edit_button,
+            self.playlist_delete_button,
+        ):
+            pl_actions.addWidget(btn, 0)
+        pl_actions.addStretch(1)
+        pl_text.addLayout(pl_actions)
+        pl_header_layout.addLayout(pl_text, 1)
+        pl_layout.addWidget(self.playlist_header)
+
+        self.playlist_search_input = QLineEdit(self.playlist_page)
+        self.playlist_search_input.setPlaceholderText("Поиск внутри плейлиста (или перетащи сюда треки и файлы .json/.m3u8)")
+        self.playlist_search_input.setClearButtonEnabled(True)
+        self.playlist_search_input.setMinimumHeight(38)
+        self.playlist_search_input.textChanged.connect(self.on_playlist_search_changed)
+        pl_layout.addWidget(self.playlist_search_input)
+
+        self.user_playlist_empty = QLabel(
+            "Плейлист пока пуст.\nПеретащите сюда треки мышкой из поиска, лайков или очереди, "
+            "добавьте через правый клик по треку («Добавить в плейлист») или импортируйте из файла.",
+            self.playlist_page,
+        )
+        self.user_playlist_empty.setObjectName("recentEmpty")
+        self.user_playlist_empty.setWordWrap(True)
+        self.user_playlist_empty.setMinimumHeight(86)
+        self.user_playlist_empty.hide()
+        pl_layout.addWidget(self.user_playlist_empty)
+
+        self.user_playlist_list = DroppableTrackListWidget("playlist", self.playlist_page)
+        self.user_playlist_list.setObjectName("trackList")
+        self.user_playlist_list.setSpacing(2)
+        self.user_playlist_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.user_playlist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.user_playlist_list.viewport().installEventFilter(self)
+        self.user_playlist_list.customContextMenuRequested.connect(self.open_user_playlist_track_menu)
+        self.user_playlist_list.track_dropped_at.connect(self.on_user_playlist_track_dropped)
+        self.user_playlist_list.files_dropped.connect(self.on_user_playlist_files_dropped)
+        pl_layout.addWidget(self.user_playlist_list, 1)
+        self.view_stack.addWidget(self.playlist_page)
+
         self.create_cover_page()
         return panel
 
@@ -8549,18 +9127,20 @@ class MusicPlayer(QMainWindow):
         self.queue_count = QLabel("0 треков")
         self.queue_count.setObjectName("mutedText")
         layout.addWidget(self.queue_count)
-        self.queue_list = QListWidget()
+        self.queue_list = DroppableTrackListWidget("queue")
         self.queue_list.setObjectName("queueList")
         self.queue_list.setSpacing(2)
         self.queue_list.setUniformItemSizes(True)
         self.queue_list.viewport().installEventFilter(self)
         self.queue_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.queue_list.track_dropped_at.connect(self.on_queue_track_dropped)
+        self.queue_list.files_dropped.connect(self.on_queue_files_dropped)
         layout.addWidget(self.queue_list, 1)
         self.queue_hint = QLabel("Правый клик — порядок и удаление · × — закрыть")
         self.queue_hint.setObjectName("mutedText")
         self.queue_hint.hide()
-        self.queue_list.setToolTip("Правый клик по треку — изменить порядок, удалить или скачать")
+        self.queue_list.setToolTip("Перетаскивай треки мышкой или нажми ПКМ, чтобы изменить порядок")
         return self.queue_panel
 
     def create_cover_page(self):
@@ -8686,7 +9266,7 @@ class MusicPlayer(QMainWindow):
             self._cover_expand_anim.stop()
             self.expanded_cover.hide()
             page = self._cover_return_page
-            if page not in (self.browse_page, self.likes_page):
+            if page not in (self.browse_page, self.likes_page, getattr(self, "playlist_page", None)):
                 page = self.last_library_page
             self.fade_to_page(page)
 
@@ -9378,7 +9958,8 @@ class MusicPlayer(QMainWindow):
         self.likes_tabs.currentChanged.connect(self.on_likes_tab_changed)
         self.likes_search_input.textChanged.connect(self.on_likes_search_changed)
         for list_widget in (self.source_list, self.youtube_likes_list,
-                            self.soundcloud_likes_list, self.likes_list, self.queue_list):
+                            self.soundcloud_likes_list, self.likes_list,
+                            self.user_playlist_list, self.queue_list):
             list_widget.verticalScrollBar().valueChanged.connect(
                 lambda value, lw=list_widget: self.on_list_scroll(lw, value)
             )
@@ -10105,6 +10686,7 @@ class MusicPlayer(QMainWindow):
         if self.current_source in self.saved_queries:
             self.saved_queries[self.current_source] = self.search_input.text()
         self.current_source = source
+        self.active_user_playlist_id = ""
         # Профиль артиста не открывается автоматически при смене вкладки.
         self.artist_profile_query = ""
         self.active_artist_profile = ""
@@ -10115,6 +10697,7 @@ class MusicPlayer(QMainWindow):
         self.sort_button.hide()
         for button, (_, _, button_source) in zip(self.nav_buttons, self.nav_data):
             button.setChecked(button_source == source)
+        self._sync_sidebar_playing_state()
 
         if source == "likes":
             self.search_row.hide()
@@ -11009,6 +11592,1272 @@ class MusicPlayer(QMainWindow):
         self.settings.setValue("custom_playlists_json", json.dumps(self.custom_playlists, ensure_ascii=False))
         self.settings.sync()
 
+    # ---------------------------------------------------------
+    # Локальные пользовательские плейлисты и папки (Drag & Drop + Экспорт/Импорт)
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_playlist_track(track):
+        if not isinstance(track, dict):
+            return None
+        url = str(track.get("url") or "").strip()
+        if not url:
+            return None
+        source = str(track.get("source") or "").strip()
+        if source not in ("youtube", "soundcloud", "local"):
+            lower = url.lower()
+            if "soundcloud.com" in lower:
+                source = "soundcloud"
+            elif any(h in lower for h in ("youtube.com", "youtu.be")):
+                source = "youtube"
+            else:
+                source = "local"
+        cleaned = {
+            "source": source,
+            "url": url,
+            "title": str(track.get("title") or Path(url).stem or "Без названия").strip(),
+            "artist": str(track.get("artist") or track.get("artist_display") or "Исполнитель неизвестен").strip(),
+        }
+        for optional_key in ("artist_display", "profile_artist_name", "artist_url", "thumbnail", "video_id"):
+            if track.get(optional_key):
+                cleaned[optional_key] = str(track[optional_key])
+        if track.get("duration") not in (None, ""):
+            try:
+                cleaned["duration"] = int(float(track["duration"]))
+            except (TypeError, ValueError):
+                pass
+        return cleaned
+
+    @staticmethod
+    def _russian_track_count(count):
+        count = max(0, int(count or 0))
+        if 11 <= count % 100 <= 14:
+            word = "треков"
+        elif count % 10 == 1:
+            word = "трек"
+        elif 2 <= count % 10 <= 4:
+            word = "трека"
+        else:
+            word = "треков"
+        return f"{count} {word}"
+
+    def load_user_playlists(self):
+        self.user_playlist_folders = []
+        self.collapsed_playlist_folders = set()
+        playlists = []
+        try:
+            if hasattr(self, "user_playlists_file") and self.user_playlists_file.exists():
+                raw = json.loads(self.user_playlists_file.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    folders = raw.get("folders", [])
+                    if isinstance(folders, list):
+                        for fname in folders:
+                            cleaned_f = str(fname or "").strip()
+                            if cleaned_f and cleaned_f not in self.user_playlist_folders:
+                                self.user_playlist_folders.append(cleaned_f)
+                    collapsed = raw.get("collapsed_folders", [])
+                    if isinstance(collapsed, list):
+                        self.collapsed_playlist_folders = {str(f).strip() for f in collapsed if str(f).strip()}
+                    raw_list = raw.get("playlists", [])
+                elif isinstance(raw, list):
+                    raw_list = raw
+                else:
+                    raw_list = []
+                for item in raw_list:
+                    if not isinstance(item, dict) or not str(item.get("title") or "").strip():
+                        continue
+                    pid = str(item.get("id") or f"pl_{uuid4().hex[:10]}")
+                    folder = str(item.get("folder") or "").strip()
+                    if folder and folder not in self.user_playlist_folders:
+                        self.user_playlist_folders.append(folder)
+                    tracks = []
+                    for t in item.get("tracks", []) if isinstance(item.get("tracks"), list) else []:
+                        clean_t = self._sanitize_playlist_track(t)
+                        if clean_t is not None:
+                            tracks.append(clean_t)
+                    playlists.append({
+                        "id": pid,
+                        "title": str(item.get("title")).strip(),
+                        "folder": folder,
+                        "created_at": float(item.get("created_at") or time.time()),
+                        "updated_at": float(item.get("updated_at") or time.time()),
+                        "tracks": tracks,
+                    })
+        except (OSError, ValueError, TypeError) as error:
+            logging.getLogger("aurora").info(f"[Music Player] Не удалось загрузить user_playlists.json: {error}")
+        return playlists
+
+    def save_user_playlists(self):
+        if not hasattr(self, "user_playlists_file"):
+            return
+        try:
+            payload = {
+                "version": 1,
+                "folders": list(self.user_playlist_folders),
+                "collapsed_folders": sorted(self.collapsed_playlist_folders),
+                "playlists": self.user_playlists,
+            }
+            temp = self.user_playlists_file.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(self.user_playlists_file)
+        except OSError as error:
+            logging.getLogger("aurora").warning(f"[Music Player] Не удалось сохранить user_playlists.json: {error}")
+
+    def get_user_playlist_by_id(self, playlist_id):
+        pid = str(playlist_id or "").strip()
+        if not pid:
+            return None
+        for pl in getattr(self, "user_playlists", []):
+            if isinstance(pl, dict) and pl.get("id") == pid:
+                return pl
+        return None
+
+    def open_sidebar_add_menu(self):
+        menu = self.make_context_menu()
+        self._add_menu_action(
+            menu, "Создать локальный плейлист…",
+            lambda: self.create_user_playlist_dialog(),
+            icon_name="playlist-add", accent=True,
+        )
+        self._add_menu_action(
+            menu, "Создать папку плейлистов…",
+            lambda: self.create_playlist_folder_dialog(),
+            icon_name="folder",
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Импортировать плейлист из файла…",
+            lambda: self.import_user_playlist_from_file(),
+            icon_name="import",
+        )
+        if getattr(self, "user_playlists", []):
+            self._add_menu_action(
+                menu, "Экспортировать все плейлисты…",
+                lambda: self.export_all_user_playlists(),
+                icon_name="export",
+            )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Добавить плейлист по ссылке…",
+            lambda: self.add_custom_playlist_dialog(),
+            icon_name="external",
+        )
+        btn = getattr(self, "sidebar_add_playlist_button", None)
+        pos = btn.mapToGlobal(QPoint(0, btn.height() + 4)) if btn is not None else self.mapToGlobal(QPoint(40, 60))
+        menu.exec(pos)
+
+    def create_user_playlist_dialog(self, initial_folder="", initial_track=None):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Создать локальный плейлист")
+        dialog.setMinimumWidth(460)
+        style_dialog_for_theme(dialog, "createUserPlaylistDialog", self.theme)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        heading = QLabel("Новый плейлист")
+        heading.setObjectName("settingsTitle")
+        layout.addWidget(heading)
+
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("Например: Ночной драйв, Тренировка, Любимые ремиксы")
+        layout.addWidget(QLabel("Название плейлиста"))
+        layout.addWidget(name_input)
+
+        folder_combo = QComboBox()
+        folder_combo.addItem("Без папки (в корне медиатеки)", "")
+        for folder in self.user_playlist_folders:
+            folder_combo.addItem(f"Папка: {folder}", folder)
+        if initial_folder and initial_folder in self.user_playlist_folders:
+            folder_combo.setCurrentIndex(self.user_playlist_folders.index(initial_folder) + 1)
+
+        new_folder_input = QLineEdit()
+        new_folder_input.setPlaceholderText("Или введи имя новой папки (необязательно)")
+        layout.addWidget(QLabel("Папка"))
+        layout.addWidget(folder_combo)
+        layout.addWidget(new_folder_input)
+
+        hint = QLabel(
+            "В локальный плейлист можно добавлять треки из YouTube Music, SoundCloud и с компьютера, "
+            "перетаскивать их мышкой (Drag & Drop) и экспортировать в файл."
+        )
+        hint.setObjectName("mutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_btn = QPushButton("Отмена")
+        create_btn = QPushButton("Создать")
+        create_btn.setObjectName("accentButton")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(create_btn)
+        layout.addLayout(buttons)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        created_playlist = [None]
+
+        def do_create():
+            title = name_input.text().strip()
+            if not title:
+                QMessageBox.warning(dialog, "Название", "Введи название нового плейлиста.")
+                return
+            folder = new_folder_input.text().strip() or str(folder_combo.currentData() or "").strip()
+            if folder and folder not in self.user_playlist_folders:
+                self.user_playlist_folders.append(folder)
+            tracks = []
+            clean_initial = self._sanitize_playlist_track(initial_track) if initial_track else None
+            if clean_initial is not None:
+                tracks.append(clean_initial)
+            pl = {
+                "id": f"pl_{uuid4().hex[:10]}",
+                "title": title,
+                "folder": folder,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "tracks": tracks,
+            }
+            self.user_playlists.append(pl)
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            created_playlist[0] = pl
+            dialog.accept()
+
+        create_btn.clicked.connect(do_create)
+        name_input.returnPressed.connect(do_create)
+        name_input.setFocus()
+        if dialog.exec() == QDialog.DialogCode.Accepted and created_playlist[0] is not None:
+            pl = created_playlist[0]
+            if initial_track is not None:
+                self.show_toast(f"Создан плейлист «{pl['title']}» и добавлен трек")
+            else:
+                self.open_user_playlist(pl["id"])
+                self.show_toast(f"Создан плейлист «{pl['title']}»")
+            return pl
+        return None
+
+    def create_playlist_folder_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Создать папку плейлистов")
+        dialog.setMinimumWidth(420)
+        style_dialog_for_theme(dialog, "createPlaylistFolderDialog", self.theme)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        heading = QLabel("Новая папка")
+        heading.setObjectName("settingsTitle")
+        layout.addWidget(heading)
+        folder_input = QLineEdit()
+        folder_input.setPlaceholderText("Название папки (например: По жанрам, В машину, Работа)")
+        layout.addWidget(QLabel("Название папки"))
+        layout.addWidget(folder_input)
+        hint = QLabel("В папки можно перетаскивать плейлисты мышкой прямо в левой панели «Моя медиатека».")
+        hint.setObjectName("mutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_btn = QPushButton("Отмена")
+        create_btn = QPushButton("Создать папку")
+        create_btn.setObjectName("accentButton")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(create_btn)
+        layout.addLayout(buttons)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        def do_create_folder():
+            name = folder_input.text().strip()
+            if not name:
+                QMessageBox.warning(dialog, "Папка", "Введи название папки.")
+                return
+            if name not in self.user_playlist_folders:
+                self.user_playlist_folders.append(name)
+            self.collapsed_playlist_folders.discard(name)
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            self.show_toast(f"Создана папка «{name}»")
+            dialog.accept()
+
+        create_btn.clicked.connect(do_create_folder)
+        folder_input.returnPressed.connect(do_create_folder)
+        folder_input.setFocus()
+        dialog.exec()
+
+    def rename_playlist_folder_dialog(self, old_name):
+        old_name = str(old_name or "").strip()
+        if not old_name:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Переименовать папку")
+        dialog.setMinimumWidth(400)
+        style_dialog_for_theme(dialog, "renameFolderDialog", self.theme)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        heading = QLabel("Переименовать папку")
+        heading.setObjectName("settingsTitle")
+        layout.addWidget(heading)
+        inp = QLineEdit(old_name)
+        layout.addWidget(inp)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_btn = QPushButton("Отмена")
+        save_btn = QPushButton("Сохранить")
+        save_btn.setObjectName("accentButton")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        layout.addLayout(buttons)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        def do_rename():
+            new_name = inp.text().strip()
+            if not new_name:
+                return
+            if new_name != old_name:
+                self.user_playlist_folders = [new_name if f == old_name else f for f in self.user_playlist_folders]
+                # Убираем дубликаты с сохранением порядка
+                seen_f = []
+                for f in self.user_playlist_folders:
+                    if f not in seen_f:
+                        seen_f.append(f)
+                self.user_playlist_folders = seen_f
+                if old_name in self.collapsed_playlist_folders:
+                    self.collapsed_playlist_folders.discard(old_name)
+                    self.collapsed_playlist_folders.add(new_name)
+                for pl in self.user_playlists:
+                    if pl.get("folder") == old_name:
+                        pl["folder"] = new_name
+                self.save_user_playlists()
+                self._sidebar_library_signature = None
+                self.refresh_sidebar_library()
+                if self.active_user_playlist_id:
+                    self.refresh_active_user_playlist_view()
+            dialog.accept()
+
+        save_btn.clicked.connect(do_rename)
+        inp.returnPressed.connect(do_rename)
+        inp.selectAll()
+        inp.setFocus()
+        dialog.exec()
+
+    def delete_playlist_folder(self, folder_name):
+        folder_name = str(folder_name or "").strip()
+        if not folder_name:
+            return
+        in_folder = [pl for pl in self.user_playlists if pl.get("folder") == folder_name]
+        msg = (
+            f"Удалить папку «{folder_name}»?\n"
+            f"Плейлисты внутри неё ({len(in_folder)} шт.) не удалятся и переместятся в корень медиатеки."
+        )
+        ans = QMessageBox.question(
+            self, "Удалить папку", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.user_playlist_folders = [f for f in self.user_playlist_folders if f != folder_name]
+        self.collapsed_playlist_folders.discard(folder_name)
+        for pl in self.user_playlists:
+            if pl.get("folder") == folder_name:
+                pl["folder"] = ""
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        if self.active_user_playlist_id:
+            self.refresh_active_user_playlist_view()
+        self.show_toast(f"Папка «{folder_name}» удалена")
+
+    def toggle_playlist_folder_collapsed(self, folder_name):
+        folder_name = str(folder_name or "").strip()
+        if not folder_name:
+            return
+        if folder_name in self.collapsed_playlist_folders:
+            self.collapsed_playlist_folders.discard(folder_name)
+        else:
+            self.collapsed_playlist_folders.add(folder_name)
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+
+    def open_sidebar_folder_menu(self, folder_name, widget, pos):
+        menu = self.make_context_menu()
+        collapsed = folder_name in self.collapsed_playlist_folders
+        self._add_menu_action(
+            menu, "Развернуть папку" if collapsed else "Свернуть папку",
+            lambda f=folder_name: self.toggle_playlist_folder_collapsed(f),
+            icon_name="folder", accent=True,
+        )
+        self._add_menu_action(
+            menu, "Новый плейлист в этой папке…",
+            lambda f=folder_name: self.create_user_playlist_dialog(initial_folder=f),
+            icon_name="playlist-add",
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Переименовать папку…",
+            lambda f=folder_name: self.rename_playlist_folder_dialog(f),
+            icon_name="edit",
+        )
+        self._add_menu_action(
+            menu, "Удалить папку",
+            lambda f=folder_name: self.delete_playlist_folder(f),
+            icon_name="remove",
+        )
+        menu.exec(widget.mapToGlobal(pos))
+
+    def open_sidebar_playlist_menu(self, playlist_id, widget, pos):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        menu = self.make_context_menu()
+        tracks = pl.get("tracks", [])
+        self._add_menu_action(
+            menu, "Открыть плейлист",
+            lambda pid=playlist_id: self.open_user_playlist(pid),
+            icon_name="folder", accent=True,
+        )
+        self._add_menu_action(
+            menu, "Слушать плейлист",
+            lambda pid=playlist_id: self.play_user_playlist(pid, 0, shuffle=False),
+            icon_name="play", enabled=bool(tracks),
+        )
+        self._add_menu_action(
+            menu, "Перемешать плейлист",
+            lambda pid=playlist_id: self.play_user_playlist(pid, 0, shuffle=True),
+            icon_name="shuffle", enabled=bool(tracks),
+        )
+        menu.addSeparator()
+        folder_menu = menu.addMenu(menu_action_icon("folder", self.theme), "Переместить в папку")
+        folder_menu.setObjectName("darkMenu")
+        folder_menu.setStyleSheet(menu.styleSheet())
+        current_folder = str(pl.get("folder") or "")
+        root_act = folder_menu.addAction(
+            ("✓ " if not current_folder else "") + "Без папки (в корень)",
+            lambda pid=playlist_id: self.on_sidebar_playlist_dropped_into_folder(pid, ""),
+        )
+        root_act.setEnabled(bool(current_folder))
+        if self.user_playlist_folders:
+            folder_menu.addSeparator()
+            for fname in self.user_playlist_folders:
+                is_cur = fname == current_folder
+                folder_menu.addAction(
+                    ("✓ " if is_cur else "") + fname,
+                    lambda pid=playlist_id, f=fname: self.on_sidebar_playlist_dropped_into_folder(pid, f),
+                )
+        folder_menu.addSeparator()
+        folder_menu.addAction(
+            "＋ Новая папка…",
+            lambda pid=playlist_id: self.edit_user_playlist_dialog(pid),
+        )
+        self._add_menu_action(
+            menu, "Переименовать / Папка…",
+            lambda pid=playlist_id: self.edit_user_playlist_dialog(pid),
+            icon_name="edit",
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Экспортировать в файл…",
+            lambda pid=playlist_id: self.export_user_playlist(pid),
+            icon_name="export",
+        )
+        self._add_menu_action(
+            menu, "Импортировать треки из файла…",
+            lambda pid=playlist_id: self.import_user_playlist_from_file(target_playlist_id=pid),
+            icon_name="import",
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Удалить плейлист",
+            lambda pid=playlist_id: self.delete_user_playlist(pid),
+            icon_name="remove",
+        )
+        menu.exec(widget.mapToGlobal(pos))
+
+    def on_sidebar_playlist_dropped_into_folder(self, playlist_id, folder_name):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        folder_name = str(folder_name or "").strip()
+        if folder_name and folder_name not in self.user_playlist_folders:
+            self.user_playlist_folders.append(folder_name)
+        pl["folder"] = folder_name
+        pl["updated_at"] = time.time()
+        if folder_name:
+            self.collapsed_playlist_folders.discard(folder_name)
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        if self.active_user_playlist_id == playlist_id:
+            self.refresh_active_user_playlist_view()
+        if folder_name:
+            self.show_toast(f"Плейлист «{pl['title']}» перемещён в папку «{folder_name}»")
+        else:
+            self.show_toast(f"Плейлист «{pl['title']}» перемещён в корень медиатеки")
+
+    def on_sidebar_track_dropped(self, target_id, track):
+        target_id = str(target_id or "")
+        if target_id.startswith("folder:"):
+            folder_name = target_id.split(":", 1)[1]
+            in_folder = [pl for pl in self.user_playlists if pl.get("folder") == folder_name]
+            if in_folder:
+                self.add_track_to_user_playlist(in_folder[0]["id"], track)
+            else:
+                self.create_user_playlist_dialog(initial_folder=folder_name, initial_track=track)
+            return
+        self.add_track_to_user_playlist(target_id, track)
+
+    def add_track_to_user_playlist(self, playlist_id, track, insert_index=None, show_feedback=True):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        clean = self._sanitize_playlist_track(track)
+        if pl is None or clean is None:
+            return False
+        tracks = pl.setdefault("tracks", [])
+        if insert_index is not None and 0 <= int(insert_index) <= len(tracks):
+            tracks.insert(int(insert_index), clean)
+        else:
+            tracks.append(clean)
+        pl["updated_at"] = time.time()
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        if self.active_user_playlist_id == playlist_id:
+            self.refresh_active_user_playlist_view()
+        if show_feedback:
+            self.show_toast(f"Добавлено в «{pl['title']}»: {clean.get('title') or 'трек'}")
+        return True
+
+    def open_user_playlist(self, playlist_id):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        if self.current_source in self.saved_queries:
+            self.saved_queries[self.current_source] = self.search_input.text()
+        self.active_user_playlist_id = pl["id"]
+        self._playlist_search_query = ""
+        if hasattr(self, "playlist_search_input"):
+            self.playlist_search_input.blockSignals(True)
+            self.playlist_search_input.clear()
+            self.playlist_search_input.blockSignals(False)
+        for button in getattr(self, "nav_buttons", []):
+            button.setChecked(False)
+        self.refresh_active_user_playlist_view()
+        self._sync_sidebar_playing_state()
+        self.last_library_page = self.playlist_page
+        self.fade_to_page(self.playlist_page)
+
+    def on_playlist_search_changed(self, text):
+        self._playlist_search_query = str(text or "").strip().casefold()
+        self.refresh_active_user_playlist_view()
+
+    def refresh_active_user_playlist_view(self):
+        if not hasattr(self, "playlist_page"):
+            return
+        pl = self.get_user_playlist_by_id(self.active_user_playlist_id)
+        if pl is None:
+            return
+        folder = str(pl.get("folder") or "").strip()
+        self.playlist_folder_badge.setText(
+            f"ПАПКА: {folder.upper()}  •  ЛОКАЛЬНЫЙ ПЛЕЙЛИСТ" if folder else "ЛОКАЛЬНЫЙ ПЛЕЙЛИСТ"
+        )
+        self.playlist_title_button.setText(str(pl.get("title") or "Мой плейлист"))
+        all_tracks = [t for t in pl.get("tracks", []) if isinstance(t, dict) and t.get("url")]
+        total_sec = sum(max(0, int(t.get("duration") or 0)) for t in all_tracks)
+        dur_part = f" • {max(1, total_sec // 60)} мин" if total_sec >= 60 else ""
+        self.playlist_meta_label.setText(
+            f"{self._russian_track_count(len(all_tracks))}{dur_part} • Перетаскивай треки мышкой (Drag & Drop) для сортировки"
+        )
+        self.playlist_play_button.setEnabled(bool(all_tracks))
+        self.playlist_shuffle_button.setEnabled(bool(all_tracks))
+
+        cover_url = next((normalize_artwork_url(t.get("thumbnail", "")) for t in all_tracks if t.get("thumbnail")), "")
+        self.playlist_header.setStyleSheet("")
+        if cover_url:
+            self.request_image(cover_url, self.playlist_cover_label)
+        else:
+            self.playlist_cover_label.setProperty("requested_image", "")
+            self.playlist_cover_label.setPixmap(make_service_artwork("user_playlist", 248))
+
+        query = str(getattr(self, "_playlist_search_query", "") or "").strip().casefold()
+        filtered = []
+        for real_index, track in enumerate(all_tracks):
+            if query:
+                haystack = f"{track.get('title', '')} {track.get('artist', '')} {track.get('artist_display', '')}".casefold()
+                if query not in haystack:
+                    continue
+            filtered.append((real_index, track))
+
+        self.user_playlist_empty.setVisible(not all_tracks)
+        self.user_playlist_list.setUpdatesEnabled(False)
+        self.user_playlist_list.clear()
+        for display_pos, (real_index, track) in enumerate(filtered, start=1):
+            item = QListWidgetItem()
+            item_track = dict(track)
+            item_track["_playlist_index"] = real_index
+            item.setData(Qt.ItemDataRole.UserRole, item_track)
+            item.setSizeHint(QSize(200, 72))
+            self.user_playlist_list.addItem(item)
+            row = self._create_user_playlist_row(item, item_track, real_index, display_pos)
+            row.drag_source_kind = f"user_playlist:{pl['id']}"
+            row.drag_source_index = real_index
+        self.user_playlist_list.setUpdatesEnabled(True)
+        self.schedule_visible_artwork(self.user_playlist_list)
+
+    def _create_user_playlist_row(self, item, track, real_index, display_pos):
+        pid = self.active_user_playlist_id
+        youtube_rating_row = str(track.get("source") or "") == "youtube"
+        row = TrackRow(
+            track,
+            is_favorite=(self.is_youtube_music_liked(track) if youtube_rating_row else self.is_favorite(track)),
+            index=display_pos,
+            parent=self.user_playlist_list.viewport(),
+            show_source=True,
+        )
+        self.user_playlist_list.setItemWidget(item, row)
+        row.play_button.clicked.connect(
+            lambda checked=False, p=pid, idx=real_index: self.play_user_playlist(p, idx, shuffle=False)
+        )
+        row.play_requested.connect(
+            lambda _t, p=pid, idx=real_index: self.play_user_playlist(p, idx, shuffle=False)
+        )
+        row.artist_requested.connect(
+            lambda artist_data, src=track.get("source"): self.search_artist_name(artist_data, src)
+        )
+        if youtube_rating_row:
+            row.favorite_button.clicked.connect(
+                lambda checked=False, t=dict(track), b=row.favorite_button:
+                    self.set_youtube_music_like(t, bool(checked), b)
+            )
+        else:
+            row.favorite_button.clicked.connect(
+                lambda checked=False, t=dict(track), b=row.favorite_button: self.toggle_favorite(t, b)
+            )
+        self.set_pixmap_safe(row.thumbnail_label, self.fallback_cover)
+        current = self.current_track or {}
+        matches = bool(
+            current.get("url")
+            and current.get("url") == track.get("url")
+            and current.get("source") == track.get("source")
+        )
+        row.set_playing(matches, matches and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        requested = self.requested_track or {}
+        if requested.get("url") == track.get("url") and requested.get("source") == track.get("source"):
+            row.set_loading(True)
+        return row
+
+    def play_user_playlist(self, playlist_id, start_index=0, shuffle=False):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        tracks = [dict(t) for t in pl.get("tracks", []) if isinstance(t, dict) and t.get("url")]
+        if not tracks:
+            self.show_toast("В этом плейлисте пока нет треков")
+            return
+        if shuffle:
+            random.shuffle(tracks)
+            ordered = tracks
+        else:
+            start_index = max(0, min(int(start_index or 0), len(tracks) - 1))
+            ordered = tracks[start_index:] + tracks[:start_index]
+        self._stop_supermix_session()
+        self.cancel_pending_request()
+        self.queue_tracks = []
+        self._queue_live_rows.clear()
+        self.queue_list.clear()
+        self.current_queue_index = -1
+        self.shuffle_future = None
+        self.radio_mode_active = False
+        self.queue_mode = f"user_playlist:{pl['id']}"
+        for item in ordered:
+            queued = dict(item)
+            queued["queue_id"] = uuid4().hex
+            self.queue_tracks.append(queued)
+        self.refresh_queue_list()
+        self.update_queue_count()
+        self.toggle_queue_if_hidden()
+        self._sync_sidebar_playing_state()
+        self.play_queue_index(0)
+
+    def play_active_user_playlist(self, shuffle=False):
+        if self.active_user_playlist_id:
+            self.play_user_playlist(self.active_user_playlist_id, 0, shuffle=shuffle)
+
+    def remove_track_from_user_playlist(self, playlist_id, track_index):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        tracks = pl.get("tracks", [])
+        if not (0 <= int(track_index) < len(tracks)):
+            return
+        removed = tracks.pop(int(track_index))
+        pl["updated_at"] = time.time()
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        if self.active_user_playlist_id == playlist_id:
+            self.refresh_active_user_playlist_view()
+        self.show_toast(f"Удалено из «{pl['title']}»: {removed.get('title') or 'трек'}")
+
+    def move_track_in_user_playlist(self, playlist_id, from_index, to_index):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        tracks = pl.get("tracks", [])
+        n = len(tracks)
+        if not (0 <= from_index < n):
+            return
+        to_index = max(0, min(int(to_index), n))
+        if from_index == to_index or from_index + 1 == to_index:
+            return
+        item = tracks.pop(from_index)
+        if to_index > from_index:
+            to_index -= 1
+        tracks.insert(to_index, item)
+        pl["updated_at"] = time.time()
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        if self.active_user_playlist_id == playlist_id:
+            self.refresh_active_user_playlist_view()
+
+    def on_user_playlist_track_dropped(self, target_row, track, source_kind, source_index):
+        pid = self.active_user_playlist_id
+        if not pid:
+            return
+        if source_kind == f"user_playlist:{pid}" and source_index >= 0 and not self._playlist_search_query:
+            self.move_track_in_user_playlist(pid, source_index, target_row)
+        else:
+            self.add_track_to_user_playlist(pid, track, insert_index=target_row)
+
+    def on_user_playlist_files_dropped(self, paths):
+        pid = self.active_user_playlist_id
+        if not pid or not paths:
+            return
+        self._import_dropped_files(paths, target_playlist_id=pid)
+
+    def on_queue_track_dropped(self, target_row, track, source_kind, source_index):
+        if source_kind == "queue" and 0 <= source_index < len(self.queue_tracks):
+            n = len(self.queue_tracks)
+            target_row = max(0, min(int(target_row), n))
+            if source_index == target_row or source_index + 1 == target_row:
+                return
+            moved = self.queue_tracks.pop(source_index)
+            if target_row > source_index:
+                target_row -= 1
+            self.queue_tracks.insert(target_row, moved)
+            self.shuffle_future = None
+            self.refresh_queue_list()
+            if self.current_track is not None:
+                QTimer.singleShot(0, self.prepare_next_track)
+            return
+        clean = self._sanitize_playlist_track(track)
+        if clean is None:
+            return
+        self._stop_supermix_session()
+        self.queue_mode = "manual"
+        queued = dict(clean)
+        queued["queue_id"] = uuid4().hex
+        target_row = max(0, min(int(target_row), len(self.queue_tracks)))
+        self.queue_tracks.insert(target_row, queued)
+        self.refresh_queue_list()
+        self.show_toast(f"Добавлено в очередь: {queued.get('title') or 'трек'}")
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.prepare_next_track()
+
+    def on_queue_files_dropped(self, paths):
+        if not paths:
+            return
+        tracks = []
+        for p in paths:
+            tracks.extend(self._extract_tracks_from_file_path(Path(p)))
+        if not tracks:
+            return
+        for t in tracks:
+            self.add_to_queue(t, False)
+        self.show_toast(f"Добавлено в очередь: {self._russian_track_count(len(tracks))}")
+
+    def add_current_queue_to_active_playlist(self):
+        pl = self.get_user_playlist_by_id(self.active_user_playlist_id)
+        if pl is None:
+            return
+        candidates = list(self.queue_tracks)
+        if not candidates and isinstance(self.current_track, dict):
+            candidates = [self.current_track]
+        if not candidates:
+            self.show_toast("Очередь сейчас пуста")
+            return
+        existing_urls = {str(t.get("url") or "") for t in pl.get("tracks", [])}
+        added = 0
+        for item in candidates:
+            clean = self._sanitize_playlist_track(item)
+            if clean and clean["url"] not in existing_urls:
+                pl.setdefault("tracks", []).append(clean)
+                existing_urls.add(clean["url"])
+                added += 1
+        if added:
+            pl["updated_at"] = time.time()
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            self.refresh_active_user_playlist_view()
+            self.show_toast(f"В «{pl['title']}» добавлено {self._russian_track_count(added)} из очереди")
+        else:
+            self.show_toast("Все треки из очереди уже есть в этом плейлисте")
+
+    def edit_active_user_playlist(self):
+        if self.active_user_playlist_id:
+            self.edit_user_playlist_dialog(self.active_user_playlist_id)
+
+    def edit_user_playlist_dialog(self, playlist_id):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Настройки плейлиста")
+        dialog.setMinimumWidth(450)
+        style_dialog_for_theme(dialog, "editUserPlaylistDialog", self.theme)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        heading = QLabel("Изменить плейлист")
+        heading.setObjectName("settingsTitle")
+        layout.addWidget(heading)
+
+        name_input = QLineEdit(str(pl.get("title") or ""))
+        layout.addWidget(QLabel("Название"))
+        layout.addWidget(name_input)
+
+        folder_combo = QComboBox()
+        folder_combo.addItem("Без папки (в корне медиатеки)", "")
+        current_folder = str(pl.get("folder") or "").strip()
+        for folder in self.user_playlist_folders:
+            folder_combo.addItem(f"Папка: {folder}", folder)
+        if current_folder and current_folder in self.user_playlist_folders:
+            folder_combo.setCurrentIndex(self.user_playlist_folders.index(current_folder) + 1)
+
+        new_folder_input = QLineEdit()
+        new_folder_input.setPlaceholderText("Или создай новую папку и перемести туда")
+        layout.addWidget(QLabel("Папка"))
+        layout.addWidget(folder_combo)
+        layout.addWidget(new_folder_input)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_btn = QPushButton("Отмена")
+        save_btn = QPushButton("Сохранить")
+        save_btn.setObjectName("accentButton")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        layout.addLayout(buttons)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        def do_save():
+            title = name_input.text().strip()
+            if not title:
+                QMessageBox.warning(dialog, "Название", "Название плейлиста не может быть пустым.")
+                return
+            folder = new_folder_input.text().strip() or str(folder_combo.currentData() or "").strip()
+            if folder and folder not in self.user_playlist_folders:
+                self.user_playlist_folders.append(folder)
+            pl["title"] = title
+            pl["folder"] = folder
+            pl["updated_at"] = time.time()
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            if self.active_user_playlist_id == playlist_id:
+                self.refresh_active_user_playlist_view()
+            self.show_toast(f"Плейлист «{title}» обновлён")
+            dialog.accept()
+
+        save_btn.clicked.connect(do_save)
+        name_input.returnPressed.connect(do_save)
+        name_input.selectAll()
+        name_input.setFocus()
+        dialog.exec()
+
+    def delete_user_playlist(self, playlist_id):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        title = str(pl.get("title") or "Плейлист")
+        ans = QMessageBox.question(
+            self, "Удалить плейлист",
+            f"Удалить локальный плейлист «{title}» ({self._russian_track_count(len(pl.get('tracks', [])))})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.user_playlists = [item for item in self.user_playlists if item.get("id") != playlist_id]
+        self.save_user_playlists()
+        was_active = self.active_user_playlist_id == playlist_id
+        if was_active:
+            self.active_user_playlist_id = ""
+            self.set_source(self.current_source if self.current_source in ("youtube", "soundcloud", "likes") else "youtube")
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        self.show_toast(f"Плейлист «{title}» удалён")
+
+    def export_user_playlist(self, playlist_id):
+        pl = self.get_user_playlist_by_id(playlist_id)
+        if pl is None:
+            return
+        safe_name = DownloadWorker._sanitize_filename(pl.get("title") or "playlist")
+        default_path = str(self.get_download_directory() / f"{safe_name}.json")
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            f"Экспортировать плейлист «{pl.get('title')}»",
+            default_path,
+            "Плейлист Aurora JSON (*.json);;Плейлист M3U8 (*.m3u8 *.m3u)",
+        )
+        if not filename:
+            return
+        target = Path(filename)
+        if "m3u" in (selected_filter or "").lower() or target.suffix.lower() in (".m3u", ".m3u8"):
+            if target.suffix.lower() not in (".m3u", ".m3u8"):
+                target = target.with_suffix(".m3u8")
+            lines = ["#EXTM3U", f"#PLAYLIST:{pl.get('title') or 'Плейлист'}"]
+            if pl.get("folder"):
+                lines.append(f"#EXTGRP:{pl.get('folder')}")
+            for t in pl.get("tracks", []):
+                dur = int(t.get("duration") or -1)
+                artist = str(t.get("artist") or "Unknown").replace("\n", " ")
+                title = str(t.get("title") or "Track").replace("\n", " ")
+                lines.append(f"#EXTINF:{dur},{artist} - {title}")
+                if t.get("thumbnail"):
+                    lines.append(f"#EXTIMG:{t['thumbnail']}")
+                lines.append(str(t.get("url") or ""))
+            try:
+                target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                self.show_toast(f"Плейлист экспортирован в {target.name}")
+            except OSError as error:
+                QMessageBox.warning(self, "Ошибка экспорта", f"Не удалось записать файл:\n{error}")
+            return
+
+        if target.suffix.lower() != ".json":
+            target = target.with_suffix(".json")
+        payload = {
+            "format": "aurora_playlist_v1",
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "title": pl.get("title") or "Мой плейлист",
+            "folder": pl.get("folder") or "",
+            "tracks": pl.get("tracks", []),
+        }
+        try:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.show_toast(f"Плейлист экспортирован в {target.name}")
+        except OSError as error:
+            QMessageBox.warning(self, "Ошибка экспорта", f"Не удалось записать файл:\n{error}")
+
+    def export_all_user_playlists(self):
+        if not getattr(self, "user_playlists", []):
+            self.show_toast("Нет локальных плейлистов для экспорта")
+            return
+        default_path = str(self.get_download_directory() / "aurora_playlists_backup.json")
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспортировать все плейлисты и папки",
+            default_path,
+            "Архив плейлистов Aurora JSON (*.json)",
+        )
+        if not filename:
+            return
+        target = Path(filename)
+        if target.suffix.lower() != ".json":
+            target = target.with_suffix(".json")
+        payload = {
+            "format": "aurora_playlists_bundle_v1",
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "folders": list(self.user_playlist_folders),
+            "playlists": self.user_playlists,
+        }
+        try:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.show_toast(f"Экспортировано плейлистов: {len(self.user_playlists)}")
+        except OSError as error:
+            QMessageBox.warning(self, "Ошибка экспорта", f"Не удалось сохранить файл:\n{error}")
+
+    def _extract_tracks_from_file_path(self, path: Path):
+        suffix = path.suffix.lower()
+        if suffix in (".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus"):
+            stem = path.stem
+            if " - " in stem:
+                artist, title = stem.split(" - ", 1)
+            else:
+                artist, title = "Локальный файл", stem
+            return [{
+                "source": "local",
+                "url": QUrl.fromLocalFile(str(path.resolve())).toString(),
+                "title": title.strip() or stem,
+                "artist": artist.strip() or "Локальный файл",
+            }]
+        if suffix in (".m3u", ".m3u8"):
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return []
+            tracks = []
+            pending_title = ""
+            pending_artist = ""
+            pending_dur = None
+            pending_img = ""
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith("#EXTINF:"):
+                    meta = line[len("#EXTINF:"):]
+                    if "," in meta:
+                        dur_str, label = meta.split(",", 1)
+                        try:
+                            d_val = int(float(dur_str.strip().split()[0]))
+                            pending_dur = d_val if d_val > 0 else None
+                        except (ValueError, IndexError):
+                            pending_dur = None
+                    else:
+                        label = meta
+                    if " - " in label:
+                        pending_artist, pending_title = label.split(" - ", 1)
+                    else:
+                        pending_artist, pending_title = "", label
+                elif line.startswith("#EXTIMG:"):
+                    pending_img = line[len("#EXTIMG:"):].strip()
+                elif not line.startswith("#"):
+                    url = line
+                    if not url.startswith(("http://", "https://", "file://")):
+                        candidate = (path.parent / url).resolve()
+                        if candidate.exists():
+                            url = QUrl.fromLocalFile(str(candidate)).toString()
+                    raw_track = {
+                        "url": url,
+                        "title": pending_title.strip() or Path(url).stem or "Трек",
+                        "artist": pending_artist.strip() or "Исполнитель неизвестен",
+                    }
+                    if pending_dur:
+                        raw_track["duration"] = pending_dur
+                    if pending_img:
+                        raw_track["thumbnail"] = pending_img
+                    clean = self._sanitize_playlist_track(raw_track)
+                    if clean is not None:
+                        tracks.append(clean)
+                    pending_title = ""
+                    pending_artist = ""
+                    pending_dur = None
+                    pending_img = ""
+            return tracks
+        if suffix == ".json":
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return []
+            raw_tracks = []
+            if isinstance(data, list):
+                raw_tracks = data
+            elif isinstance(data, dict):
+                if isinstance(data.get("tracks"), list):
+                    raw_tracks = data["tracks"]
+                elif isinstance(data.get("playlists"), list):
+                    for pl in data["playlists"]:
+                        if isinstance(pl, dict) and isinstance(pl.get("tracks"), list):
+                            raw_tracks.extend(pl["tracks"])
+            return [t for t in (self._sanitize_playlist_track(item) for item in raw_tracks) if t is not None]
+        return []
+
+    def _import_dropped_files(self, paths, target_playlist_id=None):
+        imported_tracks = []
+        for raw_p in paths:
+            p = Path(raw_p)
+            if p.is_file():
+                imported_tracks.extend(self._extract_tracks_from_file_path(p))
+        if not imported_tracks:
+            return
+        pl = self.get_user_playlist_by_id(target_playlist_id)
+        if pl is not None:
+            pl.setdefault("tracks", []).extend(imported_tracks)
+            pl["updated_at"] = time.time()
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            if self.active_user_playlist_id == pl["id"]:
+                self.refresh_active_user_playlist_view()
+            self.show_toast(f"Импортировано в «{pl['title']}»: {self._russian_track_count(len(imported_tracks))}")
+
+    def import_user_playlist_from_file(self, filepath=None, target_playlist_id=None):
+        if not filepath:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self,
+                "Импортировать плейлист из файла",
+                str(self.get_download_directory()),
+                "Файлы плейлистов (*.json *.m3u8 *.m3u);;JSON плейлисты (*.json);;M3U / M3U8 плейлисты (*.m3u8 *.m3u)",
+            )
+        if not filepath:
+            return
+        path = Path(filepath)
+        if not path.is_file():
+            return
+
+        if path.suffix.lower() == ".json":
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                QMessageBox.warning(self, "Ошибка импорта", f"Не удалось прочитать JSON-файл:\n{error}")
+                return
+            if isinstance(data, dict) and isinstance(data.get("playlists"), list) and not target_playlist_id:
+                added_count = 0
+                for fname in data.get("folders", []) if isinstance(data.get("folders"), list) else []:
+                    cf = str(fname or "").strip()
+                    if cf and cf not in self.user_playlist_folders:
+                        self.user_playlist_folders.append(cf)
+                last_id = ""
+                for raw_pl in data["playlists"]:
+                    if not isinstance(raw_pl, dict) or not str(raw_pl.get("title") or "").strip():
+                        continue
+                    tracks = [
+                        t for t in (self._sanitize_playlist_track(item) for item in (raw_pl.get("tracks") or []))
+                        if t is not None
+                    ]
+                    folder = str(raw_pl.get("folder") or "").strip()
+                    if folder and folder not in self.user_playlist_folders:
+                        self.user_playlist_folders.append(folder)
+                    new_pl = {
+                        "id": f"pl_{uuid4().hex[:10]}",
+                        "title": str(raw_pl.get("title")).strip(),
+                        "folder": folder,
+                        "created_at": time.time(),
+                        "updated_at": time.time(),
+                        "tracks": tracks,
+                    }
+                    self.user_playlists.append(new_pl)
+                    last_id = new_pl["id"]
+                    added_count += 1
+                if added_count:
+                    self.save_user_playlists()
+                    self._sidebar_library_signature = None
+                    self.refresh_sidebar_library()
+                    if last_id:
+                        self.open_user_playlist(last_id)
+                    self.show_toast(f"Импортировано плейлистов: {added_count}")
+                    return
+
+            tracks = self._extract_tracks_from_file_path(path)
+            if not tracks and not (isinstance(data, dict) and data.get("title")):
+                QMessageBox.warning(self, "Импорт плейлиста", "В выбранном файле не найдено поддерживаемых треков.")
+                return
+            if target_playlist_id:
+                target_pl = self.get_user_playlist_by_id(target_playlist_id)
+                if target_pl is not None:
+                    target_pl.setdefault("tracks", []).extend(tracks)
+                    target_pl["updated_at"] = time.time()
+                    self.save_user_playlists()
+                    self._sidebar_library_signature = None
+                    self.refresh_sidebar_library()
+                    if self.active_user_playlist_id == target_pl["id"]:
+                        self.refresh_active_user_playlist_view()
+                    self.show_toast(f"В «{target_pl['title']}» импортировано {self._russian_track_count(len(tracks))}")
+                    return
+            title = (str(data.get("title") or "").strip() if isinstance(data, dict) else "") or path.stem
+            folder = (str(data.get("folder") or "").strip() if isinstance(data, dict) else "")
+            if folder and folder not in self.user_playlist_folders:
+                self.user_playlist_folders.append(folder)
+            new_pl = {
+                "id": f"pl_{uuid4().hex[:10]}",
+                "title": title,
+                "folder": folder,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "tracks": tracks,
+            }
+            self.user_playlists.append(new_pl)
+            self.save_user_playlists()
+            self._sidebar_library_signature = None
+            self.refresh_sidebar_library()
+            self.open_user_playlist(new_pl["id"])
+            self.show_toast(f"Импортирован плейлист «{title}» ({self._russian_track_count(len(tracks))})")
+            return
+
+        # Импорт .m3u / .m3u8
+        tracks = self._extract_tracks_from_file_path(path)
+        if not tracks:
+            QMessageBox.warning(self, "Импорт плейлиста", "Не удалось найти треки в файле M3U/M3U8.")
+            return
+        if target_playlist_id:
+            target_pl = self.get_user_playlist_by_id(target_playlist_id)
+            if target_pl is not None:
+                target_pl.setdefault("tracks", []).extend(tracks)
+                target_pl["updated_at"] = time.time()
+                self.save_user_playlists()
+                self._sidebar_library_signature = None
+                self.refresh_sidebar_library()
+                if self.active_user_playlist_id == target_pl["id"]:
+                    self.refresh_active_user_playlist_view()
+                self.show_toast(f"В «{target_pl['title']}» импортировано {self._russian_track_count(len(tracks))}")
+                return
+        playlist_title = path.stem
+        try:
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.strip().startswith("#PLAYLIST:"):
+                    custom_title = line.strip()[len("#PLAYLIST:"):].strip()
+                    if custom_title:
+                        playlist_title = custom_title
+                    break
+        except OSError:
+            pass
+        new_pl = {
+            "id": f"pl_{uuid4().hex[:10]}",
+            "title": playlist_title,
+            "folder": "",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "tracks": tracks,
+        }
+        self.user_playlists.append(new_pl)
+        self.save_user_playlists()
+        self._sidebar_library_signature = None
+        self.refresh_sidebar_library()
+        self.open_user_playlist(new_pl["id"])
+        self.show_toast(f"Импортирован плейлист «{playlist_title}» ({self._russian_track_count(len(tracks))})")
+
+    def open_user_playlist_track_menu(self, point):
+        item = self.user_playlist_list.itemAt(point)
+        if item is None:
+            return
+        track = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(track, dict):
+            return
+        real_index = int(track.get("_playlist_index", self.user_playlist_list.row(item)))
+        pid = self.active_user_playlist_id
+        pl = self.get_user_playlist_by_id(pid)
+        total = len(pl.get("tracks", [])) if pl else 0
+        menu = self.make_context_menu()
+        self._add_menu_action(
+            menu, "Воспроизвести с этого трека",
+            lambda p=pid, idx=real_index: self.play_user_playlist(p, idx, shuffle=False),
+            icon_name="play", accent=True,
+        )
+        self._populate_track_context_menu(menu, track, include_play=False, include_queue_add=True)
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Переместить выше",
+            lambda p=pid, idx=real_index: self.move_track_in_user_playlist(p, idx, idx - 1),
+            icon_name="arrow-up", enabled=(real_index > 0 and not self._playlist_search_query),
+        )
+        self._add_menu_action(
+            menu, "Переместить ниже",
+            lambda p=pid, idx=real_index: self.move_track_in_user_playlist(p, idx, idx + 2),
+            icon_name="arrow-down", enabled=(real_index < total - 1 and not self._playlist_search_query),
+        )
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Удалить из плейлиста",
+            lambda p=pid, idx=real_index: self.remove_track_from_user_playlist(p, idx),
+            icon_name="remove",
+        )
+        menu.exec(self.user_playlist_list.viewport().mapToGlobal(point))
+
     def add_custom_playlist_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Добавить свой плейлист")
@@ -11121,8 +12970,29 @@ class MusicPlayer(QMainWindow):
                 card.update()
         self.refresh_sidebar_library()
 
+    def _build_sidebar_user_playlist_widget(self, pl, indent_level=0):
+        pid = str(pl.get("id") or "")
+        title = str(pl.get("title") or "Мой плейлист")
+        tracks = pl.get("tracks", []) if isinstance(pl.get("tracks"), list) else []
+        subtitle = f"Плейлист • {self._russian_track_count(len(tracks))}"
+        item = SidebarMediaItem(
+            title, subtitle, "user_playlist", self.sidebar_library_widget,
+            playlist_id=pid, folder_name=str(pl.get("folder") or ""), indent_level=indent_level,
+        )
+        item.track_key = f"user_playlist|{pid}"
+        item.clicked.connect(lambda checked=False, p=pid: self.open_user_playlist(p))
+        item.track_dropped.connect(self.on_sidebar_track_dropped)
+        item.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        item.customContextMenuRequested.connect(
+            lambda pos, p=pid, w=item: self.open_sidebar_playlist_menu(p, w, pos)
+        )
+        cover_url = next((normalize_artwork_url(t.get("thumbnail", "")) for t in tracks if isinstance(t, dict) and t.get("thumbnail")), "")
+        if cover_url:
+            self.request_image(cover_url, item.cover_label)
+        return item
+
     def refresh_sidebar_library(self):
-        """Заполняет блок «Моя медиатека» в левой панели сервисами, миксами и плейлистами без лишних треков."""
+        """Заполняет блок «Моя медиатека» в левой панели сервисами, миксами, папками и плейлистами."""
         if not hasattr(self, "sidebar_library_layout") or getattr(self, "_force_exit", False):
             return
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
@@ -11139,11 +13009,27 @@ class MusicPlayer(QMainWindow):
             for p in getattr(self, "custom_playlists", [])
             if isinstance(p, dict) and p.get("url")
         )
+        user_pl_entries = tuple(
+            (
+                str(p.get("id") or ""),
+                str(p.get("title") or ""),
+                str(p.get("folder") or ""),
+                len(p.get("tracks", [])) if isinstance(p.get("tracks"), list) else 0,
+                next((str(t.get("thumbnail") or "") for t in (p.get("tracks") or []) if isinstance(t, dict) and t.get("thumbnail")), ""),
+            )
+            for p in getattr(self, "user_playlists", [])
+            if isinstance(p, dict) and p.get("id")
+        )
+        folder_entries = tuple(getattr(self, "user_playlist_folders", []))
+        collapsed_entries = tuple(sorted(getattr(self, "collapsed_playlist_folders", set())))
         signature = (
             source,
             likes_subtitle,
             str(getattr(self, "supermix_cover_url", "") or ""),
             custom_entries,
+            user_pl_entries,
+            folder_entries,
+            collapsed_entries,
         )
         if signature == getattr(self, "_sidebar_library_signature", None):
             self._sync_sidebar_playing_state()
@@ -11175,8 +13061,52 @@ class MusicPlayer(QMainWindow):
         self.sidebar_library_layout.addWidget(shuffle_item)
         self.sidebar_library_items.append(shuffle_item)
 
+        # Папки пользовательских плейлистов и вложенные в них плейлисты
+        all_folders = list(getattr(self, "user_playlist_folders", []))
+        for pl in getattr(self, "user_playlists", []):
+            fname = str(pl.get("folder") or "").strip()
+            if fname and fname not in all_folders:
+                all_folders.append(fname)
+
+        for fname in all_folders:
+            folder_playlists = [
+                pl for pl in getattr(self, "user_playlists", [])
+                if isinstance(pl, dict) and str(pl.get("folder") or "").strip() == fname
+            ]
+            is_collapsed = fname in getattr(self, "collapsed_playlist_folders", set())
+            count_pl = len(folder_playlists)
+            sub = f"Папка • {count_pl} плейлистов" if count_pl else "Папка • Перетащи сюда плейлист"
+            folder_item = SidebarMediaItem(
+                fname, sub, "folder", self.sidebar_library_widget,
+                folder_name=fname, is_folder=True, folder_collapsed=is_collapsed,
+            )
+            folder_item.track_key = f"folder|{fname}"
+            folder_item.clicked.connect(lambda checked=False, f=fname: self.toggle_playlist_folder_collapsed(f))
+            folder_item.playlist_dropped.connect(self.on_sidebar_playlist_dropped_into_folder)
+            folder_item.track_dropped.connect(self.on_sidebar_track_dropped)
+            folder_item.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            folder_item.customContextMenuRequested.connect(
+                lambda pos, f=fname, w=folder_item: self.open_sidebar_folder_menu(f, w, pos)
+            )
+            self.sidebar_library_layout.addWidget(folder_item)
+            self.sidebar_library_items.append(folder_item)
+            if not is_collapsed:
+                for pl in folder_playlists:
+                    pl_widget = self._build_sidebar_user_playlist_widget(pl, indent_level=1)
+                    self.sidebar_library_layout.addWidget(pl_widget)
+                    self.sidebar_library_items.append(pl_widget)
+
+        # Локальные плейлисты без папки
+        for pl in getattr(self, "user_playlists", []):
+            if not isinstance(pl, dict) or str(pl.get("folder") or "").strip():
+                continue
+            pl_widget = self._build_sidebar_user_playlist_widget(pl, indent_level=0)
+            self.sidebar_library_layout.addWidget(pl_widget)
+            self.sidebar_library_items.append(pl_widget)
+
+        # Плейлисты по внешней ссылке
         for title, url, pl_source in custom_entries:
-            pl_item = SidebarMediaItem(title, "Плейлист • Личный", "playlist", self.sidebar_library_widget)
+            pl_item = SidebarMediaItem(title, "Плейлист • По ссылке", "playlist", self.sidebar_library_widget)
             pl_item.track_key = f"playlist|{url}"
             pl_item.clicked.connect(lambda checked=False, t=title, u=url, s=pl_source: self.start_playlist_url(t, u, s))
             self.sidebar_library_layout.addWidget(pl_item)
@@ -11187,11 +13117,19 @@ class MusicPlayer(QMainWindow):
 
     def _sync_sidebar_playing_state(self):
         supermix_active = bool(getattr(self, "supermix_session", None) is not None and getattr(self, "queue_mode", "") == "supermix")
+        q_mode = str(getattr(self, "queue_mode", "") or "")
+        active_pid = str(getattr(self, "active_user_playlist_id", "") or "")
         for item in getattr(self, "sidebar_library_items", []):
             if item.track_key == "__supermix__":
                 item.set_playing(supermix_active)
+                item.set_active_selected(False)
+            elif item.track_key.startswith("user_playlist|"):
+                pid = item.track_key.split("|", 1)[1]
+                item.set_playing(q_mode == f"user_playlist:{pid}")
+                item.set_active_selected(pid == active_pid)
             else:
                 item.set_playing(False)
+                item.set_active_selected(False)
 
     def rebuild_start_cards(self):
         """Карточки коллекции и настоящая история прослушиваний выбранного сервиса."""
@@ -11239,7 +13177,7 @@ class MusicPlayer(QMainWindow):
                 and watched is self.start_cards_scroll.viewport() and not self._force_exit):
             QTimer.singleShot(0, self.layout_home_tiles)
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Show) and not self._force_exit:
-            for name in ("youtube_likes_list", "soundcloud_likes_list", "likes_list", "queue_list"):
+            for name in ("youtube_likes_list", "soundcloud_likes_list", "likes_list", "queue_list", "user_playlist_list"):
                 list_widget = getattr(self, name, None)
                 if list_widget is not None and watched is list_widget.viewport():
                     QTimer.singleShot(0, lambda lw=list_widget: self._ensure_row_window(lw))
@@ -11680,6 +13618,31 @@ class MusicPlayer(QMainWindow):
             f"border: 1px solid {border.name()}; border-radius: 16px; }}"
         )
 
+    def _apply_playlist_header_color(self, pixmap):
+        if not hasattr(self, "playlist_header"):
+            return
+        base = self.dominant_color(pixmap)
+        if self.theme == "light":
+            soft = SpotifyPlaylistCard._blend(base, QColor("#FFFFFF"), 0.78)
+            mid = SpotifyPlaylistCard._blend(base, QColor("#F5F8FC"), 0.90)
+            border = SpotifyPlaylistCard._blend(base, QColor("#D5DEE8"), 0.65)
+            self.playlist_header.setStyleSheet(
+                "QFrame#artistHeader { background: qlineargradient("
+                "x1:0, y1:0, x2:1, y2:1, "
+                f"stop:0 {soft.name()}, stop:0.55 {mid.name()}, stop:1 #FFFFFF); "
+                f"border: 1px solid {border.name()}; border-radius: 16px; }}"
+            )
+            return
+        color = base.lighter(135)
+        mid = SpotifyPlaylistCard._blend(color, QColor("#18202B"), 0.55)
+        border = SpotifyPlaylistCard._blend(color, QColor("#2A3444"), 0.65)
+        self.playlist_header.setStyleSheet(
+            "QFrame#artistHeader { background: qlineargradient("
+            "x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {color.name()}, stop:0.55 {mid.name()}, stop:1 #161B23); "
+            f"border: 1px solid {border.name()}; border-radius: 16px; }}"
+        )
+
     def update_artist_profile(self, artist, tracks, source):
         artist = str(artist or "").strip()
         if not self.artist_profile_open or not artist:
@@ -11961,7 +13924,8 @@ class MusicPlayer(QMainWindow):
             current and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         )
         for list_widget in (getattr(self, "source_list", None), getattr(self, "youtube_likes_list", None),
-                             getattr(self, "soundcloud_likes_list", None), getattr(self, "likes_list", None)):
+                             getattr(self, "soundcloud_likes_list", None), getattr(self, "likes_list", None),
+                             getattr(self, "user_playlist_list", None)):
             if list_widget is None:
                 continue
             for index in range(list_widget.count()):
@@ -13929,6 +15893,37 @@ class MusicPlayer(QMainWindow):
         action.setEnabled(bool(enabled))
         return action
 
+    def _add_playlist_submenu(self, menu, track):
+        if not isinstance(track, dict) or not track.get("url"):
+            return
+        pl_menu = menu.addMenu(
+            menu_action_icon("playlist-add", self.theme, accent=True),
+            "Добавить в плейлист",
+        )
+        pl_menu.setStyleSheet(menu.styleSheet())
+        t_key = self.favorite_key(track)
+        playlists = [p for p in getattr(self, "user_playlists", []) if isinstance(p, dict) and p.get("id")]
+        for pl in playlists:
+            pid = str(pl.get("id") or "")
+            title = str(pl.get("title") or "Мой плейлист")
+            folder = str(pl.get("folder") or "").strip()
+            tracks = pl.get("tracks", []) if isinstance(pl.get("tracks"), list) else []
+            already_in = any(isinstance(item, dict) and self.favorite_key(item) == t_key for item in tracks)
+            prefix = "✓ " if already_in else ""
+            label = f"{prefix}{folder} / {title} ({len(tracks)})" if folder else f"{prefix}{title} ({len(tracks)})"
+            self._add_menu_action(
+                pl_menu, label,
+                lambda p=pid, t=dict(track): self.add_track_to_user_playlist(p, t),
+                icon_name="playlist-add", accent=already_in,
+            )
+        if playlists:
+            pl_menu.addSeparator()
+        self._add_menu_action(
+            pl_menu, "Новый плейлист с этим треком…",
+            lambda t=dict(track): self.create_user_playlist_dialog(initial_track=t),
+            icon_name="plus", accent=True,
+        )
+
     def _populate_track_context_menu(self, menu, track, include_play=True, include_queue_add=True):
         if include_play:
             self._add_menu_action(
@@ -13942,6 +15937,7 @@ class MusicPlayer(QMainWindow):
                 lambda t=dict(track): self.add_to_queue(t, False),
                 icon_name="queue-add",
             )
+        self._add_playlist_submenu(menu, track)
         if track.get("source") in ("youtube", "soundcloud"):
             self._add_menu_action(
                 menu, "Запустить радио по треку",
@@ -14145,7 +16141,10 @@ class MusicPlayer(QMainWindow):
                     found = True
         # Обновляем элементы списка и их TrackRow, включая уже добавленные в очередь.
         for list_widget in (self.source_list, self.youtube_likes_list,
-                            self.soundcloud_likes_list, self.likes_list):
+                            self.soundcloud_likes_list, self.likes_list,
+                            getattr(self, "user_playlist_list", None)):
+            if list_widget is None:
+                continue
             for index in range(list_widget.count()):
                 item = list_widget.item(index)
                 track = item.data(Qt.ItemDataRole.UserRole)
@@ -14350,6 +16349,8 @@ class MusicPlayer(QMainWindow):
                         self.player_bar.set_cover_accent(pixmap)
                     if label is getattr(self, "artist_avatar", None):
                         self._apply_artist_header_color(pixmap)
+                    if label is getattr(self, "playlist_cover_label", None):
+                        self._apply_playlist_header_color(pixmap)
                     if self.mini_player is not None and label is self.mini_player.cover:
                         self.mini_player.set_cover_accent(pixmap)
         finally:
@@ -14405,8 +16406,10 @@ class MusicPlayer(QMainWindow):
     def _create_queue_row(self, item, queued):
         row = TrackRow(queued, compact=True, parent=self.queue_list.viewport())
         row.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.queue_list.setItemWidget(item, row)
         uid = queued.get("queue_id")
+        row.drag_source_kind = "queue"
+        row.drag_source_index = self.index_for_uid(uid)
+        self.queue_list.setItemWidget(item, row)
         row.remove_button.clicked.connect(lambda checked=False, u=uid: self.remove_queue_uid(u))
         # Обложка и название — кликабельные элементы TrackRow. Разрешаем
         # воспроизведение по одному клику и ищем позицию по queue_id, чтобы
@@ -14503,6 +16506,7 @@ class MusicPlayer(QMainWindow):
             lambda u=uid: self.play_queue_index(self.index_for_uid(u)),
             icon_name="play", accent=True,
         )
+        self._add_playlist_submenu(menu, queued_track)
         if queued_track.get("source") in ("youtube", "soundcloud"):
             self._add_menu_action(
                 menu, "Запустить радио по треку",
@@ -14581,7 +16585,10 @@ class MusicPlayer(QMainWindow):
         # После этого отмечаем именно выбранный трек, пока готовится его поток.
         if isinstance(self.requested_track, dict) and self._key(self.requested_track) == target_url:
             for list_widget in (self.source_list, self.youtube_likes_list,
-                                self.soundcloud_likes_list, self.likes_list, self.queue_list):
+                                self.soundcloud_likes_list, self.likes_list, self.queue_list,
+                                getattr(self, "user_playlist_list", None)):
+                if list_widget is None:
+                    continue
                 for row_index in range(list_widget.count()):
                     row = list_widget.itemWidget(list_widget.item(row_index))
                     if not isinstance(row, TrackRow):
@@ -14654,6 +16661,7 @@ class MusicPlayer(QMainWindow):
         # можно переходить по соседним результатам поиска.
         if (not self.radio_mode_active
                 and self.queue_mode not in ("soundcloud_likes", "youtube_likes", "supermix")
+                and not str(getattr(self, "queue_mode", "")).startswith("user_playlist:")
                 and not self._is_youtube_likes_playback()):
             candidate = self.search_neighbor_track(1)
             if candidate is not None:
@@ -14680,6 +16688,7 @@ class MusicPlayer(QMainWindow):
             return
         if (not self.radio_mode_active
                 and self.queue_mode not in ("soundcloud_likes", "youtube_likes", "supermix")
+                and not str(getattr(self, "queue_mode", "")).startswith("user_playlist:")
                 and not self._is_youtube_likes_playback()):
             candidate = self.search_neighbor_track(-1)
             if candidate is not None:
