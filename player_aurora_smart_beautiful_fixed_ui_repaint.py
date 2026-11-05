@@ -5950,7 +5950,7 @@ class TrackIndexIndicator(QLabel):
         self.update()
 
     def paintEvent(self, event):
-        if not self._loading and not self._current:
+        if not self._loading:
             super().paintEvent(event)
             return
 
@@ -5959,61 +5959,26 @@ class TrackIndexIndicator(QLabel):
         win = self.window()
         accent = getattr(win, "chameleon_bright", QColor("#1DB954")) if getattr(win, "chameleon_enabled", True) else QColor("#1DB954")
 
-        if self._loading:
-            size = min(self.width(), self.height()) - 6.0
-            size = max(12.0, min(15.0, size))
-            cx = self.width() / 2.0
-            cy = self.height() / 2.0
-            rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
-
-            ring_color = QColor(accent)
-            ring_color.setAlpha(48)
-            ring_pen = QPen(ring_color, 1.8)
-            ring_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(ring_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(rect)
-
-            arc_pen = QPen(accent, 2.0)
-            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(arc_pen)
-            start_angle = int((-(self._phase * 16) % 360) * 16)
-            span_angle = 110 * 16
-            painter.drawArc(rect, start_angle, span_angle)
-            painter.end()
-            return
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        bar_w = 2.3
-        gap = 1.8
-        total_w = 4 * bar_w + 3 * gap
-        start_x = (self.width() - total_w) / 2.0
-        max_h = 13.5
-        min_h = 3.4
+        size = min(self.width(), self.height()) - 6.0
+        size = max(12.0, min(15.0, size))
+        cx = self.width() / 2.0
         cy = self.height() / 2.0
+        rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
 
-        if self._playing:
-            t = self._phase * 0.32
-            levels = (
-                0.38 + 0.52 * (0.5 + 0.5 * math.sin(t)),
-                0.48 + 0.50 * (0.5 + 0.5 * math.sin(t * 1.28 + 1.65)),
-                0.45 + 0.53 * (0.5 + 0.5 * math.sin(t * 1.12 + 3.15)),
-                0.36 + 0.50 * (0.5 + 0.5 * math.sin(t * 0.92 + 4.55)),
-            )
-        else:
-            levels = (0.36, 0.72, 0.52, 0.36)
+        ring_color = QColor(accent)
+        ring_color.setAlpha(48)
+        ring_pen = QPen(ring_color, 1.8)
+        ring_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(ring_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(rect)
 
-        for idx, level in enumerate(levels):
-            clamped = max(0.0, min(1.0, level))
-            h = min_h + (max_h - min_h) * clamped
-            x = start_x + idx * (bar_w + gap)
-            y = cy - h / 2.0
-            bgrad = QLinearGradient(x, y, x, y + h)
-            bgrad.setColorAt(0.0, QColor(accent).lighter(125))
-            bgrad.setColorAt(0.5, accent)
-            bgrad.setColorAt(1.0, QColor(accent).darker(115))
-            painter.setBrush(QBrush(bgrad))
-            painter.drawRoundedRect(QRectF(x, y, bar_w, h), bar_w / 2.0, bar_w / 2.0)
+        arc_pen = QPen(accent, 2.0)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        start_angle = int((-(self._phase * 16) % 360) * 16)
+        span_angle = 110 * 16
+        painter.drawArc(rect, start_angle, span_angle)
         painter.end()
 
 
@@ -6310,12 +6275,7 @@ class TrackRow(QWidget):
                     phase=self._eq_phase,
                 )
         elif hasattr(self, "index_label"):
-            if self._loading:
-                target_text = "⏳"
-            elif self._is_current:
-                target_text = "♫"
-            else:
-                target_text = self._original_index
+            target_text = "⏳" if self._loading else self._original_index
             if self.index_label.text() != target_text:
                 self.index_label.setText(target_text)
             self.index_label.set_state(
