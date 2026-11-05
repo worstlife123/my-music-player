@@ -4926,26 +4926,83 @@ class ClickableLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self._hover_overlay and self.objectName() == "rowCover":
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            rect = QRectF(self.rect())
+        if self.objectName() != "rowCover":
+            return
+        parent = self.parentWidget()
+        is_row = parent is not None and parent.__class__.__name__ == "TrackRow"
+        is_current = bool(is_row and getattr(parent, "_is_current", False))
+        is_loading = bool(is_row and getattr(parent, "_loading", False))
+        is_compact = bool(is_row and getattr(parent, "compact", False))
+        # В компактном режиме (очередь / недавно слушал) поверх обложки уже рисуется CompactNowPlayingBadge
+        if is_compact and (is_current or is_loading):
+            return
+        if not self._hover_overlay and not (is_row and not is_compact and is_current):
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(8, 12, 18, 142 if is_current else 150))
+        painter.drawRoundedRect(rect, 8.0, 8.0)
+
+        win = self.window()
+        accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if getattr(win, "chameleon_enabled", True) else QColor("#1ED760")
+        cx, cy = rect.center().x(), rect.center().y()
+
+        # Внешнее мягкое свечение вокруг медальона
+        halo = QRadialGradient(cx, cy, 16.5)
+        halo_c = QColor(accent)
+        halo_c.setAlpha(72 if is_current else 52)
+        halo.setColorAt(0.0, halo_c)
+        halo_c2 = QColor(accent)
+        halo_c2.setAlpha(0)
+        halo.setColorAt(1.0, halo_c2)
+        painter.setBrush(QBrush(halo))
+        painter.drawEllipse(QPointF(cx, cy), 16.5, 16.5)
+
+        # Тёмный стеклянный медальон с неоновым ободком
+        ring_col = QColor(accent)
+        ring_col.setAlpha(185 if is_current else 145)
+        painter.setBrush(QColor(11, 16, 23, 222))
+        painter.setPen(QPen(ring_col, 1.35))
+        painter.drawEllipse(QPointF(cx, cy), 13.0, 13.0)
+
+        if is_current:
+            playing = bool(getattr(parent, "_is_playing", False))
+            phase = int(getattr(parent, "_eq_phase", 0))
+            t = phase * 0.32
+            if playing:
+                levels = (
+                    0.42 + 0.48 * (0.5 + 0.5 * math.sin(t + 0.2)),
+                    0.50 + 0.50 * (0.5 + 0.5 * math.sin(t * 1.28 + 1.7)),
+                    0.46 + 0.52 * (0.5 + 0.5 * math.sin(t * 1.12 + 3.1)),
+                    0.38 + 0.46 * (0.5 + 0.5 * math.sin(t * 0.94 + 4.4)),
+                )
+            else:
+                levels = (0.36, 0.72, 0.54, 0.36)
+            bar_w = 2.1
+            gap = 1.65
+            total_w = 4 * bar_w + 3 * gap
+            start_x = cx - total_w / 2.0
+            max_h = 11.6
+            min_h = 3.2
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(8, 12, 18, 152))
-            painter.drawRoundedRect(rect, 8.0, 8.0)
-            win = self.window()
-            accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if getattr(win, "chameleon_enabled", True) else QColor("#1ED760")
-            cx, cy = rect.center().x(), rect.center().y()
-            painter.setBrush(accent)
-            painter.drawEllipse(QPointF(cx, cy), 12.5, 12.5)
-            painter.setBrush(QColor("#09120D"))
-            tri = QPolygonF([
-                QPointF(cx - 3.2, cy - 5.2),
-                QPointF(cx - 3.2, cy + 5.2),
-                QPointF(cx + 5.4, cy),
-            ])
-            painter.drawPolygon(tri)
-            painter.end()
+            for idx, lvl in enumerate(levels):
+                bh = min_h + (max_h - min_h) * max(0.0, min(1.0, lvl))
+                bx = start_x + idx * (bar_w + gap)
+                by = cy - bh / 2.0
+                bgrad = QLinearGradient(bx, by, bx, by + bh)
+                top_c = QColor("#FFFFFF") if idx in (1, 2) and playing else QColor(accent).lighter(120)
+                bgrad.setColorAt(0.0, top_c)
+                bgrad.setColorAt(0.5, accent)
+                bgrad.setColorAt(1.0, QColor(accent).darker(115))
+                painter.setBrush(QBrush(bgrad))
+                painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), bar_w / 2.0, bar_w / 2.0)
+        else:
+            icon_rect = QRectF(cx - 6.5, cy - 7.0, 14.0, 14.0)
+            draw_vector_icon(painter, "play", icon_rect, "#FFFFFF")
+        painter.end()
 
 
 class LikesCollageCover(QWidget):
@@ -5927,36 +5984,41 @@ class TrackIndexIndicator(QLabel):
             return
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(accent)
-        bar_w = 2.6
-        gap = 2.1
-        total_w = 3 * bar_w + 2 * gap
+        bar_w = 2.3
+        gap = 1.8
+        total_w = 4 * bar_w + 3 * gap
         start_x = (self.width() - total_w) / 2.0
-        max_h = 13.0
-        min_h = 3.2
-        base_y = (self.height() + max_h) / 2.0
+        max_h = 13.5
+        min_h = 3.4
+        cy = self.height() / 2.0
 
         if self._playing:
-            t = self._phase * 0.34
+            t = self._phase * 0.32
             levels = (
-                0.52 + 0.46 * math.sin(t),
-                0.55 + 0.43 * math.sin(t * 1.28 + 1.85),
-                0.50 + 0.48 * math.sin(t * 0.92 + 3.55),
+                0.38 + 0.52 * (0.5 + 0.5 * math.sin(t)),
+                0.48 + 0.50 * (0.5 + 0.5 * math.sin(t * 1.28 + 1.65)),
+                0.45 + 0.53 * (0.5 + 0.5 * math.sin(t * 1.12 + 3.15)),
+                0.36 + 0.50 * (0.5 + 0.5 * math.sin(t * 0.92 + 4.55)),
             )
         else:
-            levels = (0.38, 0.68, 0.48)
+            levels = (0.36, 0.72, 0.52, 0.36)
 
         for idx, level in enumerate(levels):
             clamped = max(0.0, min(1.0, level))
             h = min_h + (max_h - min_h) * clamped
             x = start_x + idx * (bar_w + gap)
-            y = base_y - h
-            painter.drawRoundedRect(QRectF(x, y, bar_w, h), 1.2, 1.2)
+            y = cy - h / 2.0
+            bgrad = QLinearGradient(x, y, x, y + h)
+            bgrad.setColorAt(0.0, QColor(accent).lighter(125))
+            bgrad.setColorAt(0.5, accent)
+            bgrad.setColorAt(1.0, QColor(accent).darker(115))
+            painter.setBrush(QBrush(bgrad))
+            painter.drawRoundedRect(QRectF(x, y, bar_w, h), bar_w / 2.0, bar_w / 2.0)
         painter.end()
 
 
 class CompactNowPlayingBadge(QLabel):
-    """Мини-бейдж на обложке компактной строки (очередь и «Недавно слушал»): спиннер или эквалайзер."""
+    """Центральный стеклянный медальон со спиннером или 4-полосной звуковой волной поверх мини-обложки."""
 
     def __init__(self, text="♫", parent=None):
         super().__init__(text, parent)
@@ -5964,6 +6026,7 @@ class CompactNowPlayingBadge(QLabel):
         self._current = False
         self._playing = False
         self._phase = 0
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
     def set_state(self, *, loading=False, current=False, playing=False, phase=0):
         self._loading = bool(loading)
@@ -5975,54 +6038,80 @@ class CompactNowPlayingBadge(QLabel):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(12, 16, 22, 215))
-        painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0), 5.0, 5.0)
+        painter.setBrush(QColor(8, 12, 18, 142))
+        painter.drawRoundedRect(rect, 8.0, 8.0)
+
         win = self.window()
-        accent = getattr(win, "chameleon_bright", QColor("#1DB954")) if getattr(win, "chameleon_enabled", True) else QColor("#1DB954")
+        accent = getattr(win, "chameleon_bright", QColor("#1ED760")) if getattr(win, "chameleon_enabled", True) else QColor("#1ED760")
+        cx = rect.center().x()
+        cy = rect.center().y()
+        med_r = min(13.0, min(rect.width(), rect.height()) * 0.34)
+
+        # Мягкий неоновый ореол вокруг медальона
+        halo = QRadialGradient(cx, cy, med_r * 1.32)
+        hc = QColor(accent)
+        hc.setAlpha(75)
+        halo.setColorAt(0.0, hc)
+        hc2 = QColor(accent)
+        hc2.setAlpha(0)
+        halo.setColorAt(1.0, hc2)
+        painter.setBrush(QBrush(halo))
+        painter.drawEllipse(QPointF(cx, cy), med_r * 1.32, med_r * 1.32)
+
+        # Тёмный стеклянный кружок с тонким светящимся ободком
+        ring_col = QColor(accent)
+        ring_col.setAlpha(190)
+        painter.setBrush(QColor(11, 16, 23, 224))
+        painter.setPen(QPen(ring_col, 1.35))
+        painter.drawEllipse(QPointF(cx, cy), med_r, med_r)
 
         if self._loading:
-            size = 10.5
-            cx = self.width() / 2.0
-            cy = self.height() / 2.0
-            rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
+            size = med_r * 1.12
+            arc_rect = QRectF(cx - size / 2.0, cy - size / 2.0, size, size)
             ring_color = QColor(accent)
             ring_color.setAlpha(55)
-            ring_pen = QPen(ring_color, 1.5)
-            painter.setPen(ring_pen)
+            painter.setPen(QPen(ring_color, 1.6))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(rect)
-            arc_pen = QPen(accent, 1.7)
+            painter.drawEllipse(arc_rect)
+            arc_pen = QPen(accent, 1.9)
             arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(arc_pen)
             start_angle = int((-(self._phase * 16) % 360) * 16)
-            painter.drawArc(rect, start_angle, 110 * 16)
+            painter.drawArc(arc_rect, start_angle, 115 * 16)
             painter.end()
             return
 
-        painter.setBrush(accent)
+        painter.setPen(Qt.PenStyle.NoPen)
         bar_w = 2.0
-        gap = 1.6
-        total_w = 3 * bar_w + 2 * gap
-        start_x = (self.width() - total_w) / 2.0
-        max_h = 9.5
-        min_h = 2.6
-        base_y = (self.height() + max_h) / 2.0
+        gap = 1.55
+        total_w = 4 * bar_w + 3 * gap
+        start_x = cx - total_w / 2.0
+        max_h = med_r * 0.92
+        min_h = 3.0
         if self._playing:
-            t = self._phase * 0.34
+            t = self._phase * 0.32
             levels = (
-                0.52 + 0.46 * math.sin(t),
-                0.55 + 0.43 * math.sin(t * 1.28 + 1.85),
-                0.50 + 0.48 * math.sin(t * 0.92 + 3.55),
+                0.40 + 0.50 * (0.5 + 0.5 * math.sin(t + 0.2)),
+                0.50 + 0.50 * (0.5 + 0.5 * math.sin(t * 1.28 + 1.7)),
+                0.46 + 0.52 * (0.5 + 0.5 * math.sin(t * 1.12 + 3.1)),
+                0.38 + 0.48 * (0.5 + 0.5 * math.sin(t * 0.94 + 4.4)),
             )
         else:
-            levels = (0.38, 0.68, 0.48)
+            levels = (0.36, 0.72, 0.54, 0.36)
         for idx, level in enumerate(levels):
             clamped = max(0.0, min(1.0, level))
             h = min_h + (max_h - min_h) * clamped
             x = start_x + idx * (bar_w + gap)
-            y = base_y - h
-            painter.drawRoundedRect(QRectF(x, y, bar_w, h), 0.9, 0.9)
+            y = cy - h / 2.0
+            bgrad = QLinearGradient(x, y, x, y + h)
+            top_c = QColor("#FFFFFF") if idx in (1, 2) and self._playing else QColor(accent).lighter(120)
+            bgrad.setColorAt(0.0, top_c)
+            bgrad.setColorAt(0.5, accent)
+            bgrad.setColorAt(1.0, QColor(accent).darker(115))
+            painter.setBrush(QBrush(bgrad))
+            painter.drawRoundedRect(QRectF(x, y, bar_w, h), bar_w / 2.0, bar_w / 2.0)
         painter.end()
 
 
@@ -6168,7 +6257,7 @@ class TrackRow(QWidget):
             self.now_playing = CompactNowPlayingBadge("♫", self.thumbnail_label)
             self.now_playing.setObjectName("queuePlayingBadge")
             self.now_playing.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.now_playing.setGeometry(22, 22, 18, 18)
+            self.now_playing.setGeometry(0, 0, side, side)
             self.now_playing.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             self.now_playing.hide()
         else:
@@ -6235,6 +6324,8 @@ class TrackRow(QWidget):
                 playing=self._is_playing,
                 phase=self._eq_phase,
             )
+            if hasattr(self, "thumbnail_label"):
+                self.thumbnail_label.update()
         if needs_timer and self.isVisible():
             if not self._eq_timer.isActive():
                 self._eq_timer.start()
@@ -6267,6 +6358,8 @@ class TrackRow(QWidget):
         if (current_changed or animation_changed) and animate and not self._loading:
             self._eq_phase = 0
         self._sync_indicator_state()
+        if hasattr(self, "thumbnail_label"):
+            self.thumbnail_label.update()
         self.update()
 
     def set_loading(self, loading: bool):
@@ -6298,6 +6391,8 @@ class TrackRow(QWidget):
                 playing=self._is_playing,
                 phase=self._eq_phase,
             )
+            if hasattr(self, "thumbnail_label"):
+                self.thumbnail_label.update()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -10109,17 +10204,17 @@ class MusicPlayer(QMainWindow):
             QPushButton#playButton:pressed { background: #169C46; }
 
             QPushButton#rowPlay, QPushButton#rowFavorite, QPushButton#rowRemove {
-                background: transparent; color: #A2AEBF; border: none; border-radius: 17px;
+                background: transparent; color: #A2AEBF; border: none; border-radius: 16px;
                 font-size: 13px; padding: 2px; font-weight: 700;
             }
             QPushButton#rowPlay[revealed="true"] { background: rgba(255, 255, 255, 16); color: #F2F5F9; }
             QPushButton#rowPlay:hover { background: #1DB954; color: #0D1912; }
-            QPushButton#rowFavorite { font-size: 21px; color: #A2AEBF; background: transparent; }
-            QPushButton#rowFavorite:checked { color: #5CE092; background: rgba(29, 185, 84, 22); }
+            QPushButton#rowFavorite { font-size: 21px; color: #A2AEBF; background: transparent; border-radius: 16px; }
+            QPushButton#rowFavorite:checked { color: #5CE092; background: transparent; }
             QPushButton#rowFavorite:hover { background: rgba(255, 255, 255, 18); color: #66E099; }
-            QPushButton#rowRemove { background: transparent; color: transparent; }
-            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: #2B3442; color: #F2F5F9; }
-            QPushButton#rowRemove:hover { background: #384456; color: #FFFFFF; }
+            QPushButton#rowRemove { background: transparent; color: transparent; border-radius: 14px; }
+            QPushButton#rowRemove[revealed="true"], QPushButton#rowRemove:focus { background: rgba(255, 255, 255, 14); color: #F2F5F9; border-radius: 14px; }
+            QPushButton#rowRemove:hover { background: rgba(255, 255, 255, 26); color: #FFFFFF; border-radius: 14px; }
 
             QPushButton#trackArtistLink {
                 color: #9DA8B8; background: transparent; border: none;
@@ -10163,7 +10258,7 @@ class MusicPlayer(QMainWindow):
             QWidget#trackRow[playing="true"]:hover { background: rgba(29, 185, 84, 38); border: 1px solid rgba(92, 224, 146, 78); }
             QLabel#trackTitle[playing="true"] { color: #66E099; font-weight: 800; }
             QLabel#trackIndex[playing="true"] { color: #66E099; font-weight: 900; }
-            QLabel#queuePlayingBadge { background: #1DB954; color: #0C1A12; border-radius: 9px; font-size: 12px; font-weight: 700; }
+            QLabel#queuePlayingBadge { background: transparent; color: transparent; border: none; }
 
             QSlider::groove:horizontal { background: #36404F; height: 4px; border-radius: 2px; }
             QSlider::sub-page:horizontal { background: #1DB954; border-radius: 2px; }
