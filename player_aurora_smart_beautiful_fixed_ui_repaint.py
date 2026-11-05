@@ -1169,68 +1169,146 @@ class SpotifyPlaylistCard(QPushButton):
 
     @staticmethod
     def _make_artwork(style):
-        """Квадратная обложка рисуется один раз и работает без внешних картинок."""
+        """Дизайнерская студийная обложка 384×384 с виниловым диском, неоновым свечением и типографикой."""
         size = 384
         image = QPixmap(size, size)
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         rect = QRectF(0, 0, size, size)
         clip = QPainterPath()
         clip.addRoundedRect(rect, 24, 24)
         painter.setClipPath(clip)
-        colors = {
-            "likes": ("#2B1B72", "#673AB7", "#B866F5"),
-            "soundcloud-likes": ("#FF5824", "#C92D51", "#5E1E52"),
-            "supermix": ("#E83828", "#F27127", "#F7B733"),
-            "shuffle": ("#0E3352", "#147A85", "#2CE0C3"),
-        }
-        first, middle, last = colors.get(style, colors["likes"])
-        gradient = QLinearGradient(0, 0, size, size)
-        gradient.setColorAt(0.0, QColor(first))
-        gradient.setColorAt(0.52, QColor(middle))
-        gradient.setColorAt(1.0, QColor(last))
-        painter.fillRect(rect, gradient)
-        painter.setPen(Qt.PenStyle.NoPen)
-        glow = QRadialGradient(QPointF(305, 52), 320)
-        glow.setColorAt(0.0, QColor(255, 255, 255, 115))
-        glow.setColorAt(0.55, QColor(255, 255, 255, 26))
-        glow.setColorAt(1.0, QColor(255, 255, 255, 0))
-        painter.fillRect(rect, glow)
-        bottom_glow = QRadialGradient(QPointF(60, 336), 240)
-        bottom_glow.setColorAt(0.0, QColor(0, 0, 0, 75))
-        bottom_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.fillRect(rect, bottom_glow)
 
-        if style == "supermix":
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            for index in range(9):
-                painter.setPen(QPen(QColor(72, 12, 38, 125 - index * 9), 10))
-                radius = 46 + index * 31
-                painter.drawEllipse(QPointF(340, 45), radius, radius)
-            painter.setBrush(QColor(255, 255, 255, 24))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(192, 188), 108, 108)
-            draw_vector_icon(painter, "supermix", QRectF(100, 96, 184, 184), "#FFF8EE")
-        elif style == "shuffle":
-            painter.save()
-            painter.translate(190, 190)
-            painter.rotate(-28)
-            for index in range(7):
-                shade = QColor("#B8FFE8") if index % 2 == 0 else QColor("#0F6D78")
-                shade.setAlpha(115)
-                painter.setBrush(shade)
-                painter.drawRoundedRect(QRectF(-280, -230 + index * 67, 560, 37), 18, 18)
-            painter.restore()
-            painter.setBrush(QColor(9, 34, 48, 70))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(192, 188), 108, 108)
-            draw_vector_icon(painter, "headphones", QRectF(100, 96, 184, 184), "#FFFFFF")
-        else:
-            painter.setBrush(QColor(255, 255, 255, 20))
-            for center, radius in ((QPointF(25, 370), 185), (QPointF(340, 25), 132), (QPointF(192, 186), 104)):
-                painter.drawEllipse(center, radius, radius)
-            draw_vector_icon(painter, "heart", QRectF(102, 92, 180, 180), "#FFFFFF")
+        themes = {
+            "likes": ("#0F0826", "#4C1D95", "#EC4899", "#F472B6", "heart", "COLLECTION", "FAVORITES", "♥"),
+            "soundcloud-likes": ("#1C090D", "#9A1B3B", "#FF5500", "#FF9E44", "heart", "SOUNDCLOUD", "LIKED TRACKS", "SC"),
+            "supermix": ("#1A070D", "#BE123C", "#F97316", "#FBBF24", "supermix", "YOUTUBE MUSIC", "MY SUPERMIX", "∞"),
+            "shuffle": ("#051923", "#0E7490", "#10B981", "#34D399", "headphones", "SMART WAVE", "SHUFFLE MIX", "⇄"),
+            "my_mix_1": ("#07132B", "#1D4ED8", "#06B6D4", "#38BDF8", "music", "YOUTUBE MUSIC", "MY MIX 01", "01"),
+            "my_mix_2": ("#061F18", "#047857", "#84CC16", "#A3E635", "supermix", "YOUTUBE MUSIC", "MY MIX 02", "02"),
+            "my_mix_3": ("#21081F", "#9D174D", "#FB7185", "#FDA4AF", "headphones", "YOUTUBE MUSIC", "MY MIX 03", "03"),
+            "discover_mix": ("#120829", "#5B21B6", "#A855F7", "#E879F9", "supermix", "YOUTUBE MUSIC", "DISCOVER MIX", "NEW"),
+            "new_release_mix": ("#210E05", "#C2410C", "#F59E0B", "#FDE047", "play", "YOUTUBE MUSIC", "NEW RELEASES", "HOT"),
+            "replay_mix": ("#170924", "#7E22CE", "#06B6D4", "#67E8F9", "repeat", "YOUTUBE MUSIC", "ON REPEAT", "TOP"),
+        }
+        c_dark, c_mid, c_bright, c_glow, icon_name, badge_txt, title_txt, wm_txt = themes.get(style, themes["likes"])
+
+        # 1. Глубокий многослойный студийный градиент
+        bg = QLinearGradient(0, 0, size, size)
+        bg.setColorAt(0.0, QColor(c_dark))
+        bg.setColorAt(0.52, QColor(c_mid))
+        bg.setColorAt(1.0, QColor(c_bright).darker(135))
+        painter.fillRect(rect, bg)
+
+        # 2. Аврора-облака свечения в углах
+        painter.setPen(Qt.PenStyle.NoPen)
+        top_orb = QRadialGradient(QPointF(316, 68), 255)
+        g1 = QColor(c_bright)
+        g1.setAlpha(165)
+        top_orb.setColorAt(0.0, g1)
+        g2 = QColor(c_glow)
+        g2.setAlpha(45)
+        top_orb.setColorAt(0.55, g2)
+        top_orb.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(rect, top_orb)
+
+        bot_orb = QRadialGradient(QPointF(64, 330), 230)
+        b1 = QColor(c_glow)
+        b1.setAlpha(95)
+        bot_orb.setColorAt(0.0, b1)
+        bot_orb.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(rect, bot_orb)
+
+        # 3. Диагональные световые лучи и геометрия
+        painter.save()
+        painter.translate(192, 192)
+        painter.rotate(-24)
+        for idx in range(5):
+            stripe = QColor(255, 255, 255, 11 if idx % 2 == 0 else 6)
+            painter.setBrush(stripe)
+            painter.drawRoundedRect(QRectF(-260, -195 + idx * 78, 520, 28), 14, 14)
+        painter.restore()
+
+        # 4. Крупный полупрозрачный водяной знак номера/символа в правом верхнем углу
+        wm_font = QFont("Segoe UI", 54, QFont.Weight.Black)
+        painter.setFont(wm_font)
+        painter.setPen(QColor(255, 255, 255, 24))
+        painter.drawText(QRectF(180, 18, 178, 92), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, wm_txt)
+
+        # 5. Центральная виниловая/стеклянная пластинка-медальон
+        cx, cy = 192.0, 174.0
+        disc_shadow = QRadialGradient(QPointF(cx, cy + 8), 112)
+        disc_shadow.setColorAt(0.0, QColor(0, 0, 0, 135))
+        disc_shadow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(disc_shadow)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(cx, cy + 8), 112, 112)
+
+        # Внешний виниловый диск
+        disc_grad = QLinearGradient(cx - 92, cy - 92, cx + 92, cy + 92)
+        disc_grad.setColorAt(0.0, QColor(18, 22, 32, 228))
+        disc_grad.setColorAt(0.5, QColor(10, 13, 20, 242))
+        disc_grad.setColorAt(1.0, QColor(24, 29, 42, 228))
+        painter.setBrush(disc_grad)
+        rim_col = QColor(c_glow)
+        rim_col.setAlpha(135)
+        painter.setPen(QPen(rim_col, 1.8))
+        painter.drawEllipse(QPointF(cx, cy), 92, 92)
+
+        # Концентрические звуковые дорожки на диске
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for r_idx, rad in enumerate((79, 67, 56)):
+            groove = QColor(255, 255, 255, 26 - r_idx * 5)
+            painter.setPen(QPen(groove, 1.1))
+            painter.drawEllipse(QPointF(cx, cy), rad, rad)
+
+        # Внутреннее неоновое ядро медальона
+        core_grad = QLinearGradient(cx - 44, cy - 44, cx + 44, cy + 44)
+        core_grad.setColorAt(0.0, QColor(c_bright))
+        core_grad.setColorAt(1.0, QColor(c_mid))
+        painter.setBrush(core_grad)
+        painter.setPen(QPen(QColor(255, 255, 255, 95), 1.5))
+        painter.drawEllipse(QPointF(cx, cy), 44, 44)
+
+        draw_vector_icon(painter, icon_name, QRectF(cx - 23, cy - 23, 46, 46), "#FFFFFF")
+
+        # 6. Верхний стеклянный бейдж («YOUTUBE MUSIC» / «COLLECTION»)
+        pill_rect = QRectF(24, 24, 148, 28)
+        painter.setBrush(QColor(10, 14, 22, 165))
+        painter.setPen(QPen(QColor(255, 255, 255, 38), 1.0))
+        painter.drawRoundedRect(pill_rect, 14, 14)
+        dot_c = QColor(c_glow)
+        painter.setBrush(dot_c)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(38, 38), 4.2, 4.2)
+        tag_font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+        tag_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.1)
+        painter.setFont(tag_font)
+        painter.setPen(QColor(240, 246, 252, 230))
+        painter.drawText(pill_rect.adjusted(24, 0, -8, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, badge_txt)
+
+        # 7. Нижняя плашка с типографикой обложки и мини-эквалайзером
+        footer_grad = QLinearGradient(0, 268, 0, size)
+        footer_grad.setColorAt(0.0, QColor(8, 10, 16, 0))
+        footer_grad.setColorAt(0.45, QColor(8, 10, 16, 155))
+        footer_grad.setColorAt(1.0, QColor(6, 8, 14, 225))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillRect(QRectF(0, 268, size, size - 268), footer_grad)
+
+        # Неоновая полоска-акцент над названием
+        acc_bar = QLinearGradient(26, 314, 96, 314)
+        acc_bar.setColorAt(0.0, QColor(c_glow))
+        acc_bar.setColorAt(1.0, QColor(c_bright))
+        painter.setBrush(acc_bar)
+        painter.drawRoundedRect(QRectF(26, 312, 56, 4.5), 2.2, 2.2)
+
+        cov_font = QFont("Segoe UI", 19, QFont.Weight.Black)
+        cov_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        painter.setFont(cov_font)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(QRectF(26, 320, 290, 38), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title_txt)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor(255, 255, 255, 42), 2))
@@ -3280,14 +3358,25 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
     failed = pyqtSignal(str)
     REQUEST_BUDGET_SECONDS = 30
     MIX_ID_PREFIX = "RDTMAK5uy_"
+    ALT_MIX_PREFIX = "RDCLAK5uy_"
+    MIX_KEY_ALIASES = {
+        "supermix": ("my supermix", "мой супермикс", "супермикс"),
+        "my_mix_1": ("my mix 1", "мой микс 1", "микс 1"),
+        "my_mix_2": ("my mix 2", "мой микс 2", "микс 2"),
+        "my_mix_3": ("my mix 3", "мой микс 3", "микс 3"),
+        "discover_mix": ("discover mix", "микс открытий", "открытия"),
+        "new_release_mix": ("new release mix", "новинки", "новые релизы"),
+        "replay_mix": ("replay mix", "archive mix", "on repeat", "на повторе", "архивный микс"),
+    }
 
     def __init__(self, auth_mode, cookie_file="", browser_spec="", parent=None,
-                 mix_id="", anchor="", excluded_ids=None, limit=25):
+                 mix_id="", anchor="", excluded_ids=None, limit=25, mix_key="supermix"):
         super().__init__(parent)
         self.auth_mode = str(auth_mode or "file")
         self.cookie_file = str(cookie_file or "").strip()
         self.browser_spec = str(browser_spec or "").strip()
         self.mix_id = str(mix_id or "")
+        self.mix_key = str(mix_key or "supermix").strip() or "supermix"
         self.anchor = str(anchor or "")
         self.excluded_ids = set(excluded_ids or ())
         self.limit = max(1, min(50, int(limit)))
@@ -3307,6 +3396,59 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         and str(item.get("title") or "").strip().casefold() == "my supermix"):
                     return item
         return None
+
+    @classmethod
+    def _discover_mix_catalog(cls, shelves):
+        """Собирает все персональные миксы YouTube Music с главной страницы аккаунта."""
+        catalog = {}
+        personal_pool = []
+        seen_ids = set()
+        for shelf in shelves or []:
+            if not isinstance(shelf, dict):
+                continue
+            for item in shelf.get("contents") or []:
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("playlistId") or "").strip()
+                if not (pid.startswith(cls.MIX_ID_PREFIX) or pid.startswith(cls.ALT_MIX_PREFIX)):
+                    continue
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                title = str(item.get("title") or "").strip()
+                title_cf = title.casefold()
+                thumbnails = item.get("thumbnails") or []
+                cover_url = normalize_artwork_url(thumbnails[-1].get("url", "")) if thumbnails and isinstance(thumbnails[-1], dict) else ""
+                desc = str(item.get("description") or "").strip()
+                entry = {"playlistId": pid, "title": title, "cover_url": cover_url, "description": desc, "raw": item}
+                matched_key = None
+                for key, aliases in cls.MIX_KEY_ALIASES.items():
+                    if any(title_cf == alias or alias in title_cf for alias in aliases):
+                        if key == "supermix" and not pid.startswith(cls.MIX_ID_PREFIX):
+                            continue
+                        matched_key = key
+                        break
+                if matched_key and matched_key not in catalog:
+                    catalog[matched_key] = entry
+                elif title_cf != "my supermix":
+                    personal_pool.append(entry)
+
+        fallback_keys = ("my_mix_1", "my_mix_2", "my_mix_3", "discover_mix", "new_release_mix", "replay_mix")
+        pool_idx = 0
+        for key in fallback_keys:
+            if key not in catalog and pool_idx < len(personal_pool):
+                catalog[key] = personal_pool[pool_idx]
+                pool_idx += 1
+        return catalog
+
+    @classmethod
+    def _find_mix_for_key(cls, shelves, mix_key):
+        if not mix_key or mix_key == "supermix":
+            return cls._find_supermix(shelves)
+        catalog = cls._discover_mix_catalog(shelves)
+        if mix_key in catalog:
+            return catalog[mix_key]["raw"]
+        return cls._find_supermix(shelves)
 
     @staticmethod
     def _normalize_track(entry):
@@ -3362,7 +3504,8 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                 session.request = bounded_request
                 client = YTMusic(headers, requests_session=session, language="en")
                 if not self.mix_id:
-                    item = self._find_supermix(client.get_home(limit=20))
+                    shelves = client.get_home(limit=20)
+                    item = self._find_mix_for_key(shelves, self.mix_key)
                     if self._cancelled.is_set():
                         return
                     if item is None:
@@ -3372,8 +3515,17 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         )
                         return
                     metadata["mix_id"] = item["playlistId"]
+                    metadata["mix_key"] = self.mix_key
+                    metadata["mix_title"] = str(item.get("title") or "")
                     thumbnails = item.get("thumbnails") or []
                     metadata["cover_url"] = normalize_artwork_url(thumbnails[-1].get("url", "")) if thumbnails else ""
+                    catalog = self._discover_mix_catalog(shelves)
+                    if catalog:
+                        metadata["catalog"] = {
+                            k: {"mix_id": v["playlistId"], "cover_url": v["cover_url"],
+                                "title": v["title"], "description": v["description"]}
+                            for k, v in catalog.items()
+                        }
                     playlist = client.get_watch_playlist(playlistId=metadata["mix_id"], limit=self.limit)
                 else:
                     options = {"playlistId": self.mix_id, "radio": True, "limit": self.limit}
@@ -5436,31 +5588,48 @@ def make_service_artwork(source, pixel_size=80):
         return pixmap
     painter.scale(pixel_size / 80, pixel_size / 80)
     colors = {
-        "youtube": ("#FF5469", "#C81036"),
-        "soundcloud": ("#FFB15B", "#F15024"),
-        "likes": ("#6D4AFF", "#1DB954"),
-        "supermix": ("#F25C3B", "#F7B733"),
-        "shuffle": ("#147A85", "#2CE0C3"),
-        "playlist": ("#3B66A8", "#1E2B4F"),
-        "user_playlist": ("#1DB954", "#155734"),
-        "folder": ("#3A4B63", "#1D2634"),
-        "brand": ("#160406", "#050507"),
+        "youtube": ("#2B0710", "#E11D48", "#FB7185"),
+        "soundcloud": ("#260E04", "#EA580C", "#FBBF24"),
+        "likes": ("#12092B", "#6D28D9", "#EC4899"),
+        "supermix": ("#1F080E", "#E11D48", "#F59E0B"),
+        "shuffle": ("#061D24", "#0891B2", "#10B981"),
+        "my_mix_1": ("#07142B", "#2563EB", "#38BDF8"),
+        "my_mix_2": ("#062019", "#059669", "#A3E635"),
+        "my_mix_3": ("#230820", "#BE185D", "#FB7185"),
+        "discover_mix": ("#130829", "#7C3AED", "#E879F9"),
+        "new_release_mix": ("#230F05", "#EA580C", "#FDE047"),
+        "replay_mix": ("#170924", "#9333EA", "#22D3EE"),
+        "playlist": ("#0C192E", "#2563EB", "#60A5FA"),
+        "user_playlist": ("#071F15", "#10B981", "#34D399"),
+        "folder": ("#141D2B", "#334155", "#94A3B8"),
+        "brand": ("#160406", "#050507", "#E11919"),
     }
-    start, end = colors.get(source, colors["brand"])
+    c_dark, c_mid, c_glow = colors.get(source, colors["brand"])
     gradient = QLinearGradient(0, 0, 80, 80)
-    gradient.setColorAt(0, QColor(start))
-    gradient.setColorAt(1, QColor(end))
+    gradient.setColorAt(0.0, QColor(c_dark))
+    gradient.setColorAt(0.58, QColor(c_mid))
+    gradient.setColorAt(1.0, QColor(c_glow).darker(125))
     clip = QPainterPath()
     clip.addRoundedRect(QRectF(1, 1, 78, 78), 18, 18)
     painter.save()
     painter.setClipPath(clip)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.fillPath(clip, gradient)
-    painter.setBrush(QColor(255, 255, 255, 26))
-    painter.drawEllipse(QRectF(37, -15, 64, 64))
+    orb = QRadialGradient(QPointF(64, 16), 48)
+    oc = QColor(c_glow)
+    oc.setAlpha(135)
+    orb.setColorAt(0.0, oc)
+    orb.setColorAt(1.0, QColor(0, 0, 0, 0))
+    painter.fillRect(QRectF(0, 0, 80, 80), orb)
+    # Мини-виниловый стеклянный медальон в центре иконки
+    painter.setBrush(QColor(10, 14, 22, 175))
+    ring_c = QColor(c_glow)
+    ring_c.setAlpha(150)
+    painter.setPen(QPen(ring_c, 1.2))
+    painter.drawEllipse(QPointF(40, 40), 25, 25)
     painter.restore()
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.setPen(QPen(QColor(255, 255, 255, 36), 1.4))
+    painter.setPen(QPen(QColor(255, 255, 255, 42), 1.4))
     painter.drawPath(clip)
     kind = {
         "youtube": "play",
@@ -5468,12 +5637,18 @@ def make_service_artwork(source, pixel_size=80):
         "likes": "heart",
         "supermix": "supermix",
         "shuffle": "headphones",
+        "my_mix_1": "music",
+        "my_mix_2": "supermix",
+        "my_mix_3": "headphones",
+        "discover_mix": "supermix",
+        "new_release_mix": "play",
+        "replay_mix": "repeat",
         "playlist": "music",
         "user_playlist": "music",
         "folder": "folder",
         "brand": "music",
     }.get(source, "music")
-    draw_vector_icon(painter, kind, QRectF(20, 20, 40, 40), "#FFFFFF")
+    draw_vector_icon(painter, kind, QRectF(24, 24, 32, 32), "#FFFFFF")
     painter.end()
     pixmap.setDevicePixelRatio(2)
     return pixmap
@@ -11455,14 +11630,35 @@ class MusicPlayer(QMainWindow):
         mix_tracks = tracks[:50]
         self._start_music_queue(mix_tracks, source, f"Перемешаны твои лайки: {len(mix_tracks)} треков.")
 
+    YOUTUBE_EXTRA_MIX_SPECS = (
+        ("my_mix_1", "Мой микс 1", "Персональная волна #1 • YouTube Music", "#1D4ED8", "#38BDF8"),
+        ("my_mix_2", "Мой микс 2", "Персональная волна #2 • YouTube Music", "#047857", "#A3E635"),
+        ("my_mix_3", "Мой микс 3", "Персональная волна #3 • YouTube Music", "#9D174D", "#FB7185"),
+        ("discover_mix", "Микс открытий", "Новые треки по вкусу • YouTube Music", "#5B21B6", "#E879F9"),
+        ("new_release_mix", "Новинки", "Свежие релизы артистов • YouTube Music", "#C2410C", "#FDE047"),
+        ("replay_mix", "На повторе", "Главные хиты профиля • YouTube Music", "#7E22CE", "#22D3EE"),
+    )
+
     def _set_supermix_busy(self, busy):
+        active_key = getattr(self, "_active_youtube_mix_key", "supermix") or "supermix"
         for card in self.start_cards:
             if card.title == "Супермикс":
-                card.setEnabled(not busy)
-                card.subtitle = ("Загружаю твою подборку…" if busy
+                is_target = busy and active_key == "supermix"
+                card.setEnabled(not is_target)
+                card.subtitle = ("Загружаю твою подборку…" if is_target
                                  else "Персональная подборка YouTube Music")
-                card.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.PointingHandCursor)
+                card.setCursor(Qt.CursorShape.BusyCursor if is_target else Qt.CursorShape.PointingHandCursor)
                 card.update()
+        default_subs = {k: sub for k, _, sub, _, _ in self.YOUTUBE_EXTRA_MIX_SPECS}
+        catalog = getattr(self, "youtube_mix_catalog", {}) or {}
+        for card in getattr(self, "youtube_mix_cards", []):
+            key = getattr(card, "artwork_style", "")
+            is_target = busy and active_key == key
+            card.setEnabled(not is_target)
+            cat_desc = str((catalog.get(key) or {}).get("description") or "").strip()
+            card.subtitle = "Загружаю микс YouTube Music…" if is_target else (cat_desc or default_subs.get(key, card.subtitle))
+            card.setCursor(Qt.CursorShape.BusyCursor if is_target else Qt.CursorShape.PointingHandCursor)
+            card.update()
         self.refresh_supermix_card()
 
     def refresh_supermix_card(self):
@@ -11470,6 +11666,7 @@ class MusicPlayer(QMainWindow):
             return
         session = self.supermix_session
         state = "idle"
+        active_key = (session.get("mix_key") if isinstance(session, dict) and session.get("mix_key") else getattr(self, "_active_youtube_mix_key", "supermix")) or "supermix"
         if self.supermix_worker is not None:
             state = "loading"
         elif session is not None and self.queue_mode == "supermix":
@@ -11484,10 +11681,18 @@ class MusicPlayer(QMainWindow):
                 state = "loading" if self.requested_track is not None else "waiting"
         for card in self.start_cards:
             if card.artwork_style == "supermix":
-                card.set_playback_state(state)
+                card.set_playback_state(state if active_key == "supermix" else "idle")
+        for card in getattr(self, "youtube_mix_cards", []):
+            card.set_playback_state(state if card.artwork_style == active_key else "idle")
+        self._sync_sidebar_playing_state()
 
     def toggle_supermix(self):
-        if self.supermix_session is not None and self.queue_mode == "supermix":
+        self.toggle_youtube_mix("supermix")
+
+    def toggle_youtube_mix(self, mix_key="supermix"):
+        mix_key = str(mix_key or "supermix").strip() or "supermix"
+        session_key = (self.supermix_session.get("mix_key") or "supermix") if isinstance(self.supermix_session, dict) else "supermix"
+        if self.supermix_session is not None and self.queue_mode == "supermix" and session_key == mix_key:
             if self.supermix_session["waiting"]:
                 self.maybe_refill_supermix()
             else:
@@ -11499,7 +11704,10 @@ class MusicPlayer(QMainWindow):
                     # Retry the first track if its stream failed; leave previous audio alone while loading.
                     self.play_queue_index(0)
             return
-        self.play_supermix()
+        if mix_key == "supermix":
+            self.play_supermix()
+        else:
+            self.play_youtube_mix(mix_key)
 
     def _cancel_supermix(self):
         if self.supermix_worker is not None:
@@ -11533,6 +11741,7 @@ class MusicPlayer(QMainWindow):
         if not self.youtube_auth_kwargs():
             self.connect_youtube_account()
             return
+        self._active_youtube_mix_key = "supermix"
         self._cancel_supermix()
         worker = self._make_supermix_worker(excluded_ids=self._youtube_disliked_video_ids())
         self.supermix_worker = worker
@@ -11542,6 +11751,32 @@ class MusicPlayer(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         self._set_supermix_busy(True)
         self.set_status("Открываю My Supermix подключённого аккаунта YouTube Music…", "youtube")
+        worker.start()
+
+    def play_youtube_mix(self, mix_key="supermix"):
+        """Открывает выбранный персональный микс YouTube Music (Мой микс 1–3, Открытия, Новинки, На повторе)."""
+        mix_key = str(mix_key or "supermix").strip() or "supermix"
+        if mix_key == "supermix":
+            self.play_supermix()
+            return
+        if not self.youtube_auth_kwargs():
+            self.connect_youtube_account()
+            return
+        self._active_youtube_mix_key = mix_key
+        self._cancel_supermix()
+        worker = self._make_supermix_worker(
+            mix_key=mix_key,
+            excluded_ids=self._youtube_disliked_video_ids(),
+        )
+        self.supermix_worker = worker
+        worker.result_ready.connect(lambda result, meta, w=worker: self.on_supermix_ready(w, result, meta))
+        worker.failed.connect(lambda message, w=worker: self.on_supermix_error(w, message))
+        worker.finished.connect(lambda w=worker: self.on_supermix_finished(w))
+        worker.finished.connect(worker.deleteLater)
+        self._set_supermix_busy(True)
+        titles = {k: title for k, title, _, _, _ in self.YOUTUBE_EXTRA_MIX_SPECS}
+        mix_label = titles.get(mix_key, "Микс YouTube Music")
+        self.set_status(f"Открываю «{mix_label}» подключённого аккаунта YouTube Music…", "youtube")
         worker.start()
 
     def _fresh_supermix_tracks(self, tracks, seen=()):
@@ -11562,21 +11797,54 @@ class MusicPlayer(QMainWindow):
         if not result or not mix_id:
             self.on_supermix_error(worker, "My Supermix не вернул доступных песен. Попробуй ещё раз позже.")
             return
+        mix_key = str(metadata.get("mix_key") or getattr(self, "_active_youtube_mix_key", "supermix") or "supermix")
+        self._active_youtube_mix_key = mix_key
+        if not hasattr(self, "youtube_mix_catalog") or not isinstance(self.youtube_mix_catalog, dict):
+            self.youtube_mix_catalog = {}
+        if isinstance(metadata.get("catalog"), dict):
+            self.youtube_mix_catalog.update(metadata["catalog"])
         session = {"mix_id": mix_id, "seen": {self.youtube_video_id(t) for t in result},
                    "anchor": "", "waiting": False, "failures": 0}
-        self.supermix_cover_url = metadata.get("cover_url") or ""
-        self._start_music_queue(result, "youtube", f"My Supermix · {len(result)} треков · продолжение загружается автоматически.",
+        if mix_key != "supermix":
+            session["mix_key"] = mix_key
+        cover_url = str(metadata.get("cover_url") or "")
+        if mix_key == "supermix":
+            self.supermix_cover_url = cover_url
+        if not hasattr(self, "youtube_mix_covers") or not isinstance(self.youtube_mix_covers, dict):
+            self.youtube_mix_covers = {}
+        if cover_url:
+            self.youtube_mix_covers[mix_key] = cover_url
+        for cat_key, cat_info in self.youtube_mix_catalog.items():
+            if isinstance(cat_info, dict) and cat_info.get("cover_url"):
+                self.youtube_mix_covers[cat_key] = str(cat_info["cover_url"])
+                if cat_key == "supermix" and not self.supermix_cover_url:
+                    self.supermix_cover_url = str(cat_info["cover_url"])
+        titles = {k: title for k, title, _, _, _ in self.YOUTUBE_EXTRA_MIX_SPECS}
+        mix_label = "My Supermix" if mix_key == "supermix" else titles.get(mix_key, metadata.get("mix_title") or "Микс YouTube Music")
+        self._start_music_queue(result, "youtube", f"{mix_label} · {len(result)} треков · продолжение загружается автоматически.",
                                 recommendations=True, supermix_session=session)
         self._update_supermix_cover()
+        self._update_youtube_mix_covers()
 
     def _update_supermix_cover(self):
         if self.supermix_cover_url:
             for card in self.start_cards:
                 if card.title == "Супермикс":
                     self.request_card_cover(self.supermix_cover_url, card)
-            for item in getattr(self, "sidebar_library_items", []):
-                if getattr(item, "track_key", "") == "__supermix__":
-                    self.request_image(self.supermix_cover_url, item.cover_label)
+
+    def _update_youtube_mix_covers(self):
+        covers = getattr(self, "youtube_mix_covers", {}) or {}
+        catalog = getattr(self, "youtube_mix_catalog", {}) or {}
+        for card in getattr(self, "youtube_mix_cards", []):
+            key = getattr(card, "artwork_style", "")
+            url = covers.get(key) or (catalog.get(key) or {}).get("cover_url") or ""
+            if url:
+                self.request_card_cover(url, card)
+            cat_desc = str((catalog.get(key) or {}).get("description") or "").strip()
+            if cat_desc and card.subtitle != cat_desc:
+                card.subtitle = cat_desc
+                card.setToolTip(f"{card.title} — {cat_desc}")
+                card.update()
 
     def on_supermix_error(self, worker, message):
         if worker is not self.supermix_worker or self._force_exit:
@@ -13630,8 +13898,6 @@ class MusicPlayer(QMainWindow):
         supermix_item = SidebarMediaItem("Супермикс", "Микс • YouTube Music", "supermix", self.sidebar_library_widget)
         supermix_item.track_key = "__supermix__"
         supermix_item.clicked.connect(lambda checked=False: self.toggle_supermix())
-        if getattr(self, "supermix_cover_url", ""):
-            self.request_image(self.supermix_cover_url, supermix_item.cover_label)
         self.sidebar_library_layout.addWidget(supermix_item)
         self.sidebar_library_items.append(supermix_item)
 
@@ -13640,6 +13906,14 @@ class MusicPlayer(QMainWindow):
         shuffle_item.clicked.connect(lambda checked=False, src=source: self.play_personal_mix(src))
         self.sidebar_library_layout.addWidget(shuffle_item)
         self.sidebar_library_items.append(shuffle_item)
+
+        for mix_key, mix_title, mix_sub, _, _ in self.YOUTUBE_EXTRA_MIX_SPECS:
+            short_sub = mix_sub.split("•")[0].strip() + " • YouTube"
+            ym_item = SidebarMediaItem(mix_title, short_sub, mix_key, self.sidebar_library_widget)
+            ym_item.track_key = f"__ytmix__|{mix_key}"
+            ym_item.clicked.connect(lambda checked=False, mk=mix_key: self.toggle_youtube_mix(mk))
+            self.sidebar_library_layout.addWidget(ym_item)
+            self.sidebar_library_items.append(ym_item)
 
         # Папки пользовательских плейлистов и вложенные в них плейлисты
         all_folders = list(getattr(self, "user_playlist_folders", []))
@@ -13696,12 +13970,18 @@ class MusicPlayer(QMainWindow):
         self._sync_sidebar_playing_state()
 
     def _sync_sidebar_playing_state(self):
-        supermix_active = bool(getattr(self, "supermix_session", None) is not None and getattr(self, "queue_mode", "") == "supermix")
+        session = getattr(self, "supermix_session", None)
+        supermix_active = bool(session is not None and getattr(self, "queue_mode", "") == "supermix")
+        active_mix_key = (session.get("mix_key") or "supermix") if isinstance(session, dict) else "supermix"
         q_mode = str(getattr(self, "queue_mode", "") or "")
         active_pid = str(getattr(self, "active_user_playlist_id", "") or "")
         for item in getattr(self, "sidebar_library_items", []):
             if item.track_key == "__supermix__":
-                item.set_playing(supermix_active)
+                item.set_playing(supermix_active and active_mix_key == "supermix")
+                item.set_active_selected(False)
+            elif item.track_key.startswith("__ytmix__|"):
+                mk = item.track_key.split("|", 1)[1]
+                item.set_playing(supermix_active and active_mix_key == mk)
                 item.set_active_selected(False)
             elif item.track_key.startswith("user_playlist|"):
                 pid = item.track_key.split("|", 1)[1]
@@ -13720,7 +14000,11 @@ class MusicPlayer(QMainWindow):
         for card in self.start_cards:
             card.hide()
             card.deleteLater()
+        for card in getattr(self, "youtube_mix_cards", []):
+            card.hide()
+            card.deleteLater()
         self.start_cards = []
+        self.youtube_mix_cards = []
         source = self.current_source if self.current_source in ("youtube", "soundcloud") else "youtube"
         self._add_likes_start_card(source)
         if source == "youtube":
@@ -13736,8 +14020,16 @@ class MusicPlayer(QMainWindow):
             )
             mix.clicked.connect(lambda checked=False, src=source: self.play_personal_mix(src))
             self.start_cards.append(mix)
+            for mix_key, mix_title, mix_sub, col_a, col_b in self.YOUTUBE_EXTRA_MIX_SPECS:
+                extra_card = SpotifyPlaylistCard(
+                    mix_title, mix_sub, "♫", col_a, col_b,
+                    self.home_tiles, artwork_style=mix_key, tile_mode=True
+                )
+                extra_card.clicked.connect(lambda checked=False, mk=mix_key: self.toggle_youtube_mix(mk))
+                self.youtube_mix_cards.append(extra_card)
             self._set_supermix_busy(self.supermix_worker is not None)
             self._update_supermix_cover()
+            self._update_youtube_mix_covers()
         self._home_layout_signature = None
         self.layout_home_tiles()
         self.refresh_recent_tracks()
@@ -13771,19 +14063,20 @@ class MusicPlayer(QMainWindow):
         width = max(180, self.start_cards_scroll.viewport().width())
         self.page_description.hide()
         columns = 3 if width >= 650 else 2 if width >= 360 else 1
-        horizontal = len(self.start_cards) == 1 and not self.start_cards[0].tile_mode
+        all_cards = list(self.start_cards) + list(getattr(self, "youtube_mix_cards", []))
+        horizontal = len(all_cards) == 1 and not all_cards[0].tile_mode
         if horizontal:
             columns = 1
         max_tile_w = 340 if columns == 3 else 224
         card_w = width - 2 if horizontal else min(max_tile_w, (width - (columns - 1) * 16 - 4) // columns)
         card_h = 148 if horizontal else min(224, card_w) + 52
-        signature = (columns, card_w, card_h, len(self.start_cards))
+        signature = (columns, card_w, card_h, len(all_cards))
         if signature == getattr(self, "_home_layout_signature", None):
             return
         self._home_layout_signature = signature
         while self.home_tiles_layout.count():
             self.home_tiles_layout.takeAt(0)
-        for index, card in enumerate(self.start_cards):
+        for index, card in enumerate(all_cards):
             card.setFixedSize(card_w, card_h)
             self.home_tiles_layout.addWidget(card, index // columns, index % columns,
                                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
