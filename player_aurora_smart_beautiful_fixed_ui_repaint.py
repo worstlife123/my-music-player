@@ -4965,6 +4965,9 @@ class LikesCollageCover(QWidget):
             self._covers = valid
             self.update()
 
+    def set_pixmaps(self, pixmaps):
+        self.set_covers(pixmaps)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -5067,10 +5070,26 @@ class ExpandedArtwork(QLabel):
             self._vinyl_angle = (self._vinyl_angle + 1.65) % 360.0
             self.update()
 
+    def sync_vinyl_state(self):
+        if not self.isVisible():
+            self._vinyl_timer.stop()
+            return
+        win = self.window()
+        playing = bool(
+            win is not None
+            and hasattr(win, "player")
+            and win.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        if playing and getattr(win, "vinyl_enabled", True):
+            if not self._vinyl_timer.isActive():
+                self._vinyl_timer.start()
+        else:
+            self._vinyl_timer.stop()
+        self.update()
+
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._vinyl_timer.isActive():
-            self._vinyl_timer.start()
+        self.sync_vinyl_state()
 
     def hideEvent(self, event):
         self._vinyl_timer.stop()
@@ -17095,13 +17114,13 @@ class MusicPlayer(QMainWindow):
             if not u or u in urls:
                 continue
             urls.append(u)
-            cached = self.pixmap_cache.get(u)
+            cached = self.pixmap_cache.get(u) or self.thumbnail_cache.get(u)
             if cached is not None and not cached.isNull():
                 pixmaps.append(cached)
             if len(pixmaps) >= 4:
                 break
         self._likes_collage_urls = tuple(urls[:4])
-        self.likes_collage_cover.set_pixmaps(pixmaps)
+        self.likes_collage_cover.set_covers(pixmaps)
 
     def play_active_likes_tab(self, shuffle=False):
         idx = self.likes_tabs.currentIndex() if hasattr(self, "likes_tabs") else 0
