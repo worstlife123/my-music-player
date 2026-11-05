@@ -11143,7 +11143,7 @@ class MusicPlayer(QMainWindow):
         if is_cover:
             if isinstance(stack_layout, QStackedLayout):
                 stack_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
-            for candidate in (self.browse_page, self.likes_page):
+            for candidate in (self.browse_page, self.likes_page, getattr(self, "playlist_page", None)):
                 if candidate is not None:
                     candidate.setVisible(candidate is self._cover_return_page)
             self.view_stack.setCurrentWidget(page)
