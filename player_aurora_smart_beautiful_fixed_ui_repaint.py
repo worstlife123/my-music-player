@@ -2175,7 +2175,11 @@ class SearchWorker(QThread):
             duration = raw_duration / 1000.0 if raw_duration > 1000 else raw_duration
         except (TypeError, ValueError):
             duration = 0.0
+        media = item.get("media") if isinstance(item.get("media"), dict) else None
+        transcodings = media.get("transcodings") if media and isinstance(media.get("transcodings"), list) else None
         return {
+            "_type": "url",
+            "ie_key": "Soundcloud",
             "id": track_id,
             "title": str(item.get("title") or "Без названия").strip(),
             "url": permalink_url,
@@ -2197,6 +2201,8 @@ class SearchWorker(QThread):
             "playback_count": item.get("playback_count"),
             "created_at": item.get("created_at"),
             "timestamp": item.get("timestamp"),
+            "media": media,
+            "transcodings": transcodings,
         }
 
     def _configure_fast_soundcloud_ydl(self, ydl):
@@ -2257,30 +2263,46 @@ class SearchWorker(QThread):
             if hasattr(ie, "_extract_info_dict"):
                 orig_extract_info_dict = ie._extract_info_dict
 
-                def fast_extract_info_dict(info, full_title=None, secret_token=None):
+                def fast_extract_info_dict(info, full_title=None, quiet=False, secret_token=None, *args, **kwargs):
                     remember_item(info)
                     converted = self._soundcloud_item_to_entry(info)
                     if converted:
                         return converted
-                    return orig_extract_info_dict(info, full_title=full_title, secret_token=secret_token)
+                    try:
+                        return orig_extract_info_dict(
+                            info, full_title=full_title, quiet=quiet,
+                            secret_token=secret_token, *args, **kwargs
+                        )
+                    except TypeError:
+                        return orig_extract_info_dict(info, full_title=full_title, secret_token=secret_token)
 
                 ie._extract_info_dict = fast_extract_info_dict
 
             orig_url_result = ie.url_result
 
             def fast_url_result(url, *args, **kwargs):
+                if isinstance(url, dict):
+                    remember_item(url)
+                    converted = self._soundcloud_item_to_entry(url)
+                    if converted:
+                        return converted
                 result = orig_url_result(url, *args, **kwargs)
                 if not isinstance(result, dict):
                     return result
-                url_str = str(url or "")
+                url_str = str(url or result.get("url") or "")
                 matched = item_by_url.get(url_str) or item_by_url.get(url_str.rstrip("/"))
                 if not matched:
-                    tail_match = re.search(r"/tracks/(?:soundcloud:tracks:)?(\d+)", url_str)
+                    tail_match = re.search(r"(?:/tracks/(?:soundcloud:tracks:)?|soundcloud:tracks:)(\d+)", url_str)
                     if tail_match:
                         matched = item_by_id.get(tail_match.group(1))
+                if not matched:
+                    cand_id = str(kwargs.get("id") or kwargs.get("video_id") or result.get("id") or "")
+                    if cand_id:
+                        matched = item_by_id.get(cand_id)
                 if matched:
                     enriched = dict(result)
                     enriched.update(matched)
+                    enriched["_type"] = "url"
                     return enriched
                 return result
 
@@ -2297,13 +2319,147 @@ class SearchWorker(QThread):
 
         ydl.get_info_extractor = fast_get_info_extractor
 
+    def _fetch_soundcloud_direct_api(self, limit):
+        """Прямой быстрый запрос к SoundCloud API v2 на случай, если экстрактор yt-dlp вернул пустой список."""
+        if not self.query or self.direct_url or requests is None:
+            return []
+        try:
+            from yt_dlp.extractor import soundcloud as sc_mod
+            sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+        except Exception:
+            sc_ie_cls = None
+
+        client_id = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID or (
+            getattr(sc_ie_cls, "_CLIENT_ID", None) if sc_ie_cls is not None else None
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://soundcloud.com/",
+            "Origin": "https://soundcloud.com",
+        }
+        session = _create_keepalive_stream_session(prefer_ipv4=False)
+        if session is None:
+            return []
+        try:
+            if not client_id:
+                home_resp = session.get("https://soundcloud.com/", headers=headers, timeout=(3.5, 5.0))
+                if home_resp.status_code == 200:
+                    scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', home_resp.text)
+                    for script_url in reversed(scripts[-4:]):
+                        if self._cancel_requested:
+                            return []
+                        js_resp = session.get(script_url, headers=headers, timeout=(3.0, 4.5))
+                        if js_resp.status_code == 200:
+                            m = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', js_resp.text)
+                            if m:
+                                client_id = m.group(1)
+                                SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
+                                if sc_ie_cls is not None:
+                                    sc_ie_cls._CLIENT_ID = client_id
+                                break
+            if not client_id:
+                return []
+
+            for attempt in range(2):
+                api_url = (
+                    f"https://api-v2.soundcloud.com/search/tracks"
+                    f"?q={quote_plus(self.query)}&client_id={client_id}"
+                    f"&limit={max(1, min(int(limit), 50))}&offset=0"
+                )
+                resp = session.get(api_url, headers=headers, timeout=(4.0, 5.5))
+                if resp.status_code in (401, 403) and attempt == 0:
+                    SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = None
+                    client_id = None
+                    home_resp = session.get("https://soundcloud.com/", headers=headers, timeout=(3.5, 5.0))
+                    if home_resp.status_code == 200:
+                        scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', home_resp.text)
+                        for script_url in reversed(scripts[-4:]):
+                            js_resp = session.get(script_url, headers=headers, timeout=(3.0, 4.5))
+                            if js_resp.status_code == 200:
+                                m = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', js_resp.text)
+                                if m:
+                                    client_id = m.group(1)
+                                    SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
+                                    break
+                    if not client_id:
+                        break
+                    continue
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    collection = payload.get("collection") if isinstance(payload, dict) else None
+                    if isinstance(collection, list):
+                        entries = []
+                        for item in collection:
+                            converted = self._soundcloud_item_to_entry(item)
+                            if converted:
+                                entries.append(converted)
+                        return entries
+                break
+        except Exception:
+            pass
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+        return []
+
+    def _configure_fast_youtube_ydl(self, ydl, emit_progress, limit, progress_state):
+        """Отправляет первые результаты поиска YouTube сразу после первой страницы (~0.4 с), не дожидаясь загрузки всех страниц continuation."""
+        if self.source != "youtube" or not type(ydl).__module__.startswith("yt_dlp"):
+            return
+        preview_tracks = []
+        preview_visited = set()
+        threshold = min(8, max(1, int(limit) - 1))
+
+        def wrap_yt_extractor(ie):
+            if getattr(ie, "_aurora_yt_fast_wrapped", False):
+                return ie
+            ie._aurora_yt_fast_wrapped = True
+            orig_url_result = ie.url_result
+
+            def fast_yt_url_result(url, *args, **kwargs):
+                if self._cancel_requested:
+                    raise RuntimeError("Поиск заменён новым запросом.")
+                res = orig_url_result(url, *args, **kwargs)
+                if emit_progress and not progress_state.get("sent") and isinstance(res, dict) and threshold > 0:
+                    track = self._make_track(res, preview_visited)
+                    if track and (not self.artist_filter or self._matches_artist_filter(track)):
+                        preview_tracks.append(track)
+                        if len(preview_tracks) >= threshold and int(limit) > threshold:
+                            progress_state["sent"] = True
+                            logging.getLogger("aurora").info(
+                                "Первые результаты (ранний поток): source=%s; count=%d; seconds=%.1f",
+                                self.source, len(preview_tracks),
+                                time.perf_counter() - getattr(self, "_search_started_at", time.perf_counter()),
+                            )
+                            self.results_ready.emit(
+                                [dict(item) for item in preview_tracks],
+                                f"Первые {len(preview_tracks)} результатов готовы; загружаю остальные…",
+                            )
+                return res
+
+            ie.url_result = fast_yt_url_result
+            return ie
+
+        orig_get_info_extractor = ydl.get_info_extractor
+
+        def fast_get_info_extractor(ie_key):
+            ie = orig_get_info_extractor(ie_key)
+            if isinstance(ie_key, str) and "youtube" in ie_key.casefold():
+                return wrap_yt_extractor(ie)
+            return ie
+
+        ydl.get_info_extractor = fast_get_info_extractor
+
     def _fetch(self, limit, mode="in_playlist", emit_progress=False, force_search=False, playlist_start=1):
         # Один сетевой запрос вместо отдельного запроса на 12 результатов и
         # повторного запроса на 25/50/100. Плоская выдача не открывает каждое видео.
         extract_flat_mode = mode
-        if self.source == "soundcloud" and not self.paginate_all and not self.direct_url:
-            # Обычному поиску SoundCloud достаточно плоской выдачи без структуры плейлиста.
-            extract_flat_mode = True
         options = {
             **yt_dlp_tls_options(),
             "quiet": True,
@@ -2342,11 +2498,17 @@ class SearchWorker(QThread):
                 auth_options["cookiesfrombrowser"] = parse_cookies_from_browser(self.cookies_from_browser)
         options.update(auth_options)
 
+        progress_state = {"sent": False}
+        is_real_ydl = False
         try:
             with YoutubeDL(options) as ydl:
+                is_real_ydl = type(ydl).__module__.startswith("yt_dlp")
                 self._configure_fast_soundcloud_ydl(ydl)
+                self._configure_fast_youtube_ydl(ydl, emit_progress, limit, progress_state)
                 data = ydl.extract_info(target, download=False)
         except Exception as error:
+            if self._cancel_requested:
+                return [], "Поиск заменён новым запросом."
             error_text = str(error).casefold()
             cookie_load_failed = (
                 "failed to load cookies" in error_text
@@ -2373,20 +2535,35 @@ class SearchWorker(QThread):
                     f"Подробности: {str(error).replace(chr(10), ' ')[:260]}"
                 ) from error
             if not (auth_options and cookie_load_failed and not is_youtube_likes):
-                raise
-            fallback_options = dict(options)
-            fallback_options.pop("cookiefile", None)
-            fallback_options.pop("cookiesfrombrowser", None)
-            with YoutubeDL(fallback_options) as ydl:
-                self._configure_fast_soundcloud_ydl(ydl)
-                data = ydl.extract_info(target, download=False)
+                if self.source == "soundcloud" and not self.direct_url and is_real_ydl:
+                    direct_entries = self._fetch_soundcloud_direct_api(limit)
+                    if direct_entries:
+                        data = {"entries": direct_entries}
+                    else:
+                        raise
+                else:
+                    raise
+            else:
+                fallback_options = dict(options)
+                fallback_options.pop("cookiefile", None)
+                fallback_options.pop("cookiesfrombrowser", None)
+                with YoutubeDL(fallback_options) as ydl:
+                    self._configure_fast_soundcloud_ydl(ydl)
+                    self._configure_fast_youtube_ydl(ydl, emit_progress, limit, progress_state)
+                    data = ydl.extract_info(target, download=False)
+
+        if (self.source == "soundcloud" and not self.direct_url and is_real_ydl
+                and (not isinstance(data, dict) or not data.get("entries"))):
+            direct_entries = self._fetch_soundcloud_direct_api(limit)
+            if direct_entries:
+                data = {"entries": direct_entries}
 
         if not isinstance(data, dict) or data.get("entries") is None:
             return [], "Источник не вернул список результатов."
 
         tracks, visited = [], set()
         filtered_out = 0
-        progress_sent = False
+        progress_sent = bool(progress_state.get("sent"))
         progress_threshold = min(3 if self.source == "soundcloud" else 8, max(1, int(limit)))
         for entry in data.get("entries") or []:
             if self._cancel_requested:
@@ -2408,6 +2585,13 @@ class SearchWorker(QThread):
                         [dict(item) for item in tracks],
                         f"Первые {len(tracks)} результатов готовы; загружаю остальные…"
                     )
+        if not tracks and self.source == "soundcloud" and not self.direct_url and is_real_ydl and not self._cancel_requested:
+            for entry in self._fetch_soundcloud_direct_api(limit):
+                track = self._make_track(entry, visited)
+                if track:
+                    if self.artist_filter and not self._matches_artist_filter(track):
+                        continue
+                    tracks.append(track)
         sorted_tracks, sort_note = self._sort_tracks(tracks)
         if self.artist_filter and filtered_out:
             filter_note = f"Профиль «{self.artist_filter}»: исключено {filtered_out} результатов, не совпавших с исполнителем."
@@ -3662,11 +3846,11 @@ def _create_keepalive_stream_session(prefer_ipv4=False):
 
 
 class BufferedStreamEntry:
-    """Потоковый буфер аудио (256 КБ на блок) с непрерывной загрузкой в ОЗУ без параллельных Range-запросов, вызывающих 403."""
-    BLOCK_SIZE = 256 * 1024
-    STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+    """Потоковый буфер аудио (64 КБ на блок) с непрерывной загрузкой в ОЗУ без параллельных Range-запросов, вызывающих 403."""
+    BLOCK_SIZE = 64 * 1024
+    STREAM_CHUNK_BYTES = 512 * 1024
     READAHEAD_BLOCKS = 64
-    MAX_CACHED_BLOCKS = 256
+    MAX_CACHED_BLOCKS = 1024
     MAX_HLS_BYTES = 50 * 1024 * 1024
 
     def __init__(self, remote_url, headers=None, content_type="audio/mp4", protocol="https",
@@ -3859,8 +4043,10 @@ class BufferedStreamEntry:
             out = f"{out}&range={start_byte}-{end_byte}"
         return out
 
-    def _stream_span_into_blocks(self, start_block_idx, num_blocks_to_read=16, opener=None):
-        """Скачивает непрерывный сегмент (до 4 МБ за один HTTP-запрос) и нарезает его на блоки по 256 КБ."""
+    def _stream_span_into_blocks(self, start_block_idx, num_blocks_to_read=8, opener=None, dedicated_session=False):
+        """Скачивает непрерывный сегмент и нарезает его на блоки по 64 КБ."""
+        num_blocks_to_read = max(1, int(num_blocks_to_read))
+        span_indices = range(start_block_idx, start_block_idx + num_blocks_to_read)
         with self._cond:
             if self.closed:
                 return None
@@ -3870,16 +4056,18 @@ class BufferedStreamEntry:
             if self.total_size is not None and start_block_idx * self.BLOCK_SIZE >= self.total_size > 0:
                 return b""
             while start_block_idx in self._inflight and not self.closed:
-                self._cond.wait(timeout=0.15)
+                self._cond.wait(timeout=0.12)
                 if start_block_idx in self.blocks:
                     return self.blocks[start_block_idx]
             if self.closed:
                 return None
-            self._inflight.add(start_block_idx)
+            for idx in span_indices:
+                self._inflight.add(idx)
 
+        local_session = None
         try:
             start_byte = start_block_idx * self.BLOCK_SIZE
-            span_bytes = max(1, int(num_blocks_to_read)) * self.BLOCK_SIZE
+            span_bytes = num_blocks_to_read * self.BLOCK_SIZE
             end_byte = start_byte + span_bytes - 1
             if self.total_size is not None and self.total_size > 0:
                 if start_byte >= self.total_size:
@@ -3887,7 +4075,7 @@ class BufferedStreamEntry:
                 end_byte = min(end_byte, self.total_size - 1)
 
             last_err = ""
-            max_attempts = 2 if start_block_idx == 0 else 4
+            max_attempts = 3 if start_block_idx == 0 else 4
             for attempt in range(max_attempts):
                 if self.closed:
                     return None
@@ -3895,24 +4083,34 @@ class BufferedStreamEntry:
                 active_url = self.remote_url
                 if attempt >= 1 and self.backup_urls:
                     active_url = self.backup_urls[(attempt - 1) % len(self.backup_urls)]
-                if attempt < 2:
+                if attempt == 0:
                     target_url = active_url
                 else:
                     target_url = self._with_googlevideo_params(
                         active_url, start_byte, end_byte, self._req_number,
-                        use_query_range=True
+                        use_query_range=(attempt >= 1)
                     )
                 req_headers = dict(self.headers)
                 if "range=" not in target_url:
                     req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
 
                 try:
-                    # На attempt == 0 используем стандартный маршрут ОС/VPN, чтобы IP совпадал с подписью URL.
-                    # На attempt == 1 пробуем принудительный IPv4 (0.0.0.0) для обхода зависшего IPv6.
-                    session = self._get_session(
-                        reset=(attempt >= 1),
-                        prefer_ipv4=(attempt == 1)
-                    )
+                    # На attempt == 0 и attempt == 1 используем стандартный маршрут ОС/VPN, чтобы IP совпадал с подписью URL.
+                    # На attempt >= 2 пробуем принудительный IPv4 (0.0.0.0) для обхода зависшего IPv6.
+                    if dedicated_session:
+                        if local_session is not None:
+                            try:
+                                local_session.close()
+                            except Exception:
+                                pass
+                        is_local = self.remote_url.startswith(("http://127.0.0.1", "https://127.0.0.1", "http://localhost", "https://localhost"))
+                        local_session = _create_keepalive_stream_session(prefer_ipv4=(attempt >= 2 and not is_local))
+                        session = local_session
+                    else:
+                        session = self._get_session(
+                            reset=(attempt >= 1),
+                            prefer_ipv4=(attempt >= 2)
+                        )
                     if session is not None:
                         with session.get(target_url, headers=req_headers, stream=True, timeout=(3.0, 5.0)) as resp:
                             status = resp.status_code
@@ -3926,9 +4124,9 @@ class BufferedStreamEntry:
                             if status >= 400:
                                 last_err = f"HTTP {status}"
                                 if status in (401, 403) and start_block_idx == 0:
-                                    if not self.backup_urls or attempt >= 1:
+                                    if not self.backup_urls and attempt >= 1:
                                         break
-                                time.sleep(0.08)
+                                time.sleep(0.06)
                                 continue
 
                             ctype = resp.headers.get("Content-Type")
@@ -3952,7 +4150,7 @@ class BufferedStreamEntry:
                             skipped = 0
                             need_skip_initial = (status == 200 and start_byte > 0 and not content_range and "range=" not in target_url)
 
-                            for raw_chunk in resp.iter_content(chunk_size=65536):
+                            for raw_chunk in resp.iter_content(chunk_size=32768):
                                 if self.closed:
                                     break
                                 if not raw_chunk:
@@ -4010,7 +4208,7 @@ class BufferedStreamEntry:
                             cur_idx = start_block_idx
                             stored_any = False
                             while not self.closed and cur_idx < start_block_idx + num_blocks_to_read:
-                                chunk = uresp.read(65536)
+                                chunk = uresp.read(32768)
                                 if not chunk:
                                     break
                                 buf.extend(chunk)
@@ -4035,12 +4233,12 @@ class BufferedStreamEntry:
                             self._cond.notify_all()
                         return b""
                     if http_err.code in (401, 403) and start_block_idx == 0:
-                        if not self.backup_urls or attempt >= 1:
+                        if not self.backup_urls and attempt >= 1:
                             break
-                    time.sleep(0.08)
+                    time.sleep(0.06)
                 except Exception as err:
                     last_err = str(err)
-                    time.sleep(0.1)
+                    time.sleep(0.08)
 
             with self._cond:
                 self.last_error = last_err
@@ -4049,8 +4247,14 @@ class BufferedStreamEntry:
                 self._cond.notify_all()
             return None
         finally:
+            if local_session is not None:
+                try:
+                    local_session.close()
+                except Exception:
+                    pass
             with self._cond:
-                self._inflight.discard(start_block_idx)
+                for idx in span_indices:
+                    self._inflight.discard(idx)
                 self._cond.notify_all()
 
     def _fetch_block(self, block_idx, opener=None):
@@ -4080,23 +4284,24 @@ class BufferedStreamEntry:
 
         block_idx = position // self.BLOCK_SIZE
         offset_in_block = position % self.BLOCK_SIZE
-        # Сначала ждём до 1.8 с, если фоновый поток _download_worker уже качает этот блок в рамках 4 МБ чанка,
-        # чтобы не открывать второй параллельный сокет к googlevideo.com (что вызывает 403 Forbidden).
-        wait_deadline = time.monotonic() + 1.8
+        wait_deadline = time.monotonic() + 3.0
         with self._cond:
             is_tail_probe = (
                 self.total_size is not None
-                and self.total_size > self.BLOCK_SIZE * 3
+                and self.total_size > self.BLOCK_SIZE * 4
                 and position >= self.total_size - self.BLOCK_SIZE * 2
                 and 1 not in self.blocks
             )
             if not is_tail_probe:
                 self._cursor_block = block_idx
+            if block_idx not in self.blocks and block_idx not in self._inflight:
+                self._priority_block = block_idx
+                self._cond.notify_all()
             while block_idx not in self.blocks and not self.eof and not self.failed and not self.closed:
                 rem = wait_deadline - time.monotonic()
                 if rem <= 0:
                     break
-                self._cond.wait(timeout=min(0.1, rem))
+                self._cond.wait(timeout=min(0.08, rem))
             if block_idx in self.blocks:
                 self.blocks.move_to_end(block_idx)
                 block_data = self.blocks[block_idx]
@@ -4106,7 +4311,7 @@ class BufferedStreamEntry:
             self._priority_block = block_idx
             self._cond.notify_all()
 
-        block_data = self._stream_span_into_blocks(block_idx, num_blocks_to_read=4)
+        block_data = self._stream_span_into_blocks(block_idx, num_blocks_to_read=4, dedicated_session=True)
         if not block_data or offset_in_block >= len(block_data):
             return b""
         upper = min(len(block_data), offset_in_block + length)
@@ -4119,8 +4324,8 @@ class BufferedStreamEntry:
                 self._download_hls(opener)
                 return
 
-            # Скачиваем первые 16 блоков (4 МБ — обычно весь 3-минутный трек целиком!) одним запросом
-            first = self._stream_span_into_blocks(0, num_blocks_to_read=16, opener=opener)
+            # Сначала быстро скачиваем первые 4 блока (256 КБ) за ~100 мс, чтобы мгновенно отдать старт и обслужить probe конца файла от FFmpeg
+            first = self._stream_span_into_blocks(0, num_blocks_to_read=4, opener=opener)
             if not first:
                 with self._cond:
                     self.failed = True
@@ -4137,7 +4342,13 @@ class BufferedStreamEntry:
                     total = self.total_size
 
                 next_to_fetch = None
+                span_blocks = 8
                 if priority is not None:
+                    with self._cond:
+                        if priority not in self.blocks and priority not in self._inflight:
+                            if total is None or priority * self.BLOCK_SIZE < total:
+                                next_to_fetch = priority
+                                span_blocks = 4
                     with self._cond:
                         if priority not in self.blocks and priority not in self._inflight:
                             if total is None or priority * self.BLOCK_SIZE < total:
@@ -4163,7 +4374,7 @@ class BufferedStreamEntry:
                             break
 
                 if next_to_fetch is not None:
-                    data = self._stream_span_into_blocks(next_to_fetch, num_blocks_to_read=16, opener=opener)
+                    data = self._stream_span_into_blocks(next_to_fetch, num_blocks_to_read=span_blocks, opener=opener)
                     if data is None and self.closed:
                         break
                     if data == b"":
@@ -4350,7 +4561,7 @@ class LocalStreamProxy:
                         self.end_headers()
                         return
 
-                    if not entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.5):
+                    if not entry.wait_for_initial_bytes(min_bytes=8192, timeout=3.8):
                         self.send_response(502)
                         self.send_header("Content-Length", "0")
                         self.end_headers()
@@ -4724,7 +4935,7 @@ class StreamWorker(QThread):
             fragments=selected_info.get("fragments"),
             fragment_base_url=selected_info.get("fragment_base_url"),
         )
-        if proxy_entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.0):
+        if proxy_entry.wait_for_initial_bytes(min_bytes=8192, timeout=3.2):
             return proxy_entry.canonical_url(proxy_url), selected_info, remote_host
         proxy_entry.close()
 
@@ -4740,14 +4951,157 @@ class StreamWorker(QThread):
                 fragments=alt.get("fragments"),
                 fragment_base_url=alt.get("fragment_base_url"),
             )
-            if alt_entry.wait_for_initial_bytes(min_bytes=8192, timeout=1.8):
+            if alt_entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.5):
                 alt_host = QUrl(str(alt["url"])).host() or remote_host
                 return alt_entry.canonical_url(alt_proxy_url), alt, alt_host
             alt_entry.close()
         return None
 
+    def _resolve_fast_soundcloud_stream(self):
+        """Прямой запрос к SoundCloud API v2 медиа-потоку (разрешение за ~100–180 мс без yt-dlp)."""
+        if requests is None or not self._is_real_extract():
+            return None
+        url = str(self.track.get("url") or "")
+        is_sc = (
+            self.track.get("source") == "soundcloud"
+            or "soundcloud.com" in url.lower()
+        )
+        if not is_sc:
+            return None
+
+        client_id = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
+        session = _create_keepalive_stream_session(prefer_ipv4=False)
+        if session is None:
+            return None
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://soundcloud.com/",
+            "Origin": "https://soundcloud.com",
+        }
+        try:
+            if not client_id:
+                try:
+                    from yt_dlp.extractor import soundcloud as sc_mod
+                    sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+                    client_id = getattr(sc_ie_cls, "_CLIENT_ID", None) if sc_ie_cls else None
+                except Exception:
+                    pass
+            if not client_id:
+                home_resp = session.get("https://soundcloud.com/", headers=headers, timeout=(2.5, 3.5))
+                if home_resp.status_code == 200:
+                    scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', home_resp.text)
+                    for script_url in reversed(scripts[-4:]):
+                        if self._cancel_requested:
+                            return None
+                        js_resp = session.get(script_url, headers=headers, timeout=(2.0, 3.0))
+                        if js_resp.status_code == 200:
+                            m_id = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', js_resp.text)
+                            if m_id:
+                                client_id = m_id.group(1)
+                                SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
+                                break
+            if not client_id:
+                return None
+
+            transcodings = self.track.get("transcodings")
+            track_title = self.track.get("title") or "Трек"
+            track_duration = float(self.track.get("duration") or 0.0)
+
+            if not transcodings and url.startswith(("https://", "http://")):
+                resolve_url = f"https://api-v2.soundcloud.com/resolve?url={quote(url)}&client_id={client_id}"
+                resp = session.get(resolve_url, headers=headers, timeout=(3.0, 4.0))
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    if isinstance(payload, dict):
+                        if payload.get("title"):
+                            track_title = payload.get("title")
+                        raw_dur = payload.get("duration") or payload.get("full_duration")
+                        if raw_dur:
+                            track_duration = float(raw_dur) / 1000.0 if float(raw_dur) > 1000 else float(raw_dur)
+                        med = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+                        transcodings = med.get("transcodings") if isinstance(med.get("transcodings"), list) else None
+
+            if not transcodings or not isinstance(transcodings, list):
+                return None
+
+            chosen_tc = None
+            for tc in transcodings:
+                if not isinstance(tc, dict):
+                    continue
+                fmt = tc.get("format") or {}
+                proto = str(fmt.get("protocol") or "").lower()
+                if "progressive" in proto or "http" in proto:
+                    chosen_tc = tc
+                    break
+            if not chosen_tc:
+                for tc in transcodings:
+                    if isinstance(tc, dict) and tc.get("url"):
+                        chosen_tc = tc
+                        break
+            if not chosen_tc or not chosen_tc.get("url"):
+                return None
+
+            media_auth_url = chosen_tc["url"]
+            delim = "&" if "?" in media_auth_url else "?"
+            media_auth_url = f"{media_auth_url}{delim}client_id={client_id}"
+
+            m_resp = session.get(media_auth_url, headers=headers, timeout=(3.0, 4.0))
+            if m_resp.status_code != 200:
+                return None
+            m_data = m_resp.json()
+            stream_url = m_data.get("url") if isinstance(m_data, dict) else None
+            if not stream_url or not str(stream_url).startswith(("https://", "http://")):
+                return None
+
+            ext = "mp3" if "mp3" in str(chosen_tc.get("preset") or "").lower() else "m4a"
+            proto = (chosen_tc.get("format") or {}).get("protocol") or "https"
+            stream_headers = {
+                "User-Agent": headers["User-Agent"],
+                "Accept": "*/*",
+                "Referer": "https://soundcloud.com/",
+            }
+
+            proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
+                stream_url,
+                headers=stream_headers,
+                ext=ext,
+                protocol=proto,
+            )
+            if proxy_entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.2):
+                canonical_url = proxy_entry.canonical_url(proxy_url)
+                remote_host = QUrl(str(stream_url)).host() or "sndcdn.com"
+                return {
+                    "playback_url": canonical_url,
+                    "title": track_title,
+                    "duration": track_duration,
+                    "format_id": str(chosen_tc.get("preset") or "sc_api"),
+                    "protocol": proto,
+                    "remote_host": remote_host,
+                }
+            proxy_entry.close()
+        except Exception:
+            pass
+        return None
+
     def run(self):
         started = time.perf_counter()
+        if self._is_real_extract():
+            fast_sc = self._resolve_fast_soundcloud_stream()
+            if fast_sc and not self._cancel_requested:
+                self.metadata_ready.emit({
+                    "duration": fast_sc["duration"],
+                    "is_live": False,
+                    "format_id": fast_sc["format_id"],
+                    "protocol": fast_sc["protocol"],
+                    "hostname": fast_sc["remote_host"],
+                })
+                self.stream_ready.emit(fast_sc["playback_url"], fast_sc["title"], time.perf_counter() - started)
+                return
+
         format_options = {
             "auto": (
                 "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
@@ -4768,11 +5122,31 @@ class StreamWorker(QThread):
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
         }
-        selector = format_options.get(self.audio_quality, format_options["auto"])
-        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
-            # Try a different available encoding first; retain a fallback for single-format tracks.
-            alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in selector.split("/"))
-            selector = alternate + "/" + selector
+        is_yt = (
+            self.track.get("source") == "youtube"
+            or "youtube.com" in str(self.track.get("url") or "").lower()
+            or "youtu.be" in str(self.track.get("url") or "").lower()
+        )
+        if is_yt:
+            # Приоритет прямых высококачественных аудиоформатов YouTube (251: Opus 160k, 140: AAC 128k, 250: Opus 70k, 249: Opus 50k)
+            # Это мгновенно выбирает аудиопоток без сортировки и перебора сотен видеопотоков DASH.
+            if self.audio_quality == "high":
+                yt_selector = "bestaudio[format_id=251]/bestaudio[format_id=140]/bestaudio[ext=m4a]/bestaudio[abr>=160]/bestaudio/best"
+            elif self.audio_quality == "economy":
+                yt_selector = "bestaudio[format_id=250]/bestaudio[format_id=249]/bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio/best"
+            else:
+                yt_selector = "bestaudio[format_id=251]/bestaudio[format_id=140]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
+                alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in yt_selector.split("/"))
+                selector = alternate + "/" + yt_selector
+            else:
+                selector = yt_selector
+        else:
+            selector = format_options.get(self.audio_quality, format_options["auto"])
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
+                alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in selector.split("/"))
+                selector = alternate + "/" + selector
+
         options = {
             **yt_dlp_tls_options(),
             "format": selector,
@@ -4787,19 +5161,16 @@ class StreamWorker(QThread):
             "ignoreconfig": True,
             "no_color": True,
         }
-        is_yt = (
-            self.track.get("source") == "youtube"
-            or "youtube.com" in str(self.track.get("url") or "").lower()
-            or "youtu.be" in str(self.track.get("url") or "").lower()
-        )
         if self._is_real_extract() and is_yt:
-            # ВАЖНО: НЕ используем клиент "ios" без PO-Token (в 2025–2026 он всегда возвращает 403 Forbidden даже с VPN)
-            # и НЕ привязываем основной запрос к source_address="0.0.0.0", чтобы IP совпадал с маршрутом VPN/прокси.
+            # ВАЖНО: используем "android_vr" без "tv_embedded" (который блокируется лейблами SME/UMG на музыкальных треках)
+            # и пропускаем тяжелые DASH/HLS манифесты, так как форматы 251/140 уже есть в основном ответе.
             options["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["android_vr", "tv_embedded"],
+                    "player_client": ["android_vr"],
                 }
             }
+            options["youtube_include_dash_manifest"] = False
+            options["youtube_include_hls_manifest"] = False
         used_auth = False
         try:
             try:
@@ -4815,7 +5186,7 @@ class StreamWorker(QThread):
                     raise
                 retry_options = dict(options)
                 retry_options.pop("extractor_args", None)
-                if auth_options and self._auth_may_help(public_error):
+                if auth_options and (self._auth_may_help(public_error) or not can_retry_default):
                     retry_options.update(auth_options)
                     used_auth = True
                 try:
@@ -4869,11 +5240,9 @@ class StreamWorker(QThread):
                     and "sig=PRIVATE" not in str(stream_url)):
                 opened = self._try_open_proxy_stream(info)
                 if opened is None and is_yt and not self._cancel_requested:
-                    # Если первый профиль (android_vr/tv_embedded) вернул URL с 403 (например format=18 на музыкальном клипе),
-                    # пробуем стандартные клиенты yt-dlp и mweb/web_safari без прерывания.
                     fallback_profiles = [
                         {},
-                        {"extractor_args": {"youtube": {"player_client": ["mweb", "web_safari", "tv"]}}},
+                        {"extractor_args": {"youtube": {"player_client": ["mweb", "web_safari"]}}},
                     ]
                     if not used_auth:
                         auth_opts = self._auth_options()
@@ -5088,10 +5457,10 @@ class ClickableLabel(QLabel):
         # В компактном режиме (очередь / недавно слушал) поверх обложки уже рисуется CompactNowPlayingBadge
         if is_compact and (is_current or is_loading):
             return
-        # В обычных строках (поиск, лайки, плейлисты) справа уже есть кнопка Play,
-        # поэтому на обложке рисуем медальон только когда трек сейчас играет (эквалайзер).
+        # В обычных строках (поиск, лайки, плейлисты) слева уже есть индикатор/номер трека,
+        # а справа кнопка Play. На обложке не дублируем второй значок, оставляя только один чёткий индикатор.
         show_hover_play = bool(self._hover_overlay and is_compact)
-        if not show_hover_play and not (is_row and not is_compact and is_current):
+        if not show_hover_play:
             return
 
         painter = QPainter(self)
@@ -11376,9 +11745,10 @@ class MusicPlayer(QMainWindow):
         if is_cover:
             if isinstance(stack_layout, QStackedLayout):
                 stack_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
-            for candidate in (self.browse_page, self.likes_page, getattr(self, "playlist_page", None)):
+            for i in range(self.view_stack.count()):
+                candidate = self.view_stack.widget(i)
                 if candidate is not None:
-                    candidate.setVisible(candidate is self._cover_return_page)
+                    candidate.setVisible(candidate is self._cover_return_page or candidate is page)
             self.view_stack.setCurrentWidget(page)
             return
         if isinstance(stack_layout, QStackedLayout):
@@ -14436,6 +14806,36 @@ class MusicPlayer(QMainWindow):
                     and self.auto_play_generation == generation):
                 self.auto_play_generation = -1
                 QTimer.singleShot(0, lambda t=dict(tracks[0]): self.add_to_queue(t, True))
+            elif tracks and not self._force_exit and self.prefetch_worker is None:
+                QTimer.singleShot(350, lambda: self._warmup_first_search_result(tracks[0]))
+
+    def _warmup_first_search_result(self, track):
+        if self._force_exit or not isinstance(track, dict) or not track.get("url"):
+            return
+        if self.requested_track is not None or self.pending_slot is not None:
+            return
+        if self.prefetch_worker is not None:
+            return
+        key = self._key(track)
+        if not key or self.get_cached_stream(key) or self.prefetch_failed_until.get(key, 0) > time.monotonic():
+            return
+        auth_kwargs = (
+            self.youtube_auth_kwargs() if track.get("source") == "youtube"
+            else (self.soundcloud_auth_kwargs() if track.get("source") == "soundcloud" else {})
+        )
+        worker = StreamWorker(track, self, audio_quality=self.audio_quality, **auth_kwargs)
+        self.prefetch_worker = worker
+        self.prefetch_target = key
+        worker.metadata_ready.connect(
+            lambda data, k=key, w=worker: self.accept_stream_metadata(k, data) if not w._cancel_requested else None
+        )
+        worker.stream_ready.connect(
+            lambda stream, title, elapsed, k=key: self.prefetch_ready(k, stream, title, elapsed)
+        )
+        worker.failed.connect(lambda error, k=key: self.prefetch_failed(k, error))
+        worker.finished.connect(self.prefetch_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     @staticmethod
     def detect_artist_profile(query, tracks):
@@ -17725,9 +18125,10 @@ class MusicPlayer(QMainWindow):
         self.fade_timer.stop()
         if self.fade_old_slot is not None:
             old = self.fade_old_slot
-            self.players[old].stop()
             self.audio_outputs[old].setVolume(0.0)
-            self.players[old].setSource(QUrl())
+            with QSignalBlocker(self.players[old]):
+                self.players[old].stop()
+                self.players[old].setSource(QUrl())
             self.fade_old_slot = None
         self.fade_started_at = None
         self.audio_outputs[self.active_slot].setVolume(self.volume)
@@ -17769,9 +18170,10 @@ class MusicPlayer(QMainWindow):
             slot = self.pending_slot
             self.pending_slot = None
             self.pending_media_url = None
-            self.players[slot].stop()
-            self.players[slot].setSource(QUrl())
             self.audio_outputs[slot].setVolume(0.0)
+            with QSignalBlocker(self.players[slot]):
+                self.players[slot].stop()
+                self.players[slot].setSource(QUrl())
             self.standby_key = None
             self.standby_ready = False
         self._clear_loading_indicators()
@@ -17889,14 +18291,18 @@ class MusicPlayer(QMainWindow):
     def start_stream_extraction(self, track):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
         key = self._key(track)
+        if self.prefetch_worker is not None and self.prefetch_target != key:
+            self.prefetch_worker.cancel()
         if self.stream_worker is not None:
             if self.stream_target == key and not self.stream_worker._cancel_requested:
                 self.set_status("Аудиоссылка для выбранного трека уже запрашивается…")
                 return
             self.stream_worker.cancel()
+            self.stream_worker = None
+            self.stream_target = None
         # One cancelled request may finish in the background while the latest
         # selection starts immediately. Rapid clicks cannot spawn unlimited threads.
-        if len(self._stream_workers) >= 2:
+        if len(self._stream_workers) >= 3:
             self.stream_pending_track = dict(track)
             self.set_status("Готовлю последний выбранный трек…")
             return
@@ -17949,6 +18355,8 @@ class MusicPlayer(QMainWindow):
             self.set_status("В выбранном треке нет ссылки.")
             self.requested_track = None
             return
+        if self.prefetch_worker is not None and self.prefetch_target != key:
+            self.prefetch_worker.cancel()
 
         offline_path = self.offline_path_for(track)
         if offline_path:
@@ -18124,11 +18532,12 @@ class MusicPlayer(QMainWindow):
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url or self._network_recovery is not None:
-            player.stop()
             self.standby_key = None
             self.standby_ready = False
-            if self._network_recovery is not None:
-                player.setSource(QUrl())
+            with QSignalBlocker(player):
+                player.stop()
+                if not player.source().isEmpty():
+                    player.setSource(QUrl())
             player.setSource(media_url)
         # Запускаем сразу, не ожидая LoadedMedia; звук переключится по движению позиции.
         if self.pending_slot != slot or self.requested_track is None:
@@ -18491,9 +18900,10 @@ class MusicPlayer(QMainWindow):
         self.fade_started_at = None
         if self.fade_old_slot is None:
             self.fade_timer.stop()
-            self.players[old].stop()
             self.audio_outputs[old].setVolume(0.0)
-            self.players[old].setSource(QUrl())
+            with QSignalBlocker(self.players[old]):
+                self.players[old].stop()
+                self.players[old].setSource(QUrl())
             self.audio_outputs[new].setVolume(self.volume)
         else:
             self.fade_active_duration_ms = self.fade_duration_ms
@@ -18518,9 +18928,10 @@ class MusicPlayer(QMainWindow):
             self.fade_old_slot = None
             self.fade_started_at = None
             self.fade_timer.stop()
-            self.players[old].stop()
-            self.players[old].setSource(QUrl())
             self.audio_outputs[old].setVolume(0.0)
+            with QSignalBlocker(self.players[old]):
+                self.players[old].stop()
+                self.players[old].setSource(QUrl())
             # Когда бывший основной плеер освободился — предзагрузим следующую.
             QTimer.singleShot(0, self.prepare_next_track)
 
