@@ -4856,24 +4856,10 @@ class StreamWorker(QThread):
                 inject_into_dict(fmt)
 
     def _extract(self, options):
-        acquired = self._SHARED_YDL_LOCK.acquire(blocking=False)
-        ydl = None
-        should_close = False
-        try:
-            if acquired:
-                if self._SHARED_YDL is None:
-                    try:
-                        self._SHARED_YDL = YoutubeDL(options)
-                    except Exception:
-                        pass
-                if self._SHARED_YDL is not None:
-                    ydl = self._SHARED_YDL
-                    ydl.params.clear()
-                    ydl.params.update(options)
-            if ydl is None:
-                ydl = YoutubeDL(options)
-                should_close = True
-
+        # YoutubeDL initializes required defaults and caches cookies/extractors.
+        # Keep that state local to this request; clearing params breaks defaults
+        # such as http_headers and reusing a client can retain another login.
+        with YoutubeDL(dict(options)) as ydl:
             if type(ydl).__module__.startswith("yt_dlp"):
                 try:
                     from yt_dlp.extractor import soundcloud as sc_mod
@@ -4897,14 +4883,6 @@ class StreamWorker(QThread):
                 except Exception:
                     pass
             return info
-        finally:
-            if acquired:
-                self._SHARED_YDL_LOCK.release()
-            elif ydl is not None and should_close:
-                try:
-                    ydl.close()
-                except Exception:
-                    pass
 
     def _download_stream_via_ytdlp(self, base_options, auth_options=None):
         """Прямая загрузка аудио силами самого yt-dlp в локальный кэш (точно как в DownloadWorker)."""
