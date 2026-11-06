@@ -13,7 +13,11 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -26,23 +30,27 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
           architecture: x64
 
-      - name: Read APP_VERSION from source
+      - name: Set a unique release version
         id: version
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_RUN_NUMBER: ${{ github.run_number }}
         shell: pwsh
         run: |
-          $ver = python -c "import re, pathlib; m = re.search(r'APP_VERSION\s*=\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]', pathlib.Path('player_aurora_smart_beautiful_fixed_ui_repaint.py').read_text(encoding='utf-8')); print(m.group(1) if m else '0.2.0')"
-          $ver = $ver.Trim()
-          "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Detected APP_VERSION: $ver"
+          python tools/prepare_release.py
+          if ($LASTEXITCODE -ne 0) { throw 'Release version preparation failed' }
 
       - name: Install Python and build dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
+          python -m pip install --upgrade pip -r .github/windows-requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'Failed to install Python dependencies' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Incompatible Python dependencies' }
           if (Test-Path "tools/generate_app_icon.py") {
             python tools/generate_app_icon.py
             if ($LASTEXITCODE -ne 0) { throw 'Failed to generate application icon' }
@@ -144,6 +152,12 @@ jobs:
           if (-not (Test-Path .\dist\AuroraMusicPlayer.exe)) {
             throw 'Single-file AuroraMusicPlayer.exe was not produced'
           }
+          $player = Start-Process -FilePath .\dist\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $player.WaitForExit(60000)) {
+            Stop-Process -Id $player.Id -Force
+            throw 'Single-file player smoke test timed out'
+          }
+          if ($player.ExitCode -ne 0) { throw "Single-file smoke test failed: $($player.ExitCode)" }
           $exeHash = (Get-FileHash .\dist\AuroraMusicPlayer.exe -Algorithm SHA256).Hash.ToLower()
           "$exeHash  AuroraMusicPlayer.exe" | Set-Content .\dist\AuroraMusicPlayer.exe.sha256.txt -Encoding ascii
 
@@ -159,7 +173,9 @@ jobs:
           retention-days: 30
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish_release)
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -171,27 +187,28 @@ jobs:
           name: AuroraMusicPlayer-windows-x64
           path: dist
       - name: Publish tested Windows EXE and portable ZIP to GitHub Releases
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           APP_VERSION: ${{ needs.build.outputs.app_version }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG_NAME="$GITHUB_REF_NAME"
-          else
-            TAG_NAME="v${APP_VERSION#v}"
-          fi
-          echo "Publishing release for tag: $TAG_NAME"
+          set -euo pipefail
+          TAG_NAME="v${APP_VERSION#v}"
           ASSETS=(
             dist/AuroraMusicPlayer.exe
             dist/AuroraMusicPlayer.exe.sha256.txt
             dist/AuroraMusicPlayer-windows-x64.zip
             dist/AuroraMusicPlayer-windows-x64.zip.sha256.txt
           )
+          (cd dist && sha256sum --check AuroraMusicPlayer.exe.sha256.txt AuroraMusicPlayer-windows-x64.zip.sha256.txt)
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "${ASSETS[@]}" --clobber
+            if [[ "$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)" != true ]]; then
+              echo "Release $TAG_NAME is already published; its files are unchanged."
+              exit 0
+            fi
           else
-            gh release create "$TAG_NAME" "${ASSETS[@]}" --target "$GITHUB_SHA" --generate-notes --title "Aurora Music Player $TAG_NAME"
+            gh release create "$TAG_NAME" --draft --target "$GITHUB_SHA" --generate-notes --title "Aurora Music Player $TAG_NAME"
           fi
+          gh release upload "$TAG_NAME" "${ASSETS[@]}" --clobber
+          gh release edit "$TAG_NAME" --draft=false --latest

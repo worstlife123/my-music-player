@@ -105,7 +105,7 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 GITHUB_REPO = "worstlife123/my-music-player"
 
 
@@ -3565,7 +3565,6 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
 
     @classmethod
     def _find_supermix(cls, shelves):
-        supermix_candidates = []
         for shelf in shelves or []:
             if not isinstance(shelf, dict):
                 continue
@@ -3573,17 +3572,12 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                 if not isinstance(item, dict):
                     continue
                 pid = str(item.get("playlistId") or "").strip()
-                if not (pid.startswith(cls.MIX_ID_PREFIX) or pid.startswith(cls.ALT_MIX_PREFIX)):
+                if not pid.startswith(cls.MIX_ID_PREFIX):
                     continue
                 title = str(item.get("title") or "").strip().casefold()
                 if any(title == alias or alias in title for alias in ("my supermix", "мой супермикс", "супермикс", "supermix")):
                     return item
-                supermix_candidates.append(item)
-        for item in supermix_candidates:
-            pid = str(item.get("playlistId") or "").strip()
-            if pid.startswith(cls.MIX_ID_PREFIX):
-                return item
-        return supermix_candidates[0] if supermix_candidates else None
+        return None
 
     @classmethod
     def _discover_mix_catalog(cls, shelves):
@@ -3685,7 +3679,7 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                     remaining = deadline - time.monotonic()
                     if self._cancelled.is_set() or remaining <= 0:
                         raise TimeoutError("Супермикс: время ожидания истекло.")
-                    kwargs["timeout"] = (min(3.5, remaining), min(6.0, remaining))
+                    kwargs["timeout"] = (min(3.0, remaining), min(5.0, remaining))
                     return original_request(method, url, *args, **kwargs)
 
                 session.request = bounded_request
@@ -3703,7 +3697,7 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         except Exception:
                             playlist = None
                     if not playlist or not playlist.get("tracks"):
-                        shelves = client.get_home(limit=8)
+                        shelves = client.get_home(limit=20)
                         item = self._find_mix_for_key(shelves, self.mix_key)
                         if self._cancelled.is_set():
                             return
@@ -5433,7 +5427,7 @@ def _detect_github_repo(default_repo=GITHUB_REPO):
 
 
 class AppUpdateCheckerWorker(QThread):
-    """Проверяет наличие новой версии и готового .exe в GitHub Releases, ветке main и локальном git."""
+    """Для EXE предлагает только опубликованные сборки с контрольной суммой."""
     update_checked = pyqtSignal(dict)
 
     def __init__(self, repo=GITHUB_REPO, current_version=APP_VERSION, parent=None):
@@ -5491,20 +5485,38 @@ class AppUpdateCheckerWorker(QThread):
             "error": "",
         }
         last_err = ""
+        is_frozen = bool(getattr(sys, "frozen", False))
+        is_onedir = is_frozen and (Path(sys.executable).resolve().parent / "_internal").is_dir()
+
+        def usable_release(release):
+            if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+                return False
+            if not is_frozen:
+                return True
+            assets = {
+                str(asset.get("name") or "").lower(): asset.get("browser_download_url")
+                for asset in release.get("assets") or [] if isinstance(asset, dict)
+            }
+            exe_ready = assets.get("auroramusicplayer.exe") and assets.get("auroramusicplayer.exe.sha256.txt")
+            zip_ready = assets.get("auroramusicplayer-windows-x64.zip") and assets.get("auroramusicplayer-windows-x64.zip.sha256.txt")
+            return bool(exe_ready or (is_onedir and zip_ready))
+
         try:
             release_data = None
             try:
-                release_data = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases/latest")
+                latest = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases/latest")
+                result["ok"] = True
+                if usable_release(latest):
+                    release_data = latest
             except Exception as e1:
                 last_err = str(e1)
+            if release_data is None:
                 try:
                     all_releases = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases")
                     if isinstance(all_releases, list):
                         result["ok"] = True
-                        if all_releases:
-                            release_data = all_releases[0]
-                        else:
-                            result["no_releases_yet"] = True
+                        release_data = next((release for release in all_releases if usable_release(release)), None)
+                        result["no_releases_yet"] = release_data is None
                 except Exception as e2:
                     last_err = str(e2)
                     release_data = None
@@ -5536,29 +5548,26 @@ class AppUpdateCheckerWorker(QThread):
                         result["exe_url"] = dl_url
                     elif name == "auroramusicplayer.exe.sha256.txt":
                         result["exe_sha256_url"] = dl_url
-                    elif name.endswith(".exe") and not result["exe_url"]:
-                        result["exe_url"] = dl_url
                     elif name == "auroramusicplayer-windows-x64.zip":
                         result["zip_url"] = dl_url
                     elif name == "auroramusicplayer-windows-x64.zip.sha256.txt":
                         result["zip_sha256_url"] = dl_url
-                    elif name.endswith(".zip") and not result["zip_url"]:
-                        result["zip_url"] = dl_url
                 result["ok"] = True
 
-            # Дополнительно проверяем APP_VERSION в ветке main
-            try:
-                head_src = self._http_get_text(result["source_url"], max_bytes=4096, timeout=4.0)
-                m_ver = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', head_src)
-                if m_ver:
-                    src_ver = m_ver.group(1).strip()
-                    if _parse_version_tuple(src_ver) > _parse_version_tuple(best_version):
-                        best_version = src_ver
-                        result["tag_name"] = f"v{src_ver.lstrip('vV')}"
-                    result["ok"] = True
-            except Exception as e3:
-                if not last_err:
-                    last_err = str(e3)
+            # Исходник в main ещё не означает, что новая Windows-сборка готова.
+            if not is_frozen:
+                try:
+                    head_src = self._http_get_text(result["source_url"], max_bytes=8192, timeout=4.0)
+                    m_ver = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', head_src)
+                    if m_ver:
+                        src_ver = m_ver.group(1).strip()
+                        if _parse_version_tuple(src_ver) > _parse_version_tuple(best_version):
+                            best_version = src_ver
+                            result["tag_name"] = f"v{src_ver.lstrip('vV')}"
+                        result["ok"] = True
+                except Exception as e3:
+                    if not last_err:
+                        last_err = str(e3)
 
             # Если приложение запущено из git-репозитория (включая приватный репозиторий)
             app_root = Path(__file__).resolve().parent
@@ -5639,10 +5648,56 @@ class AppUpdateInstallerWorker(QThread):
                     else:
                         mb_done = downloaded / (1024 * 1024)
                         self.progress_changed.emit(50, f"{label}: {mb_done:.1f} МБ…")
+            if total and downloaded != total:
+                raise RuntimeError("Файл обновления скачан не полностью. Попробуйте ещё раз.")
 
-    def _verify_optional_sha256(self, file_path, sha_url):
+    def _write_windows_update_script(self, path, current_exe, payload, *, directory=False):
+        # A one-file build has a bootloader parent that may still lock the EXE
+        # after the Python process exits. Retry replacement before restarting.
+        literal = lambda value: str(value).replace("%", "%%")
+        current, source = literal(current_exe), literal(payload)
+        log = literal(path.parent / "update.log")
+        lines = [
+            "@echo off", "setlocal EnableExtensions DisableDelayedExpansion",
+            "chcp 65001 >nul", f'set "update_log={log}"',
+            'echo Installing Aurora update > "%update_log%"',
+        ]
+        if directory:
+            lines += [
+                "set /a wait_count=0", ":wait_loop",
+                f'tasklist /FI "PID eq {os.getpid()}" /NH 2>NUL | find "{os.getpid()}" >NUL',
+                "if errorlevel 1 goto apply_update",
+                "set /a wait_count+=1 >nul",
+                "if %wait_count% GEQ 120 goto failed",
+                "ping -n 2 127.0.0.1 >nul", "goto wait_loop",
+            ]
+        lines += [":apply_update", "set /a copy_count=0", ":copy_loop"]
+        if directory:
+            lines += [
+                f'robocopy "{source}" "{literal(current_exe.parent)}" /E /R:3 /W:1 /NFL /NDL /NJH /NJS /NP >> "%update_log%" 2>&1',
+                "if not errorlevel 8 goto restart",
+            ]
+        else:
+            lines += [
+                f'move /Y "{source}" "{current}" >> "%update_log%" 2>&1',
+                "if not errorlevel 1 goto restart",
+            ]
+        lines += [
+            "set /a copy_count+=1 >nul",
+            "if %copy_count% GEQ 60 goto failed",
+            "ping -n 2 127.0.0.1 >nul", "goto copy_loop",
+            ":restart", f'start "" /D "{literal(current_exe.parent)}" "{current}"',
+            "if errorlevel 1 goto failed",
+            'echo Update installed >> "%update_log%"',
+            'del "%~f0"', "exit /b 0",
+            ":failed", 'echo Update failed; keep the current installation and retry. >> "%update_log%"',
+            "exit /b 1",
+        ]
+        path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))
+
+    def _verify_sha256(self, file_path, sha_url):
         if not sha_url:
-            return
+            raise RuntimeError("В релизе нет контрольной суммы SHA256. Обновление не установлено.")
         try:
             headers = {"User-Agent": f"AuroraMusicPlayer/{APP_VERSION}"}
             req = Request(sha_url, headers=headers)
@@ -5651,16 +5706,19 @@ class AppUpdateInstallerWorker(QThread):
             with opener.open(req, timeout=6) as resp:
                 text = resp.read(512).decode("utf-8", errors="replace").strip()
             expected = text.split()[0].lower() if text else ""
-            if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected):
-                actual = hashlib.sha256(Path(file_path).read_bytes()).hexdigest().lower()
-                if actual != expected:
-                    raise RuntimeError("Контрольная сумма SHA256 скачанного файла не совпала.")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError("Не удалось загрузить SHA256. Попробуйте обновить позже.") from exc
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise RuntimeError("Некорректная контрольная сумма SHA256 в релизе.")
+        digest = hashlib.sha256()
+        with Path(file_path).open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise RuntimeError("Контрольная сумма SHA256 скачанного файла не совпала.")
 
     def run(self):
+        staged_exe = None
         try:
             is_frozen = bool(getattr(sys, "frozen", False))
             exe_url = str(self.update_info.get("exe_url") or "")
@@ -5676,7 +5734,7 @@ class AppUpdateInstallerWorker(QThread):
                 is_onedir = (install_dir / "_internal").is_dir()
 
                 # Вариант 1: Сборка в папке (--onedir) и есть ZIP-архив релиза
-                if is_onedir and zip_url:
+                if is_onedir and zip_url and zip_sha_url:
                     import zipfile
                     temp_dir = app_cache_directory() / "updater"
                     if temp_dir.exists():
@@ -5684,7 +5742,7 @@ class AppUpdateInstallerWorker(QThread):
                     temp_dir.mkdir(parents=True, exist_ok=True)
                     zip_path = temp_dir / "AuroraMusicPlayer-update.zip"
                     self._download_file(zip_url, zip_path, "Скачивание ZIP-сборки")
-                    self._verify_optional_sha256(zip_path, zip_sha_url)
+                    self._verify_sha256(zip_path, zip_sha_url)
                     self.progress_changed.emit(99, "Распаковка обновления…")
                     extract_dir = temp_dir / "extracted"
                     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -5692,23 +5750,10 @@ class AppUpdateInstallerWorker(QThread):
                     source_root = extract_dir / "AuroraMusicPlayer"
                     if not source_root.is_dir():
                         source_root = extract_dir
+                    if not (source_root / current_exe.name).is_file():
+                        raise RuntimeError("В архиве обновления нет исполняемого файла плеера.")
                     bat_path = temp_dir / "apply_aurora_update.bat"
-                    pid = os.getpid()
-                    bat_content = (
-                        "@echo off\r\n"
-                        "chcp 65001 >nul\r\n"
-                        "title Обновление Aurora Music Player...\r\n"
-                        f":wait_loop\r\n"
-                        f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL\r\n'
-                        "if not errorlevel 1 (\r\n"
-                        "    timeout /t 1 /nobreak >nul\r\n"
-                        "    goto wait_loop\r\n"
-                        ")\r\n"
-                        f'xcopy /E /Y /I "{source_root}\\*" "{install_dir}\\" >nul\r\n'
-                        f'start "" "{current_exe}"\r\n'
-                        'del "%~f0"\r\n'
-                    )
-                    bat_path.write_text(bat_content, encoding="utf-8")
+                    self._write_windows_update_script(bat_path, current_exe, source_root, directory=True)
                     self.progress_changed.emit(100, "Готово к перезапуску!")
                     self.update_ready_to_restart.emit(str(bat_path), f"Версия v{ver} скачана и готова к установке.")
                     return
@@ -5716,8 +5761,9 @@ class AppUpdateInstallerWorker(QThread):
                 # Вариант 2: Одиночный EXE (--onefile) или обновление самого EXE
                 if exe_url:
                     new_exe = current_exe.with_suffix(".new.exe")
+                    staged_exe = new_exe
                     self._download_file(exe_url, new_exe, "Скачивание AuroraMusicPlayer.exe")
-                    self._verify_optional_sha256(new_exe, exe_sha_url)
+                    self._verify_sha256(new_exe, exe_sha_url)
                     with open(new_exe, "rb") as f:
                         if f.read(2) != b"MZ":
                             new_exe.unlink(missing_ok=True)
@@ -5725,25 +5771,13 @@ class AppUpdateInstallerWorker(QThread):
                     temp_dir = app_cache_directory() / "updater"
                     temp_dir.mkdir(parents=True, exist_ok=True)
                     bat_path = temp_dir / "apply_aurora_exe_update.bat"
-                    pid = os.getpid()
-                    bat_content = (
-                        "@echo off\r\n"
-                        "chcp 65001 >nul\r\n"
-                        "title Обновление Aurora Music Player...\r\n"
-                        f":wait_loop\r\n"
-                        f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL\r\n'
-                        "if not errorlevel 1 (\r\n"
-                        "    timeout /t 1 /nobreak >nul\r\n"
-                        "    goto wait_loop\r\n"
-                        ")\r\n"
-                        f'move /Y "{new_exe}" "{current_exe}" >nul\r\n'
-                        f'start "" "{current_exe}"\r\n'
-                        'del "%~f0"\r\n'
-                    )
-                    bat_path.write_text(bat_content, encoding="utf-8")
+                    self._write_windows_update_script(bat_path, current_exe, new_exe)
                     self.progress_changed.emit(100, "Готово к перезапуску!")
                     self.update_ready_to_restart.emit(str(bat_path), f"Новый AuroraMusicPlayer.exe (v{ver}) готов к запуску.")
                     return
+
+            if is_frozen:
+                raise RuntimeError("На GitHub пока нет подходящей Windows-сборки. Попробуйте обновить после завершения сборки.")
 
             # Вариант 3: Запуск из исходного .py файла в git-репозитории (git pull)
             app_root = Path(__file__).resolve().parent
@@ -5782,6 +5816,11 @@ class AppUpdateInstallerWorker(QThread):
 
             raise RuntimeError("В релизе пока нет готового .exe файла. Дождитесь завершения сборки в GitHub Actions.")
         except Exception as exc:
+            if staged_exe is not None:
+                try:
+                    staged_exe.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if not self._cancel_requested:
                 self.update_failed.emit(str(exc))
 
@@ -9448,13 +9487,14 @@ class MusicPlayer(QMainWindow):
     def _sync_bottom_bar_side_widths(self):
         if not hasattr(self, "bottom_track_info") or not hasattr(self, "bottom_right_tools"):
             return
-        side_w = max(360, min(460, (self.width() - 520) // 2))
+        available = self.player_bar.width() - 32
+        side_w = max(210, min(460, (available - 300) // 2))
         self.bottom_track_info.setFixedWidth(side_w)
         self.bottom_right_tools.setFixedWidth(side_w)
-        label_max = max(220, side_w - 116)
+        label_max = max(80, side_w - 116)
         self.bottom_labels_box.setMaximumWidth(label_max)
         self.bottom_title.setMaximumWidth(label_max)
-        self.bottom_artist.setMaximumWidth(max(215, label_max - 5))
+        self.bottom_artist.setMaximumWidth(max(75, label_max - 5))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -10980,7 +11020,7 @@ class MusicPlayer(QMainWindow):
 
         # 2. Центральная колонка Spotify: сверху 5 кнопок транспорта, прямо под ними компактный таймлайн.
         central_controls = QWidget()
-        central_controls.setMinimumWidth(420)
+        central_controls.setMinimumWidth(260)
         central_controls.setMaximumWidth(600)
         central_controls.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         center_stack = QVBoxLayout(central_controls)
@@ -11897,6 +11937,12 @@ class MusicPlayer(QMainWindow):
         latest_ver = str(info.get("latest_version") or APP_VERSION)
         has_newer = bool(info.get("is_newer"))
         is_ok = bool(info.get("ok"))
+        is_frozen = bool(getattr(sys, "frozen", False))
+        is_onedir = is_frozen and (Path(sys.executable).resolve().parent / "_internal").is_dir()
+        can_install = not is_frozen or bool(
+            (info.get("exe_url") and info.get("exe_sha256_url"))
+            or (is_onedir and info.get("zip_url") and info.get("zip_sha256_url"))
+        )
         notes = str(info.get("notes") or "").strip()
         release_url = str(info.get("release_url") or f"https://github.com/{repo}/releases")
         actions_url = str(info.get("actions_url") or f"https://github.com/{repo}/actions/workflows/windows-build.yml")
@@ -11931,21 +11977,18 @@ class MusicPlayer(QMainWindow):
             if info.get("no_releases_yet"):
                 body_text = (
                     f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
-                    "В разделе GitHub Releases пока нет опубликованных тегов, но вы можете обновить "
-                    "приложение напрямую из ветки main или открыть страницу сборок GitHub Actions (.exe)."
+                    "Готовых обновлений пока нет. Новая версия появится здесь после завершения сборки на GitHub."
                 )
             else:
                 body_text = (
                     f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
-                    "Вы можете принудительно обновить файлы из репозитория GitHub или открыть страницу готовых .exe релизов."
+                    "Вы можете переустановить опубликованную версию или открыть страницу загрузок."
                 )
         else:
-            err_detail = str(info.get("error") or "репозиторий приватный или нет опубликованных релизов")
             body_text = (
                 f"Текущая версия: Aurora v{APP_VERSION}\n"
-                f"Репозиторий: github.com/{repo}\n\n"
-                f"Статус API GitHub: {err_detail}.\n"
-                "Вы можете запустить обновление напрямую (через Git / ветку main) или открыть страницу готовых .exe сборок в браузере."
+                "Не удалось проверить обновления. Проверьте подключение к интернету "
+                "и доступность страницы загрузок на GitHub."
             )
 
         desc_lbl = QLabel(body_text, dialog)
@@ -11962,6 +12005,7 @@ class MusicPlayer(QMainWindow):
         )
         install_btn.setObjectName("accentButton")
         install_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        install_btn.setEnabled(can_install)
 
         releases_btn = QPushButton("GitHub Releases (.exe) ↗", dialog)
         releases_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -19271,7 +19315,7 @@ class MusicPlayer(QMainWindow):
             self.stream_target = None
         # One cancelled request may finish in the background while the latest
         # selection starts immediately. Rapid clicks cannot spawn unlimited threads.
-        if len(self._stream_workers) >= 3:
+        if len(self._stream_workers) >= 2:
             self.stream_pending_track = dict(track)
             self.set_status("Готовлю последний выбранный трек…")
             return
