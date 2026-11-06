@@ -23,12 +23,12 @@ jobs:
       app_version: ${{ steps.version.outputs.app_version }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           architecture: x64
-          cache: pip
-          cache-dependency-path: build_exe.bat
+
       - name: Read APP_VERSION from source
         id: version
         shell: pwsh
@@ -37,14 +37,60 @@ jobs:
           $ver = $ver.Trim()
           "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Detected APP_VERSION: $ver"
-      - name: Build standalone portable folder player
-        shell: cmd
-        run: call build_exe.bat
+
+      - name: Install Python and build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to install Python dependencies' }
+          if (Test-Path "tools/generate_app_icon.py") {
+            python tools/generate_app_icon.py
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to generate application icon' }
+          }
+
       - name: Test source on Windows
         shell: pwsh
         run: |
-          & .\.build-venv\Scripts\python.exe -m unittest discover -s tests -v
+          python -m unittest discover -s tests -v
           if ($LASTEXITCODE -ne 0) { throw 'Source tests failed' }
+
+      - name: Build standalone portable folder player
+        shell: pwsh
+        run: |
+          $argsList = @(
+            "-m", "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--onedir",
+            "--windowed",
+            "--name", "AuroraMusicPlayer",
+            "--distpath", "dist",
+            "--workpath", "build",
+            "--specpath", ".",
+            "--collect-all", "yt_dlp",
+            "--collect-all", "ytmusicapi",
+            "--hidden-import", "requests",
+            "--hidden-import", "certifi"
+          )
+          if (Test-Path "assets/aurora.ico") {
+            $iconPath = (Resolve-Path "assets/aurora.ico").Path
+            $argsList += @("--icon", $iconPath)
+          }
+          if (Test-Path "assets") {
+            $assetsPath = (Resolve-Path "assets").Path
+            $argsList += @("--add-data", "${assetsPath};assets")
+          }
+          if (Test-Path "fonts") {
+            $fontsPath = (Resolve-Path "fonts").Path
+            $argsList += @("--add-data", "${fontsPath};fonts")
+          }
+          $argsList += "player_aurora_smart_beautiful_fixed_ui_repaint.py"
+          python @argsList
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller portable folder build failed' }
+          if (-not (Test-Path "dist/AuroraMusicPlayer/AuroraMusicPlayer.exe")) {
+            throw 'dist/AuroraMusicPlayer/AuroraMusicPlayer.exe was not produced'
+          }
+
       - name: Test frozen Qt, mini-player and audio decoding
         shell: pwsh
         run: |
@@ -54,23 +100,53 @@ jobs:
             throw 'Frozen player smoke test timed out'
           }
           if ($player.ExitCode -ne 0) { throw "Frozen player smoke test failed: $($player.ExitCode)" }
+
       - name: Package portable folder and calculate checksum
         shell: pwsh
         run: |
           Compress-Archive -Path .\dist\AuroraMusicPlayer -DestinationPath .\dist\AuroraMusicPlayer-windows-x64.zip -Force
           $checksum = (Get-FileHash .\dist\AuroraMusicPlayer-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
           "$checksum  AuroraMusicPlayer-windows-x64.zip" | Set-Content .\dist\AuroraMusicPlayer-windows-x64.zip.sha256.txt -Encoding ascii
+
       - name: Build single-file standalone EXE
-        env:
-          SKIP_PIP_INSTALL: '1'
-        shell: cmd
-        run: call build_exe.bat single
-      - name: Calculate single-file EXE checksum
         shell: pwsh
         run: |
-          if (-not (Test-Path .\dist\AuroraMusicPlayer.exe)) { throw 'Single-file AuroraMusicPlayer.exe was not produced' }
+          $argsList = @(
+            "-m", "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--onefile",
+            "--windowed",
+            "--name", "AuroraMusicPlayer",
+            "--distpath", "dist",
+            "--workpath", "build_single",
+            "--specpath", ".",
+            "--collect-all", "yt_dlp",
+            "--collect-all", "ytmusicapi",
+            "--hidden-import", "requests",
+            "--hidden-import", "certifi"
+          )
+          if (Test-Path "assets/aurora.ico") {
+            $iconPath = (Resolve-Path "assets/aurora.ico").Path
+            $argsList += @("--icon", $iconPath)
+          }
+          if (Test-Path "assets") {
+            $assetsPath = (Resolve-Path "assets").Path
+            $argsList += @("--add-data", "${assetsPath};assets")
+          }
+          if (Test-Path "fonts") {
+            $fontsPath = (Resolve-Path "fonts").Path
+            $argsList += @("--add-data", "${fontsPath};fonts")
+          }
+          $argsList += "player_aurora_smart_beautiful_fixed_ui_repaint.py"
+          python @argsList
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller single-file EXE build failed' }
+          if (-not (Test-Path .\dist\AuroraMusicPlayer.exe)) {
+            throw 'Single-file AuroraMusicPlayer.exe was not produced'
+          }
           $exeHash = (Get-FileHash .\dist\AuroraMusicPlayer.exe -Algorithm SHA256).Hash.ToLower()
           "$exeHash  AuroraMusicPlayer.exe" | Set-Content .\dist\AuroraMusicPlayer.exe.sha256.txt -Encoding ascii
+
       - uses: actions/upload-artifact@v4
         with:
           name: AuroraMusicPlayer-windows-x64
@@ -119,5 +195,3 @@ jobs:
           else
             gh release create "$TAG_NAME" "${ASSETS[@]}" --target "$GITHUB_SHA" --generate-notes --title "Aurora Music Player $TAG_NAME"
           fi
-
-

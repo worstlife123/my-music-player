@@ -10,7 +10,7 @@ if errorlevel 1 (
 )
 
 set "PLAYER_SOURCE=player_aurora_smart_beautiful_fixed_ui_repaint.py"
-set "PLAYER_ICON=assets\aurora.ico"
+set "PLAYER_ICON=%CD%\assets\aurora.ico"
 set "PLAYER_NAME=AuroraMusicPlayer"
 set "PLAYER_WINDOW_OPTION=--windowed"
 set "PLAYER_BUILD_PYTHON=.build-venv\Scripts\python.exe"
@@ -64,11 +64,11 @@ echo [2/3] Installing or updating build dependencies. Internet is required.
 if errorlevel 1 goto failed
 
 :after_dependencies
-if exist "fonts\" set "PLAYER_FONT_OPTIONS=--add-data=fonts:fonts"
+if exist "fonts\*" set "PLAYER_FONT_OPTIONS=--add-data "%CD%\fonts;fonts""
 if exist "tools\generate_app_icon.py" "%PLAYER_BUILD_PYTHON%" tools\generate_app_icon.py >nul 2>&1
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "assets:assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath "%PLAYER_WORK_DIR%" --collect-all yt_dlp --collect-all ytmusicapi --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "%CD%\assets;assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath . --collect-all yt_dlp --collect-all ytmusicapi --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
 if not exist "%PLAYER_OUTPUT%" goto failed
 
