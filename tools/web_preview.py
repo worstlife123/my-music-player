@@ -769,8 +769,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </button>
 
       <div class="sidebar-footer">
+        <button class="nav-btn" id="sidebarUpdateBtn" onclick="triggerUpdateAction()" style="background:rgba(29, 185, 84, 0.14);border-color:rgba(74, 222, 128, 0.45);color:#eafff2;">
+          <span>⬇</span>
+          <span id="sidebarUpdateText">Обновить до v0.3.0</span>
+        </button>
         <div class="hint-badge">
-          💡 <strong>Раскрытие обложки:</strong> нажмите на фото трека в левом нижнем углу — фото плавно расширится прямо внизу без новых окон и без свечения.
+          💡 <strong>Автообновление с GitHub:</strong> кнопка «Обновить» и баннер новой версии скачивают свежий <code>AuroraMusicPlayer.exe</code> и перезапускают плеер.
         </div>
       </div>
     </aside>
@@ -783,10 +787,28 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <input type="text" id="searchInput" placeholder="Поиск треков, артистов, альбомов..." oninput="renderTracks()" />
         </div>
         <div class="topbar-actions">
+          <button class="pill-btn" id="topUpdateBtn" onclick="triggerUpdateAction()" style="background:rgba(29,185,84,0.18);border-color:rgba(74,222,128,0.55);color:#86efac;">⬇ Доступна v0.3.0</button>
+          <button class="pill-btn" onclick="simulateNewUpdate()" title="Проверить обновления на GitHub">↻ Проверить v</button>
           <button class="pill-btn" onclick="toggleCoverPopup()">🖼️ Окно обложки</button>
           <button class="pill-btn" onclick="toggleTheme()" id="themeBtn">🌙 Тёмная тема</button>
         </div>
       </header>
+
+      <!-- Warning Banner when a newer GitHub version is available -->
+      <div id="updateWarningBanner" style="margin:0 28px 12px;padding:12px 16px;border-radius:14px;background:linear-gradient(90deg, rgba(29,185,84,0.20), rgba(245,158,11,0.16), rgba(18,22,31,0.95));border:1px solid rgba(74,222,128,0.52);display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="display:flex;align-items:center;gap:12px;min-width:0;">
+          <div style="width:28px;height:28px;border-radius:14px;background:rgba(29,185,84,0.24);border:1px solid rgba(74,222,128,0.65);color:#86efac;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;">!</div>
+          <div style="min-width:0;">
+            <div id="bannerTitle" style="font-size:13px;font-weight:700;color:#f8fafc;">Доступна новая версия v0.3.0 на GitHub (у вас v0.2.0)</div>
+            <div id="bannerSub" style="font-size:11.5px;color:#cbd5e1;margin-top:2px;">Готов свежий AuroraMusicPlayer.exe в GitHub Releases — нажмите «Скачать и обновить» для автоматической установки.</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+          <button class="pill-btn" id="installNowBtn" onclick="triggerUpdateAction()" style="background:#1db954;color:#04130a;border:none;font-weight:700;">Скачать и обновить</button>
+          <a href="https://github.com/worstlife123/my-music-player/releases" target="_blank" rel="noopener" class="pill-btn" style="text-decoration:none;display:inline-flex;align-items:center;">GitHub EXE ↗</a>
+          <button class="pill-btn" onclick="dismissUpdateBanner()" style="padding:7px 10px;color:#94a3b8;" title="Скрыть напоминание">✕</button>
+        </div>
+      </div>
 
       <div class="content-scroll">
         <div class="hero-banner" id="heroBanner">
@@ -1047,6 +1069,34 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const m = String(Math.floor(sec / 60)).padStart(2, "0");
       const s = String(sec % 60).padStart(2, "0");
       document.getElementById("curTime").textContent = `${m}:${s}`;
+    }
+
+    function dismissUpdateBanner() {
+      document.getElementById("updateWarningBanner").style.display = "none";
+    }
+
+    function simulateNewUpdate() {
+      const banner = document.getElementById("updateWarningBanner");
+      banner.style.display = "flex";
+      document.getElementById("bannerTitle").textContent = "Доступна новая версия v0.3.0 на GitHub (у вас v0.2.0)";
+      document.getElementById("bannerSub").textContent = "Готов свежий AuroraMusicPlayer.exe в GitHub Releases — нажмите «Скачать и обновить» для автоматической установки.";
+      document.getElementById("installNowBtn").textContent = "Скачать и обновить";
+      document.getElementById("sidebarUpdateText").textContent = "Обновить до v0.3.0";
+      document.getElementById("topUpdateBtn").style.display = "inline-flex";
+    }
+
+    function triggerUpdateAction() {
+      const banner = document.getElementById("updateWarningBanner");
+      banner.style.display = "flex";
+      document.getElementById("bannerTitle").textContent = "Скачивание обновления v0.3.0 с GitHub Releases...";
+      document.getElementById("bannerSub").textContent = "Проверка SHA-256 и замена AuroraMusicPlayer.exe с автоматическим перезапуском плеера...";
+      document.getElementById("installNowBtn").textContent = "Загрузка 100% ✓";
+      setTimeout(() => {
+        document.getElementById("bannerTitle").textContent = "Установлена актуальная версия v0.3.0 ✓";
+        document.getElementById("bannerSub").textContent = "Плеер обновлён до последней сборки с GitHub (worstlife123/my-music-player).";
+        document.getElementById("sidebarUpdateText").textContent = "Обновить · v0.3.0 ✓";
+        document.getElementById("topUpdateBtn").style.display = "none";
+      }, 900);
     }
 
     window.addEventListener("keydown", (e) => {

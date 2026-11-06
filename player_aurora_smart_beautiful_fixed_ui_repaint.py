@@ -54,7 +54,8 @@ def YoutubeDL(*args, **kwargs):
     return Downloader(*args, **kwargs)
 
 _SMOKE_DIRECTORY = None
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.2.0"
+GITHUB_REPO = "worstlife123/my-music-player"
 
 
 APP_USER_MODEL_ID = "AuroraLocal.MusicPlayer"
@@ -5382,10 +5383,310 @@ class TrackArtworkWorker(QThread):
             self.failed.emit(url, str(error))
 
 
-# -------------------------------------------------------------
-# Строка найденного трека с миниатюрой.
-# Используем обычные Qt-виджеты, никакого HTML и браузера.
-# -------------------------------------------------------------
+def _parse_version_tuple(version_str):
+    """Преобразует строку версии ('v0.2.1', '0.2.1-beta') в кортеж чисел (0, 2, 1) для точного сравнения."""
+    cleaned = str(version_str or "").strip().lstrip("vV")
+    parts = re.findall(r"\d+", cleaned)
+    if not parts:
+        return (0, 0, 0)
+    return tuple(int(p) for p in parts[:4])
+
+
+class AppUpdateCheckerWorker(QThread):
+    """Проверяет наличие новой версии и готового .exe в GitHub Releases и ветке main."""
+    update_checked = pyqtSignal(dict)
+
+    def __init__(self, repo=GITHUB_REPO, current_version=APP_VERSION, parent=None):
+        super().__init__(parent)
+        self.repo = str(repo or GITHUB_REPO).strip()
+        self.current_version = str(current_version or APP_VERSION).strip()
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _http_get_json(self, url, timeout=5.0):
+        headers = {
+            "User-Agent": f"AuroraMusicPlayer/{self.current_version}",
+            "Accept": "application/vnd.github+json, application/json;q=0.9, */*;q=0.8",
+        }
+        req = Request(url, headers=headers)
+        ctx = _create_stream_ssl_context()
+        opener = build_opener(HTTPSHandler(context=ctx))
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw)
+
+    def _http_get_text(self, url, max_bytes=8192, timeout=4.5):
+        headers = {
+            "User-Agent": f"AuroraMusicPlayer/{self.current_version}",
+            "Range": f"bytes=0-{max_bytes}",
+        }
+        req = Request(url, headers=headers)
+        ctx = _create_stream_ssl_context()
+        opener = build_opener(HTTPSHandler(context=ctx))
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read(max_bytes).decode("utf-8", errors="replace")
+
+    def run(self):
+        result = {
+            "ok": False,
+            "current_version": self.current_version,
+            "latest_version": self.current_version,
+            "tag_name": f"v{self.current_version}",
+            "is_newer": False,
+            "exe_url": "",
+            "exe_sha256_url": "",
+            "zip_url": "",
+            "zip_sha256_url": "",
+            "source_url": f"https://raw.githubusercontent.com/{self.repo}/main/player_aurora_smart_beautiful_fixed_ui_repaint.py",
+            "release_url": f"https://github.com/{self.repo}/releases",
+            "actions_url": f"https://github.com/{self.repo}/actions/workflows/windows-build.yml",
+            "published_at": "",
+            "notes": "",
+            "error": "",
+        }
+        try:
+            release_data = None
+            try:
+                release_data = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases/latest")
+            except Exception:
+                try:
+                    all_releases = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases")
+                    if isinstance(all_releases, list) and all_releases:
+                        release_data = all_releases[0]
+                except Exception:
+                    release_data = None
+
+            if self._cancel_requested:
+                return
+
+            best_version = self.current_version
+            if isinstance(release_data, dict):
+                tag_name = str(release_data.get("tag_name") or release_data.get("name") or "").strip()
+                if tag_name:
+                    result["tag_name"] = tag_name
+                    best_version = tag_name.lstrip("vV").strip() or best_version
+                if release_data.get("html_url"):
+                    result["release_url"] = str(release_data["html_url"])
+                if release_data.get("published_at"):
+                    result["published_at"] = str(release_data["published_at"])[:10]
+                if release_data.get("body"):
+                    result["notes"] = str(release_data["body"]).strip()
+                assets = release_data.get("assets") if isinstance(release_data.get("assets"), list) else []
+                for asset in assets:
+                    if not isinstance(asset, dict):
+                        continue
+                    name = str(asset.get("name") or "").lower()
+                    dl_url = str(asset.get("browser_download_url") or "")
+                    if not dl_url:
+                        continue
+                    if name == "auroramusicplayer.exe":
+                        result["exe_url"] = dl_url
+                    elif name == "auroramusicplayer.exe.sha256.txt":
+                        result["exe_sha256_url"] = dl_url
+                    elif name.endswith(".exe") and not result["exe_url"]:
+                        result["exe_url"] = dl_url
+                    elif name == "auroramusicplayer-windows-x64.zip":
+                        result["zip_url"] = dl_url
+                    elif name == "auroramusicplayer-windows-x64.zip.sha256.txt":
+                        result["zip_sha256_url"] = dl_url
+                    elif name.endswith(".zip") and not result["zip_url"]:
+                        result["zip_url"] = dl_url
+                result["ok"] = True
+
+            # Дополнительно проверяем APP_VERSION в ветке main
+            try:
+                head_src = self._http_get_text(result["source_url"], max_bytes=4096, timeout=4.0)
+                m_ver = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', head_src)
+                if m_ver:
+                    src_ver = m_ver.group(1).strip()
+                    if _parse_version_tuple(src_ver) > _parse_version_tuple(best_version):
+                        best_version = src_ver
+                        result["tag_name"] = f"v{src_ver.lstrip('vV')}"
+                    result["ok"] = True
+            except Exception:
+                pass
+
+            result["latest_version"] = best_version
+            result["is_newer"] = _parse_version_tuple(best_version) > _parse_version_tuple(self.current_version)
+        except Exception as exc:
+            result["error"] = str(exc)
+
+        if not self._cancel_requested:
+            self.update_checked.emit(result)
+
+
+class AppUpdateInstallerWorker(QThread):
+    """Скачивает обновление (готовый .exe, портативный .zip или исходник .py) и подготавливает автоперезапуск."""
+    progress_changed = pyqtSignal(int, str)
+    update_ready_to_restart = pyqtSignal(str, str)
+    update_failed = pyqtSignal(str)
+
+    def __init__(self, update_info, parent=None):
+        super().__init__(parent)
+        self.update_info = dict(update_info or {})
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _download_file(self, url, dest_path, label="Скачивание обновления"):
+        headers = {
+            "User-Agent": f"AuroraMusicPlayer/{APP_VERSION}",
+            "Accept": "*/*",
+        }
+        req = Request(url, headers=headers)
+        ctx = _create_stream_ssl_context()
+        opener = build_opener(HTTPSHandler(context=ctx))
+        with opener.open(req, timeout=20) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            with open(dest_path, "wb") as out:
+                while True:
+                    if self._cancel_requested:
+                        raise RuntimeError("Обновление отменено пользователем.")
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = min(98, int(downloaded * 100 / total))
+                        mb_done = downloaded / (1024 * 1024)
+                        mb_total = total / (1024 * 1024)
+                        self.progress_changed.emit(pct, f"{label}: {mb_done:.1f} / {mb_total:.1f} МБ ({pct}%)")
+                    else:
+                        mb_done = downloaded / (1024 * 1024)
+                        self.progress_changed.emit(50, f"{label}: {mb_done:.1f} МБ…")
+
+    def _verify_optional_sha256(self, file_path, sha_url):
+        if not sha_url:
+            return
+        try:
+            headers = {"User-Agent": f"AuroraMusicPlayer/{APP_VERSION}"}
+            req = Request(sha_url, headers=headers)
+            ctx = _create_stream_ssl_context()
+            opener = build_opener(HTTPSHandler(context=ctx))
+            with opener.open(req, timeout=6) as resp:
+                text = resp.read(512).decode("utf-8", errors="replace").strip()
+            expected = text.split()[0].lower() if text else ""
+            if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected):
+                actual = hashlib.sha256(Path(file_path).read_bytes()).hexdigest().lower()
+                if actual != expected:
+                    raise RuntimeError("Контрольная сумма SHA256 скачанного файла не совпала.")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+    def run(self):
+        try:
+            is_frozen = bool(getattr(sys, "frozen", False))
+            exe_url = str(self.update_info.get("exe_url") or "")
+            exe_sha_url = str(self.update_info.get("exe_sha256_url") or "")
+            zip_url = str(self.update_info.get("zip_url") or "")
+            zip_sha_url = str(self.update_info.get("zip_sha256_url") or "")
+            source_url = str(self.update_info.get("source_url") or "")
+            ver = str(self.update_info.get("latest_version") or "")
+
+            if is_frozen and sys.platform == "win32":
+                current_exe = Path(sys.executable).resolve()
+                install_dir = current_exe.parent
+                is_onedir = (install_dir / "_internal").is_dir()
+
+                # Вариант 1: Сборка в папке (--onedir) и есть ZIP-архив релиза
+                if is_onedir and zip_url:
+                    import zipfile
+                    temp_dir = app_cache_directory() / "updater"
+                    if temp_dir.exists():
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    zip_path = temp_dir / "AuroraMusicPlayer-update.zip"
+                    self._download_file(zip_url, zip_path, "Скачивание ZIP-сборки")
+                    self._verify_optional_sha256(zip_path, zip_sha_url)
+                    self.progress_changed.emit(99, "Распаковка обновления…")
+                    extract_dir = temp_dir / "extracted"
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        zf.extractall(extract_dir)
+                    source_root = extract_dir / "AuroraMusicPlayer"
+                    if not source_root.is_dir():
+                        source_root = extract_dir
+                    bat_path = temp_dir / "apply_aurora_update.bat"
+                    pid = os.getpid()
+                    bat_content = (
+                        "@echo off\r\n"
+                        "chcp 65001 >nul\r\n"
+                        "title Обновление Aurora Music Player...\r\n"
+                        f":wait_loop\r\n"
+                        f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL\r\n'
+                        "if not errorlevel 1 (\r\n"
+                        "    timeout /t 1 /nobreak >nul\r\n"
+                        "    goto wait_loop\r\n"
+                        ")\r\n"
+                        f'xcopy /E /Y /I "{source_root}\\*" "{install_dir}\\" >nul\r\n'
+                        f'start "" "{current_exe}"\r\n'
+                        'del "%~f0"\r\n'
+                    )
+                    bat_path.write_text(bat_content, encoding="utf-8")
+                    self.progress_changed.emit(100, "Готово к перезапуску!")
+                    self.update_ready_to_restart.emit(str(bat_path), f"Версия v{ver} скачана и готова к установке.")
+                    return
+
+                # Вариант 2: Одиночный EXE (--onefile) или обновление самого EXE
+                if exe_url:
+                    new_exe = current_exe.with_suffix(".new.exe")
+                    self._download_file(exe_url, new_exe, "Скачивание AuroraMusicPlayer.exe")
+                    self._verify_optional_sha256(new_exe, exe_sha_url)
+                    with open(new_exe, "rb") as f:
+                        if f.read(2) != b"MZ":
+                            new_exe.unlink(missing_ok=True)
+                            raise RuntimeError("Скачанный файл не является корректным приложением Windows (.exe).")
+                    temp_dir = app_cache_directory() / "updater"
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    bat_path = temp_dir / "apply_aurora_exe_update.bat"
+                    pid = os.getpid()
+                    bat_content = (
+                        "@echo off\r\n"
+                        "chcp 65001 >nul\r\n"
+                        "title Обновление Aurora Music Player...\r\n"
+                        f":wait_loop\r\n"
+                        f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL\r\n'
+                        "if not errorlevel 1 (\r\n"
+                        "    timeout /t 1 /nobreak >nul\r\n"
+                        "    goto wait_loop\r\n"
+                        ")\r\n"
+                        f'move /Y "{new_exe}" "{current_exe}" >nul\r\n'
+                        f'start "" "{current_exe}"\r\n'
+                        'del "%~f0"\r\n'
+                    )
+                    bat_path.write_text(bat_content, encoding="utf-8")
+                    self.progress_changed.emit(100, "Готово к перезапуску!")
+                    self.update_ready_to_restart.emit(str(bat_path), f"Новый AuroraMusicPlayer.exe (v{ver}) готов к запуску.")
+                    return
+
+            # Вариант 3: Запуск из исходного .py файла — обновляем скрипт напрямую из ветки main
+            if source_url:
+                import ast
+                script_path = Path(__file__).resolve()
+                temp_py = script_path.with_suffix(".update_tmp.py")
+                self._download_file(source_url, temp_py, "Скачивание новой версии скрипта")
+                code_text = temp_py.read_text(encoding="utf-8")
+                ast.parse(code_text)
+                backup_py = script_path.with_suffix(".bak.py")
+                try:
+                    shutil.copy2(script_path, backup_py)
+                except OSError:
+                    pass
+                temp_py.replace(script_path)
+                self.progress_changed.emit(100, "Обновление установлено!")
+                self.update_ready_to_restart.emit("__python_restart__", f"Исходный код обновлён до версии v{ver}.")
+                return
+
+            raise RuntimeError("В релизе не найден подходящий файл обновления.")
+        except Exception as exc:
+            if not self._cancel_requested:
+                self.update_failed.emit(str(exc))
 
 AURORA_TRACK_MIME = "application/x-aurora-track"
 AURORA_PLAYLIST_MIME = "application/x-aurora-playlist-id"
@@ -8025,6 +8326,45 @@ class SettingsDialog(QDialog):
         general_layout.addWidget(self.hide_on_minimize)
         # Очередь больше не занимает правую колонку постоянно.
         self._add_hint(general_layout, "Очередь открывается по кнопке ≡ внизу плеера. Для выхода используй меню значка в трее.")
+        general_layout.addSpacing(4)
+        self._add_group_label(general_layout, "ОБНОВЛЕНИЕ ПРИЛОЖЕНИЯ (GITHUB)")
+        upd_info = getattr(player, "_available_update_info", None) or {}
+        has_upd = bool(upd_info.get("is_newer"))
+        latest_ver = str(upd_info.get("latest_version") or APP_VERSION)
+        status_txt = (
+            f"⚠ Доступна новая версия v{latest_ver} (текущая: v{APP_VERSION})!"
+            if has_upd
+            else f"Текущая версия: v{APP_VERSION} · проверка релизов GitHub"
+        )
+        self.update_status_label = QLabel(status_txt, general)
+        self.update_status_label.setObjectName("settingsHint")
+        self.update_status_label.setWordWrap(True)
+        general_layout.addWidget(self.update_status_label)
+        upd_btn_row = QHBoxLayout()
+        upd_btn_row.setSpacing(8)
+        self.check_update_btn = QPushButton("Проверить обновления", general)
+        self.check_update_btn.setObjectName("settingsPicker")
+        self.install_update_btn = QPushButton(
+            f"⬇ Обновить до v{latest_ver}" if has_upd else "⬇ Обновить с GitHub",
+            general,
+        )
+        self.install_update_btn.setObjectName("settingsPicker")
+        self.github_releases_btn = QPushButton("Открыть GitHub Releases ↗", general)
+        self.github_releases_btn.setObjectName("settingsPicker")
+        self.check_update_btn.clicked.connect(
+            lambda: self._defer_service_action(lambda: player.check_for_updates(manual=True))
+        )
+        self.install_update_btn.clicked.connect(
+            lambda: self._defer_service_action(player.on_update_button_clicked)
+        )
+        self.github_releases_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{GITHUB_REPO}/releases"))
+        )
+        upd_btn_row.addWidget(self.check_update_btn, 0)
+        upd_btn_row.addWidget(self.install_update_btn, 0)
+        upd_btn_row.addWidget(self.github_releases_btn, 0)
+        upd_btn_row.addStretch(1)
+        general_layout.addLayout(upd_btn_row)
         general_layout.addStretch(1)
         self._add_hint(
             general_layout,
@@ -9427,6 +9767,10 @@ class MusicPlayer(QMainWindow):
         self._top_drag_offset = None
 
         self._likes_search_query = ""
+        self._available_update_info = None
+        self._update_checker_worker = None
+        self._update_installer_worker = None
+        self._update_banner_dismissed = False
         self.build_ui()
         self.rebuild_start_cards()
         self.sort_button.hide()
@@ -9445,6 +9789,8 @@ class MusicPlayer(QMainWindow):
         self.restore_playback_session()
         self._session_ready = True
         self.checkpoint_timer.start()
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen" and _SMOKE_DIRECTORY is None:
+            QTimer.singleShot(3200, lambda: self.check_for_updates(manual=False))
 
     # ---------------------------------------------------------
     # Интерфейс. Две постоянные колонки + выдвижная очередь.
@@ -9646,6 +9992,15 @@ class MusicPlayer(QMainWindow):
         self.sidebar_divider.setObjectName("sidebarDivider")
         self.sidebar_divider.setFixedHeight(1)
         side_layout.addWidget(self.sidebar_divider)
+        update_button = QPushButton(f"↻ Обновить · v{APP_VERSION}", self.sidebar)
+        self.sidebar_update_button = update_button
+        update_button.setObjectName("sidebarUpdate")
+        update_button.setProperty("has_update", False)
+        update_button.setMinimumHeight(40)
+        update_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        update_button.setToolTip("Проверить наличие новой версии на GitHub и обновить приложение")
+        update_button.clicked.connect(self.on_update_button_clicked)
+        side_layout.addWidget(update_button)
         settings_button = QPushButton("Настройки", self.sidebar)
         self.sidebar_settings_button = settings_button
         settings_button.setObjectName("sidebarSettings")
@@ -9732,10 +10087,58 @@ class MusicPlayer(QMainWindow):
         self.search_button.setObjectName("searchSubmit")
         self.search_button.setFixedSize(80, 40)
         shell_layout.addWidget(self.search_button)
+        self.top_update_button = QPushButton("⬇ Обновить", self.search_row)
+        self.top_update_button.setObjectName("topUpdateButton")
+        self.top_update_button.setProperty("has_update", False)
+        self.top_update_button.setMinimumHeight(38)
+        self.top_update_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.top_update_button.setToolTip("Доступна новая версия на GitHub — нажмите для обновления")
+        self.top_update_button.clicked.connect(self.on_update_button_clicked)
+        self.top_update_button.hide()
         search_layout.addWidget(self.back_button)
         search_layout.addWidget(self.search_shell, 1)
+        search_layout.addWidget(self.top_update_button)
         search_layout.addWidget(self.theme_button)
         browse.addWidget(self.search_row)
+
+        # Плашка-предупреждение о выходе новой версии на GitHub
+        self.update_warning_banner = QFrame(self.browse_page)
+        self.update_warning_banner.setObjectName("updateWarningBanner")
+        banner_layout = QHBoxLayout(self.update_warning_banner)
+        banner_layout.setContentsMargins(16, 10, 12, 10)
+        banner_layout.setSpacing(10)
+        self.update_banner_label = QLabel(
+            f"⚠ Доступна новая версия Aurora! Ваша версия: v{APP_VERSION}.",
+            self.update_warning_banner,
+        )
+        self.update_banner_label.setObjectName("updateBannerTitle")
+        self.update_banner_label.setWordWrap(True)
+        self.update_banner_install_btn = QPushButton("⬇ Обновить сейчас", self.update_warning_banner)
+        self.update_banner_install_btn.setObjectName("updateBannerAction")
+        self.update_banner_install_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_banner_install_btn.clicked.connect(self.on_update_button_clicked)
+        self.update_banner_github_btn = QPushButton("GitHub Release ↗", self.update_warning_banner)
+        self.update_banner_github_btn.setObjectName("textButton")
+        self.update_banner_github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_banner_github_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl(
+                    str((self._available_update_info or {}).get("release_url") or f"https://github.com/{GITHUB_REPO}/releases")
+                )
+            )
+        )
+        self.update_banner_close_btn = QPushButton("×", self.update_warning_banner)
+        self.update_banner_close_btn.setObjectName("updateBannerClose")
+        self.update_banner_close_btn.setFixedSize(28, 28)
+        self.update_banner_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_banner_close_btn.setToolTip("Скрыть уведомление до следующего запуска")
+        self.update_banner_close_btn.clicked.connect(self.dismiss_update_banner)
+        banner_layout.addWidget(self.update_banner_label, 1)
+        banner_layout.addWidget(self.update_banner_install_btn, 0)
+        banner_layout.addWidget(self.update_banner_github_btn, 0)
+        banner_layout.addWidget(self.update_banner_close_btn, 0)
+        self.update_warning_banner.hide()
+        browse.addWidget(self.update_warning_banner)
 
         self.start_cards_widget = QWidget()
         self.start_cards_widget.setObjectName("startCardsWidget")
@@ -10554,12 +10957,18 @@ class MusicPlayer(QMainWindow):
         self.options_menu.addSeparator()
         self.mini_player_action = self.options_menu.addAction("Мини-плеер поверх окон   Ctrl+M", self.show_mini_player)
         self.options_menu.addAction("Настройки…", self.open_settings)
+        self.update_app_action = self.options_menu.addAction(
+            f"Проверить обновления (v{APP_VERSION})…", self.on_update_button_clicked
+        )
         self.options_menu.addAction("О программе", self.show_about)
         updates = self.options_menu.addMenu("Готовые версии на GitHub")
-        updates.addAction("Последние сборки", lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/worstlife123/my-music-player/actions/workflows/windows-build.yml")))
-        updates.addAction("Релизы", lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/worstlife123/my-music-player/releases")))
+        updates.addAction("Проверить и установить обновление…", self.on_update_button_clicked)
+        updates.addAction("Скачать готовый .exe (Releases)", lambda: QDesktopServices.openUrl(
+            QUrl(f"https://github.com/{GITHUB_REPO}/releases/latest")))
+        updates.addAction("Последние сборки (GitHub Actions)", lambda: QDesktopServices.openUrl(
+            QUrl(f"https://github.com/{GITHUB_REPO}/actions/workflows/windows-build.yml")))
+        updates.addAction("Все релизы", lambda: QDesktopServices.openUrl(
+            QUrl(f"https://github.com/{GITHUB_REPO}/releases")))
         self.options_menu.addSeparator()
         self.options_menu.addAction("Выход", self.request_app_exit)
         self.menu_button.setMenu(self.options_menu)
@@ -10693,6 +11102,36 @@ class MusicPlayer(QMainWindow):
             QPushButton#navButton { color: #9DA8B8; text-align: left; padding: 0; border: none; background: transparent; }
             QPushButton#sidebarSettings { color: #A2AEBF; text-align: left; padding: 12px 10px; border-radius: 10px; font-weight: 600; }
             QPushButton#sidebarSettings:hover { background: #1B222C; color: #FFFFFF; }
+            QPushButton#sidebarUpdate {
+                color: #9DA8B8; background: rgba(255, 255, 255, 6); border: 1px solid #232C39;
+                text-align: left; padding: 10px 12px; border-radius: 10px; font-weight: 600; font-size: 12.5px;
+            }
+            QPushButton#sidebarUpdate:hover { background: #1D2834; color: #FFFFFF; border-color: #5CE092; }
+            QPushButton#sidebarUpdate[has_update="true"] {
+                background: rgba(29, 185, 84, 34); color: #66E099; border: 1px solid #1DB954; font-weight: 800;
+            }
+            QPushButton#sidebarUpdate[has_update="true"]:hover {
+                background: #1DB954; color: #09140D;
+            }
+            QPushButton#topUpdateButton {
+                background: #1DB954; color: #09140D; border: none;
+                border-radius: 19px; padding: 6px 14px; font-weight: 800; font-size: 12.5px;
+            }
+            QPushButton#topUpdateButton:hover { background: #1ED760; }
+            QFrame#updateWarningBanner {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(29, 185, 84, 42), stop:1 rgba(25, 34, 46, 210));
+                border: 1px solid #1DB954; border-radius: 14px;
+            }
+            QLabel#updateBannerTitle { color: #F4F9F5; font-size: 13px; font-weight: 700; }
+            QPushButton#updateBannerAction {
+                background: #1DB954; color: #09140D; border: none;
+                border-radius: 15px; padding: 7px 16px; font-weight: 800; font-size: 12.5px;
+            }
+            QPushButton#updateBannerAction:hover { background: #2FE06D; }
+            QPushButton#updateBannerClose {
+                background: transparent; color: #9DA8B8; border-radius: 14px; font-size: 16px; font-weight: 700; padding: 0;
+            }
+            QPushButton#updateBannerClose:hover { background: rgba(255, 255, 255, 22); color: #FFFFFF; }
             QPushButton#iconButton, QPushButton#transportButton {
                 background: transparent; color: #C6D0DE; border-radius: 9px; padding: 4px; font-size: 24px;
             }
@@ -10913,6 +11352,23 @@ class MusicPlayer(QMainWindow):
             QPushButton#navButton { color: #546275; }
             QPushButton#sidebarSettings { color: #546275; }
             QPushButton#sidebarSettings:hover { background: #EBF0F6; color: #141C26; }
+            QPushButton#sidebarUpdate {
+                color: #475569; background: #F3F6FA; border: 1px solid #D5DEE8;
+            }
+            QPushButton#sidebarUpdate:hover { background: #E4F4EA; color: #167A40; border-color: #21834C; }
+            QPushButton#sidebarUpdate[has_update="true"] {
+                background: #E2F5EA; color: #146C38; border: 1px solid #1DB954; font-weight: 800;
+            }
+            QPushButton#sidebarUpdate[has_update="true"]:hover {
+                background: #1DB954; color: #FFFFFF;
+            }
+            QFrame#updateWarningBanner {
+                background: #E8F7EE; border: 1px solid #21834C; border-radius: 14px;
+            }
+            QLabel#updateBannerTitle { color: #123522; font-weight: 700; }
+            QPushButton#updateBannerAction { background: #1DB954; color: #FFFFFF; }
+            QPushButton#updateBannerClose { color: #546275; }
+            QPushButton#updateBannerClose:hover { background: rgba(20, 28, 38, 14); color: #141C26; }
             QWidget#trackRow:hover, QListWidget::item:hover { background: #EFF3F8; color: #141C26; }
             QListWidget::item:selected { background: #E4F3EA; border: 1px solid #A8D8BA; }
 
@@ -11185,11 +11641,241 @@ class MusicPlayer(QMainWindow):
             dialog.deleteLater()
 
     def show_about(self):
+        upd = self._available_update_info or {}
+        upd_line = (
+            f"Доступна новая версия: v{upd.get('latest_version')} (нажмите «Обновить» в меню слева)\n"
+            if upd.get("is_newer")
+            else f"Установлена актуальная версия: v{APP_VERSION}\n"
+        )
         QMessageBox.about(
             self, "О программе",
-            "Music Player · Green Edition\nPython + PyQt6 + yt-dlp\n\n"
+            f"Aurora Music Player · v{APP_VERSION}\n"
+            f"{upd_line}"
+            f"Репозиторий: github.com/{GITHUB_REPO}\n\n"
             "Локальные лайки хранятся в favorites.json. Импорт YouTube Music использует cookie-файл или сессию браузера; пароль Google приложение не запрашивает."
         )
+
+    def dismiss_update_banner(self):
+        self._update_banner_dismissed = True
+        if hasattr(self, "update_warning_banner"):
+            self.update_warning_banner.hide()
+
+    def _refresh_update_ui(self):
+        info = self._available_update_info or {}
+        has_newer = bool(info.get("is_newer"))
+        latest_ver = str(info.get("latest_version") or APP_VERSION)
+        if hasattr(self, "sidebar_update_button"):
+            if has_newer:
+                self.sidebar_update_button.setText(f"⬇ Обновить до v{latest_ver}")
+                self.sidebar_update_button.setToolTip(
+                    f"Вышла новая версия v{latest_ver} (у вас v{APP_VERSION}). Нажмите для обновления!"
+                )
+            else:
+                self.sidebar_update_button.setText(f"↻ Обновить · v{APP_VERSION}")
+                self.sidebar_update_button.setToolTip(
+                    f"Текущая версия v{APP_VERSION}. Нажмите, чтобы проверить обновления на GitHub."
+                )
+            self.sidebar_update_button.setProperty("has_update", has_newer)
+            self.sidebar_update_button.style().unpolish(self.sidebar_update_button)
+            self.sidebar_update_button.style().polish(self.sidebar_update_button)
+
+        if hasattr(self, "top_update_button"):
+            self.top_update_button.setText(f"⬇ v{latest_ver}")
+            self.top_update_button.setProperty("has_update", has_newer)
+            self.top_update_button.setVisible(has_newer)
+
+        if hasattr(self, "update_warning_banner"):
+            if has_newer and not self._update_banner_dismissed:
+                pub = f" от {info['published_at']}" if info.get("published_at") else ""
+                self.update_banner_label.setText(
+                    f"⚠ Доступна новая версия Aurora v{latest_ver}{pub} (установлена v{APP_VERSION}). "
+                    f"Нажмите «Обновить сейчас», чтобы автоматически скачать и установить новую версию."
+                )
+                self.update_warning_banner.show()
+            else:
+                self.update_warning_banner.hide()
+
+        if hasattr(self, "update_app_action"):
+            self.update_app_action.setText(
+                f"⬇ Обновить до v{latest_ver}…" if has_newer else f"Проверить обновления (v{APP_VERSION})…"
+            )
+
+    def check_for_updates(self, manual=False):
+        if self._force_exit:
+            return
+        if self._update_checker_worker is not None and self._update_checker_worker.isRunning():
+            if manual:
+                self.show_toast("Проверка обновлений на GitHub уже выполняется…", 2500)
+            return
+        if manual:
+            self.set_status("Проверяю наличие новой версии на GitHub…")
+            if hasattr(self, "sidebar_update_button"):
+                self.sidebar_update_button.setText("⏳ Проверка…")
+        worker = AppUpdateCheckerWorker(GITHUB_REPO, APP_VERSION, self)
+        self._update_checker_worker = worker
+        worker.update_checked.connect(lambda info, m=manual: self._on_update_checked(info, manual=m))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_update_checked(self, info, manual=False):
+        self._update_checker_worker = None
+        if not isinstance(info, dict):
+            return
+        self._available_update_info = dict(info)
+        if info.get("is_newer"):
+            self._update_banner_dismissed = False
+        self._refresh_update_ui()
+
+        if info.get("is_newer"):
+            latest_ver = info.get("latest_version", "")
+            msg = f"Доступна новая версия Aurora v{latest_ver}! Нажмите «Обновить» для автоматической установки."
+            self.set_status(msg)
+            self.show_toast(msg, 6500)
+            if getattr(self, "tray_icon", None) is not None and self.tray_icon.isVisible():
+                try:
+                    self.tray_icon.showMessage(
+                        f"Доступно обновление Aurora v{latest_ver}",
+                        "Откройте плеер и нажмите «Обновить сейчас» для установки новой версии.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        4500,
+                    )
+                except Exception:
+                    pass
+            if manual:
+                self._prompt_and_install_update(info)
+        elif manual:
+            if info.get("ok"):
+                answer = QMessageBox.question(
+                    self,
+                    "Обновление приложения",
+                    f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
+                    "Хотите всё равно переустановить последнюю версию с GitHub или открыть страницу релизов?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
+                    QMessageBox.StandardButton.Close,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    self.start_self_update(info)
+                elif answer == QMessageBox.StandardButton.Open:
+                    QDesktopServices.openUrl(QUrl(info.get("release_url") or f"https://github.com/{GITHUB_REPO}/releases"))
+            else:
+                answer = QMessageBox.information(
+                    self,
+                    "Проверка обновлений",
+                    f"Не удалось получить список релизов через API GitHub ({info.get('error') or 'нет ответа'}).\n\n"
+                    "Открыть страницу готовых .exe сборок на GitHub в браузере?",
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
+                    QMessageBox.StandardButton.Open,
+                )
+                if answer == QMessageBox.StandardButton.Open:
+                    QDesktopServices.openUrl(QUrl(f"https://github.com/{GITHUB_REPO}/releases"))
+
+    def on_update_button_clicked(self):
+        if self._update_installer_worker is not None and self._update_installer_worker.isRunning():
+            self.show_toast("Скачивание и установка обновления уже выполняются…", 3000)
+            return
+        info = self._available_update_info
+        if isinstance(info, dict) and info.get("is_newer"):
+            self._prompt_and_install_update(info)
+        else:
+            self.check_for_updates(manual=True)
+
+    def _prompt_and_install_update(self, info):
+        latest_ver = str(info.get("latest_version") or APP_VERSION)
+        notes = str(info.get("notes") or "").strip()
+        notes_block = f"\n\nЧто нового:\n{notes[:600]}" if notes else ""
+        is_frozen = bool(getattr(sys, "frozen", False))
+        mode_desc = (
+            "Плеер автоматически скачает новый .exe / архив с GitHub Releases, заменит файлы и перезапустится."
+            if is_frozen and sys.platform == "win32"
+            else "Плеер автоматически скачает свежую версию с GitHub, сохранит резервную копию и перезапустится."
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Обновление Aurora до v{latest_ver}")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            f"Доступна новая версия Aurora Music Player v{latest_ver} (у вас v{APP_VERSION}).\n\n"
+            f"{mode_desc}{notes_block}"
+        )
+        install_btn = box.addButton("⬇ Обновить и перезапустить", QMessageBox.ButtonRole.AcceptRole)
+        github_btn = box.addButton("Скачать .exe с GitHub ↗", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is install_btn:
+            self.start_self_update(info)
+        elif clicked is github_btn:
+            QDesktopServices.openUrl(QUrl(info.get("release_url") or f"https://github.com/{GITHUB_REPO}/releases"))
+
+    def start_self_update(self, info=None):
+        if self._update_installer_worker is not None and self._update_installer_worker.isRunning():
+            return
+        target_info = dict(info or self._available_update_info or {
+            "latest_version": APP_VERSION,
+            "source_url": f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/player_aurora_smart_beautiful_fixed_ui_repaint.py",
+            "release_url": f"https://github.com/{GITHUB_REPO}/releases",
+        })
+        self.show_toast("Начинаю загрузку обновления с GitHub…", 4000)
+        self.set_status("Скачиваю обновление с GitHub…")
+        if hasattr(self, "sidebar_update_button"):
+            self.sidebar_update_button.setEnabled(False)
+            self.sidebar_update_button.setText("⏳ Обновление…")
+        if hasattr(self, "update_banner_install_btn"):
+            self.update_banner_install_btn.setEnabled(False)
+            self.update_banner_install_btn.setText("⏳ Загрузка…")
+        worker = AppUpdateInstallerWorker(target_info, self)
+        self._update_installer_worker = worker
+        worker.progress_changed.connect(self._on_update_progress)
+        worker.update_ready_to_restart.connect(self._on_update_ready_to_restart)
+        worker.update_failed.connect(self._on_update_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_update_progress(self, pct, status_text):
+        self.set_status(status_text)
+        if hasattr(self, "sidebar_update_button"):
+            self.sidebar_update_button.setText(f"⏳ {pct}%")
+        if hasattr(self, "update_banner_install_btn"):
+            self.update_banner_install_btn.setText(f"⏳ {pct}%")
+
+    def _on_update_ready_to_restart(self, target_script, message):
+        self._update_installer_worker = None
+        if hasattr(self, "sidebar_update_button"):
+            self.sidebar_update_button.setEnabled(True)
+        if hasattr(self, "update_banner_install_btn"):
+            self.update_banner_install_btn.setEnabled(True)
+        self.set_status(message)
+        self.show_toast(message + " Перезапускаю плеер…", 4000)
+        self.save_preferences()
+        try:
+            if target_script == "__python_restart__":
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve())], close_fds=True)
+            elif sys.platform == "win32" and Path(target_script).is_file():
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                subprocess.Popen(["cmd.exe", "/c", str(target_script)], creationflags=creation_flags, close_fds=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Перезапуск", f"Обновление скачано, но автозапуск не удался: {exc}")
+            return
+        QTimer.singleShot(300, self.request_app_exit)
+
+    def _on_update_failed(self, error_message):
+        self._update_installer_worker = None
+        if hasattr(self, "sidebar_update_button"):
+            self.sidebar_update_button.setEnabled(True)
+        if hasattr(self, "update_banner_install_btn"):
+            self.update_banner_install_btn.setEnabled(True)
+            self.update_banner_install_btn.setText("⬇ Обновить сейчас")
+        self._refresh_update_ui()
+        self.set_status(f"Ошибка обновления: {error_message}")
+        answer = QMessageBox.warning(
+            self,
+            "Не удалось установить обновление автоматически",
+            f"При скачивании обновления возникла ошибка:\n{error_message}\n\n"
+            "Открыть страницу GitHub Releases, чтобы скачать готовый AuroraMusicPlayer.exe вручную?",
+            QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
+            QMessageBox.StandardButton.Open,
+        )
+        if answer == QMessageBox.StandardButton.Open:
+            QDesktopServices.openUrl(QUrl(f"https://github.com/{GITHUB_REPO}/releases"))
 
     def save_preferences(self):
         if self.mini_player is not None:
