@@ -2,6 +2,8 @@ import hashlib
 from io import BytesIO
 import importlib.util
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -135,26 +137,57 @@ class UpdateInstallation(unittest.TestCase):
         from ctypes import wintypes
         directory = self.root / "Музыка 100% !"
         directory.mkdir()
-        current = directory / "Aurora Player.cmd"
-        payload = directory / "Aurora Player.new.cmd"
+        current = directory / f"AuroraUpdateTest{time.time_ns()}.exe"
+        payload = current.with_suffix(".new.exe")
         current.write_bytes(b"old version")
-        payload.write_bytes(b'@echo off\r\necho updated> "%~dp0installed.txt"\r\n')
+        shutil.copyfile(shutil.which("cmd.exe"), payload)
+        expected = hashlib.sha256(payload.read_bytes()).digest()
         script = self.root / "apply_update.bat"
-        terminated = subprocess.Popen(["cmd.exe", "/c", "exit /b 0"], creationflags=subprocess.CREATE_NO_WINDOW)
-        terminated.wait(timeout=10)
-        with patch.object(m.os, "getpid", return_value=terminated.pid):
-            self.worker._write_windows_update_script(script, current, payload)
+        self.worker._write_windows_update_script(script, current, payload)
+        script.write_bytes(script.read_bytes().replace(b"@echo off", b"@echo on", 1))
         create = ctypes.windll.kernel32.CreateFileW
         create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
         create.restype = wintypes.HANDLE
         close = ctypes.windll.kernel32.CloseHandle
         close.argtypes = (wintypes.HANDLE,)
+
+        class ProcessEntry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+
+        snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot
+        snapshot.argtypes, snapshot.restype = (wintypes.DWORD, wintypes.DWORD), wintypes.HANDLE
+        first, following = ctypes.windll.kernel32.Process32FirstW, ctypes.windll.kernel32.Process32NextW
+        for function in (first, following):
+            function.argtypes, function.restype = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry)), wintypes.BOOL
+
+        def running_pids():
+            handle = snapshot(2, 0)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError()
+            try:
+                entry = ProcessEntry()
+                entry.dwSize = ctypes.sizeof(entry)
+                valid, found = first(handle, ctypes.byref(entry)), []
+                while valid:
+                    if entry.szExeFile.casefold() == current.name.casefold():
+                        found.append(entry.th32ProcessID)
+                    valid = following(handle, ctypes.byref(entry))
+                return found
+            finally:
+                close(handle)
+
         handle = create(str(current), 0x80000000, 1, None, 3, 0, None)
         self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
         process = None
         try:
-            process = subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=subprocess.CREATE_NO_WINDOW)
+            trace = self.root / "trace.log"
+            with trace.open("wb") as output:
+                process = m._launch_windows_update_script(script, stdout=output, stderr=subprocess.STDOUT)
             log = self.root / "update.log"
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
@@ -168,13 +201,14 @@ class UpdateInstallation(unittest.TestCase):
             try:
                 code = process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                self.fail("Updater did not finish:\n" + log.read_text(encoding="utf-8", errors="replace"))
+                self.fail("Updater did not finish:\n" + log.read_text(encoding="utf-8", errors="replace")
+                          + "\nCommands:\n" + trace.read_text(encoding="utf-8", errors="replace"))
             self.assertEqual(code, 0, log.read_text(encoding="utf-8", errors="replace"))
             deadline = time.monotonic() + 10
-            while not (directory / "installed.txt").exists() and time.monotonic() < deadline:
+            while not running_pids() and time.monotonic() < deadline:
                 time.sleep(.05)
-            self.assertTrue((directory / "installed.txt").exists(), "Updated program was not restarted")
-            self.assertIn(b"updated", current.read_bytes())
+            self.assertTrue(running_pids(), "Updated EXE was not restarted")
+            self.assertEqual(hashlib.sha256(current.read_bytes()).digest(), expected)
             self.assertFalse(payload.exists())
         finally:
             if handle is not None:
@@ -182,6 +216,14 @@ class UpdateInstallation(unittest.TestCase):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+            for pid in running_pids():
+                try:
+                    m.os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            deadline = time.monotonic() + 5
+            while running_pids() and time.monotonic() < deadline:
+                time.sleep(.05)
 
     def test_invalid_and_missing_checksums_block_installation(self):
         for value in (b"", b"not a checksum", b"<html>not found</html>"):

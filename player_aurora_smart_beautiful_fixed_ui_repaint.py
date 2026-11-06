@@ -5606,6 +5606,22 @@ class AppUpdateCheckerWorker(QThread):
             self.update_checked.emit(result)
 
 
+def _launch_windows_update_script(script, *, stdout=None, stderr=None):
+    # CMD reads an ASCII script; all paths travel through its Unicode environment.
+    environment = os.environ.copy()
+    metadata_path = Path(script).with_suffix(".json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    for key in ("AURORA_UPDATE_EXE", "AURORA_UPDATE_PAYLOAD", "AURORA_UPDATE_INSTALL_DIR", "AURORA_UPDATE_DIR"):
+        environment[key] = str(metadata[key])
+    environment["AURORA_UPDATE_SCRIPT"] = str(script)
+    environment["AURORA_UPDATE_METADATA"] = str(metadata_path)
+    return subprocess.Popen(
+        'cmd.exe /d /v:off /c chcp 65001 >nul & "%AURORA_UPDATE_SCRIPT%"',
+        env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        close_fds=True, stdout=stdout, stderr=stderr,
+    )
+
+
 class AppUpdateInstallerWorker(QThread):
     """Скачивает обновление (готовый .exe, портативный .zip, git pull или исходник .py) и подготавливает автоперезапуск."""
     progress_changed = pyqtSignal(int, str)
@@ -5654,12 +5670,15 @@ class AppUpdateInstallerWorker(QThread):
     def _write_windows_update_script(self, path, current_exe, payload, *, directory=False):
         # A one-file build has a bootloader parent that may still lock the EXE
         # after the Python process exits. Retry replacement before restarting.
-        literal = lambda value: str(value).replace("%", "%%")
-        current, source = literal(current_exe), literal(payload)
-        log = literal(path.parent / "update.log")
+        path.with_suffix(".json").write_text(json.dumps({
+            "AURORA_UPDATE_EXE": str(current_exe),
+            "AURORA_UPDATE_PAYLOAD": str(payload),
+            "AURORA_UPDATE_INSTALL_DIR": str(current_exe.parent),
+            "AURORA_UPDATE_DIR": str(path.parent),
+        }), encoding="utf-8")
         lines = [
             "@echo off", "setlocal EnableExtensions DisableDelayedExpansion",
-            "chcp 65001 >nul", f'set "update_log={log}"',
+            "chcp 65001 >nul", 'set "update_log=%AURORA_UPDATE_DIR%\\update.log"',
             'echo Installing Aurora update > "%update_log%"',
         ]
         if directory:
@@ -5674,26 +5693,26 @@ class AppUpdateInstallerWorker(QThread):
         lines += [":apply_update", "set /a copy_count=0", ":copy_loop"]
         if directory:
             lines += [
-                f'robocopy "{source}" "{literal(current_exe.parent)}" /E /R:3 /W:1 /NFL /NDL /NJH /NJS /NP >> "%update_log%" 2>&1',
+                'robocopy "%AURORA_UPDATE_PAYLOAD%" "%AURORA_UPDATE_INSTALL_DIR%" /E /R:3 /W:1 /NFL /NDL /NJH /NJS /NP >> "%update_log%" 2>&1',
                 "if not errorlevel 8 goto restart",
             ]
         else:
             lines += [
-                f'move /Y "{source}" "{current}" >> "%update_log%" 2>&1',
+                'move /Y "%AURORA_UPDATE_PAYLOAD%" "%AURORA_UPDATE_EXE%" >> "%update_log%" 2>&1',
                 "if not errorlevel 1 goto restart",
             ]
         lines += [
             "set /a copy_count+=1 >nul",
             "if %copy_count% GEQ 60 goto failed",
             "ping -n 2 127.0.0.1 >nul", "goto copy_loop",
-            ":restart", f'start "" /D "{literal(current_exe.parent)}" "{current}"',
+            ':restart', 'start "" /D "%AURORA_UPDATE_INSTALL_DIR%" "%AURORA_UPDATE_EXE%"',
             "if errorlevel 1 goto failed",
             'echo Update installed >> "%update_log%"',
-            'del "%~f0"', "exit /b 0",
+            'del "%AURORA_UPDATE_METADATA%"', 'del "%~f0" & exit /b 0',
             ":failed", 'echo Update failed; keep the current installation and retry. >> "%update_log%"',
             "exit /b 1",
         ]
-        path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))
+        path.write_bytes(("\r\n".join(lines) + "\r\n").encode("ascii"))
 
     def _verify_sha256(self, file_path, sha_url):
         if not sha_url:
@@ -12123,8 +12142,7 @@ class MusicPlayer(QMainWindow):
             if target_script == "__python_restart__":
                 subprocess.Popen([sys.executable, str(Path(__file__).resolve())], close_fds=True)
             elif sys.platform == "win32" and Path(target_script).is_file():
-                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                subprocess.Popen(["cmd.exe", "/c", str(target_script)], creationflags=creation_flags, close_fds=True)
+                _launch_windows_update_script(target_script)
         except Exception as exc:
             QMessageBox.warning(self, "Перезапуск", f"Обновление скачано, но автозапуск не удался: {exc}")
             return
