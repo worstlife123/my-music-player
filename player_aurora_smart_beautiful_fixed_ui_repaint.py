@@ -30,10 +30,61 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, quote_plus, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, Request, build_opener
 
-from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+def _ensure_python_runtime():
+    """Если скрипт запущен через системный Python без установленного PyQt6,
+    автоматически переключается на локальный .build-venv или доустанавливает зависимости."""
+    if getattr(sys, "frozen", False) or "unittest" in sys.modules:
+        return
+    root_dir = Path(__file__).resolve().parent
+    for venv_name in (".build-venv", ".venv", "venv"):
+        candidate = (
+            root_dir / venv_name / "Scripts" / "python.exe"
+            if sys.platform == "win32"
+            else root_dir / venv_name / "bin" / "python"
+        )
+        if candidate.is_file() and candidate.resolve() != Path(sys.executable).resolve():
+            try:
+                probe = subprocess.run(
+                    [str(candidate), "-c", "import PyQt6, yt_dlp, requests"],
+                    capture_output=True,
+                    timeout=10,
+                )
+                if probe.returncode == 0:
+                    raise SystemExit(subprocess.call([str(candidate), str( Path(__file__).resolve() ), *sys.argv[1:]]))
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--upgrade",
+            "PyQt6>=6.8,<7", "yt-dlp[default]", "ytmusicapi>=1.12,<2", "certifi", "requests",
+        ])
+    except Exception:
+        pass
+
+
+try:
+    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
+except ImportError:
+    _ensure_python_runtime()
+    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
+
+if requests is None:
+    try:
+        import requests
+    except ImportError:
+        requests = None
+
 from PyQt6.QtGui import (
     QShortcut, QKeySequence, QBrush, QColor, QFont, QFontDatabase, QLinearGradient,
     QPainter, QPen, QPixmap, QPalette, QIcon, QPolygonF, QPainterPath, QDesktopServices, QFontMetrics, QRadialGradient, QImageReader, QImage, QDrag,
@@ -294,84 +345,8 @@ def application_icon():
 
 
 def _apply_native_win32_icon(hwnd, clear_caption=False):
-    global _WIN32_HICONS
-    if sys.platform != "win32" or not hwnd:
-        return
-    try:
-        user32 = ctypes.windll.user32
-        first_init = _WIN32_HICONS is None
-        if first_init:
-            frames = []
-            for side in (16, 24, 32, 48, 64, 128, 256):
-                pm = make_service_artwork("brand", pixel_size=side)
-                pm.setDevicePixelRatio(1)
-                buf = QBuffer()
-                buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                if pm.save(buf, "PNG"):
-                    frames.append((side, bytes(buf.data())))
-            ico_file = _sync_aurora_ico(frames)
-            handles = {}
-            if ico_file is not None and ico_file.is_file():
-                try:
-                    load_img = user32.LoadImageW
-                    load_img.argtypes = [
-                        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32,
-                        ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32,
-                    ]
-                    load_img.restype = ctypes.c_void_p
-                    for side in (16, 32, 48, 256):
-                        hicon = load_img(None, str(ico_file), 1, side, side, 0x00000010)
-                        if hicon:
-                            handles[side] = hicon
-                except Exception:
-                    pass
-            create_icon = user32.CreateIconFromResourceEx
-            create_icon.argtypes = [
-                ctypes.c_char_p, ctypes.c_uint32, ctypes.c_int32,
-                ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32, ctypes.c_uint32,
-            ]
-            create_icon.restype = ctypes.c_void_p
-            for side, raw_png in frames:
-                if side in (16, 32, 48, 256) and side not in handles:
-                    hicon = create_icon(raw_png, len(raw_png), 1, 0x00030000, side, side, 0)
-                    if hicon:
-                        handles[side] = hicon
-            _WIN32_HICONS = handles
-        send_msg = user32.SendMessageW
-        send_msg.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_void_p]
-        send_msg.restype = ctypes.c_void_p
-        big_h = _WIN32_HICONS.get(256) or _WIN32_HICONS.get(48) or _WIN32_HICONS.get(32)
-        small_h = _WIN32_HICONS.get(32) or _WIN32_HICONS.get(16)
-        if big_h:
-            send_msg(hwnd, 0x0080, 1, ctypes.c_void_p(big_h))
-        if small_h:
-            send_msg(hwnd, 0x0080, 0, ctypes.c_void_p(small_h))
-        try:
-            set_class = getattr(user32, "SetClassLongPtrW", None) or getattr(user32, "SetClassLongW", None)
-            if set_class is not None:
-                set_class.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
-                set_class.restype = ctypes.c_void_p
-                if big_h:
-                    set_class(hwnd, -14, ctypes.c_void_p(big_h))
-                if small_h:
-                    set_class(hwnd, -34, ctypes.c_void_p(small_h))
-        except Exception:
-            pass
-        if clear_caption:
-            try:
-                set_text = user32.SetWindowTextW
-                set_text.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-                set_text.restype = ctypes.c_int32
-                set_text(hwnd, "")
-            except Exception:
-                pass
-        if first_init:
-            try:
-                ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    """Qt6 already sets window icons natively via QWindow::setIcon; avoid raw Win32 class mutations."""
+    return
 
 
 def set_windows_app_id(app_id=None):
@@ -412,9 +387,6 @@ def apply_native_title_bar(widget, theme, dwm_api=None):
         function.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
         function.restype = ctypes.c_int32
         hwnd = ctypes.c_void_p(int(handle))
-        if dwm_api is None:
-            clear_caption = isinstance(widget, QMainWindow) and not widget.windowTitle().strip()
-            _apply_native_win32_icon(hwnd, clear_caption=clear_caption)
         def attribute(number, value):
             data = ctypes.c_uint32(value)
             return function(hwnd, number, ctypes.byref(data), ctypes.sizeof(data)) >= 0
@@ -430,7 +402,7 @@ def apply_native_title_bar(widget, theme, dwm_api=None):
         text = colorref("#E9EEF5" if dark else "#18202A")
         for number, value in ((35, background), (36, text), (34, background)):
             applied = attribute(number, value) or applied
-        if applied and dwm_api is None and widget.isVisible():
+        if applied and dwm_api is None:
             try:
                 redraw = ctypes.windll.user32.RedrawWindow
                 redraw.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
@@ -5105,48 +5077,41 @@ class StreamWorker(QThread):
 
         format_options = {
             "auto": (
+                "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][format_id=140]/"
                 "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
                 "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "high": (
-                "bestaudio[protocol=https][abr>=192]/bestaudio[protocol=https]/"
+                "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][abr>=192]/"
+                "bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https]/"
                 "bestaudio[abr>=192]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "economy": (
+                "bestaudio[protocol=https][format_id=250]/bestaudio[protocol=https][format_id=249]/"
                 "bestaudio[protocol=https][abr<=128]/bestaudio[protocol=https]/"
                 "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "compatibility": (
-                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=mp3]/"
-                "bestaudio[protocol=https]/bestaudio[protocol=http]/"
+                "bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https][ext=m4a]/"
+                "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
         }
         is_yt = (
             self.track.get("source") == "youtube"
-            or "youtube.com" in str(self.track.get("url") or "").lower()
-            or "youtu.be" in str(self.track.get("url") or "").lower()
+            or (
+                not self.track.get("source")
+                and (
+                    "youtube.com" in str(self.track.get("url") or "").lower()
+                    or "youtu.be" in str(self.track.get("url") or "").lower()
+                )
+            )
         )
-        if is_yt:
-            # Приоритет прямых высококачественных аудиоформатов YouTube (251: Opus 160k, 140: AAC 128k, 250: Opus 70k, 249: Opus 50k)
-            # Это мгновенно выбирает аудиопоток без сортировки и перебора сотен видеопотоков DASH.
-            if self.audio_quality == "high":
-                yt_selector = "bestaudio[format_id=251]/bestaudio[format_id=140]/bestaudio[ext=m4a]/bestaudio[abr>=160]/bestaudio/best"
-            elif self.audio_quality == "economy":
-                yt_selector = "bestaudio[format_id=250]/bestaudio[format_id=249]/bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio/best"
-            else:
-                yt_selector = "bestaudio[format_id=251]/bestaudio[format_id=140]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
-            if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
-                alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in yt_selector.split("/"))
-                selector = alternate + "/" + yt_selector
-            else:
-                selector = yt_selector
-        else:
-            selector = format_options.get(self.audio_quality, format_options["auto"])
-            if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
-                alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in selector.split("/"))
-                selector = alternate + "/" + selector
+        selector = format_options.get(self.audio_quality, format_options["auto"])
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.avoid_format_id):
+            alternate = "/".join(part + f'[format_id!="{self.avoid_format_id}"]' for part in selector.split("/"))
+            selector = alternate + "/" + selector
 
         options = {
             **yt_dlp_tls_options(),
@@ -9789,8 +9754,13 @@ class MusicPlayer(QMainWindow):
         self.restore_playback_session()
         self._session_ready = True
         self.checkpoint_timer.start()
-        if os.environ.get("QT_QPA_PLATFORM") != "offscreen" and _SMOKE_DIRECTORY is None:
-            QTimer.singleShot(3200, lambda: self.check_for_updates(manual=False))
+        self._startup_update_timer = QTimer(self)
+        self._startup_update_timer.setSingleShot(True)
+        self._startup_update_timer.timeout.connect(lambda: self.check_for_updates(manual=False))
+        if (os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+                and _SMOKE_DIRECTORY is None
+                and "unittest" not in sys.modules):
+            self._startup_update_timer.start(3200)
 
     # ---------------------------------------------------------
     # Интерфейс. Две постоянные колонки + выдвижная очередь.
@@ -10756,6 +10726,7 @@ class MusicPlayer(QMainWindow):
         if self.view_stack.currentWidget() is self.cover_page:
             self._cover_expand_anim.stop()
             self.expanded_cover.hide()
+            self.expanded_cover.clear_artwork()
             self.expanded_cover.sync_vinyl_state()
             page = self._cover_return_page
             if page not in (self.browse_page, self.likes_page, getattr(self, "playlist_page", None)):
@@ -12431,11 +12402,11 @@ class MusicPlayer(QMainWindow):
         if is_cover:
             if isinstance(stack_layout, QStackedLayout):
                 stack_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+            self.view_stack.setCurrentWidget(page)
             for i in range(self.view_stack.count()):
                 candidate = self.view_stack.widget(i)
                 if candidate is not None:
                     candidate.setVisible(candidate is self._cover_return_page or candidate is page)
-            self.view_stack.setCurrentWidget(page)
             return
         if isinstance(stack_layout, QStackedLayout):
             stack_layout.setStackingMode(QStackedLayout.StackingMode.StackOne)
@@ -15138,6 +15109,8 @@ class MusicPlayer(QMainWindow):
                                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         for column in range(4):
             self.home_tiles_layout.setColumnStretch(column, 1 if column == columns else 0)
+        self.home_tiles_layout.invalidate()
+        self.start_cards_layout.invalidate()
 
     @staticmethod
     def _recent_track_metadata(track):
@@ -19906,34 +19879,48 @@ def run_smoke_test():
 def main():
     if "--smoke-test" in sys.argv:
         sys.exit(run_smoke_test())
-    setup_logging()
-    set_windows_app_id(f"{APP_USER_MODEL_ID}.HaloV2")
-    app = QApplication(sys.argv)
-    configure_application(app)
-    app.setStyle("Fusion")
-    family = setup_font(app)
-    window = MusicPlayer()
-    window.setProperty("fontFamily", family)
-    media_filter = WindowsMediaKeyFilter(window) if sys.platform == "win32" else None
-    if media_filter is not None:
-        app.installNativeEventFilter(media_filter)
-    window.show()
-    if sys.platform == "win32":
-        for delay_ms in (50, 250):
-            QTimer.singleShot(
-                delay_ms,
-                lambda w=window: _apply_native_win32_icon(
-                    ctypes.c_void_p(int(w.effectiveWinId())),
-                    clear_caption=not w.windowTitle().strip(),
-                )
-                if w.isVisible() and w.effectiveWinId() else None,
-            )
     try:
-        code = app.exec()
-    finally:
+        setup_logging()
+        set_windows_app_id()
+        app = QApplication(sys.argv)
+        configure_application(app)
+        app.setStyle("Fusion")
+        family = setup_font(app)
+        window = MusicPlayer()
+        window.setProperty("fontFamily", family)
+        media_filter = WindowsMediaKeyFilter(window) if sys.platform == "win32" else None
         if media_filter is not None:
-            app.removeNativeEventFilter(media_filter)
-    sys.exit(code)
+            app.installNativeEventFilter(media_filter)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        try:
+            code = app.exec()
+        finally:
+            if media_filter is not None:
+                app.removeNativeEventFilter(media_filter)
+        sys.exit(code)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        import traceback
+        details = traceback.format_exc()
+        try:
+            err_log = Path(__file__).resolve().parent / "aurora_startup_error.log"
+            err_log.write_text(details, encoding="utf-8")
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    f"Не удалось запустить плеер:\n{exc}\n\nПодробности записаны в aurora_startup_error.log",
+                    "Aurora Music Player — Ошибка запуска",
+                    0x00000010,
+                )
+            except Exception:
+                pass
+        raise
 
 
 if __name__ == "__main__":

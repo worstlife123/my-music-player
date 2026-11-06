@@ -2,15 +2,8 @@ name: Windows EXE
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     tags: ['v*']
-    paths:
-      - 'player_aurora_smart_beautiful_fixed_ui_repaint.py'
-      - 'build_exe.bat'
-      - 'fonts/**'
-      - 'assets/**'
-      - 'tests/**'
-      - '.github/workflows/windows-build.yml'
   workflow_dispatch:
     inputs:
       publish_release:
@@ -20,7 +13,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -68,6 +61,8 @@ jobs:
           $checksum = (Get-FileHash .\dist\AuroraMusicPlayer-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
           "$checksum  AuroraMusicPlayer-windows-x64.zip" | Set-Content .\dist\AuroraMusicPlayer-windows-x64.zip.sha256.txt -Encoding ascii
       - name: Build single-file standalone EXE
+        env:
+          SKIP_PIP_INSTALL: '1'
         shell: cmd
         run: call build_exe.bat single
       - name: Calculate single-file EXE checksum
@@ -88,7 +83,7 @@ jobs:
           retention-days: 30
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -100,6 +95,7 @@ jobs:
           name: AuroraMusicPlayer-windows-x64
           path: dist
       - name: Publish tested Windows EXE and portable ZIP to GitHub Releases
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -123,4 +119,5 @@ jobs:
           else
             gh release create "$TAG_NAME" "${ASSETS[@]}" --target "$GITHUB_SHA" --generate-notes --title "Aurora Music Player $TAG_NAME"
           fi
+
 

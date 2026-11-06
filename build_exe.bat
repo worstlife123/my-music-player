@@ -17,6 +17,7 @@ set "PLAYER_BUILD_PYTHON=.build-venv\Scripts\python.exe"
 set "PLAYER_PYTHON_COMMAND="
 set "PLAYER_FONT_OPTIONS="
 set "PLAYER_BUILD_MODE=--onedir"
+set "PLAYER_WORK_DIR=build"
 
 :options
 if "%~1"=="" goto source
@@ -24,7 +25,10 @@ if /i "%~1"=="debug" (
     set "PLAYER_NAME=AuroraMusicPlayer-debug"
     set "PLAYER_WINDOW_OPTION=--console"
 )
-if /i "%~1"=="single" set "PLAYER_BUILD_MODE=--onefile"
+if /i "%~1"=="single" (
+    set "PLAYER_BUILD_MODE=--onefile"
+    set "PLAYER_WORK_DIR=build_single"
+)
 shift
 goto options
 
@@ -38,7 +42,7 @@ if not exist "%PLAYER_ICON%" goto missing_icon
 if exist "%PLAYER_BUILD_PYTHON%" goto dependencies
 
 echo [1/3] Looking for Python and creating the build environment...
-for %%V in (3.13 3.12 3.14) do (
+for %%V in (3.13 3.12 3.14 3.11) do (
     if not defined PLAYER_PYTHON_COMMAND (
         py -%%V -c "import sys; sys.exit(0 if sys.maxsize > 2**32 else 1)" >nul 2>&1
         if not errorlevel 1 set "PLAYER_PYTHON_COMMAND=py -%%V"
@@ -54,15 +58,17 @@ if not defined PLAYER_PYTHON_COMMAND goto missing_python
 if errorlevel 1 goto failed
 
 :dependencies
+if defined SKIP_PIP_INSTALL goto after_dependencies
 echo [2/3] Installing or updating build dependencies. Internet is required.
-"%PLAYER_BUILD_PYTHON%" -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2"
+"%PLAYER_BUILD_PYTHON%" -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
 if errorlevel 1 goto failed
 
+:after_dependencies
 if exist "fonts\" set "PLAYER_FONT_OPTIONS=--add-data=fonts:fonts"
 if exist "tools\generate_app_icon.py" "%PLAYER_BUILD_PYTHON%" tools\generate_app_icon.py >nul 2>&1
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "assets:assets" --distpath dist --workpath build --specpath build --collect-all yt_dlp --collect-all ytmusicapi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "assets:assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath "%PLAYER_WORK_DIR%" --collect-all yt_dlp --collect-all ytmusicapi --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
 if not exist "%PLAYER_OUTPUT%" goto failed
 
