@@ -3565,15 +3565,25 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
 
     @classmethod
     def _find_supermix(cls, shelves):
+        supermix_candidates = []
         for shelf in shelves or []:
             if not isinstance(shelf, dict):
                 continue
             for item in shelf.get("contents") or []:
-                if (isinstance(item, dict)
-                        and str(item.get("playlistId") or "").startswith(cls.MIX_ID_PREFIX)
-                        and str(item.get("title") or "").strip().casefold() == "my supermix"):
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("playlistId") or "").strip()
+                if not (pid.startswith(cls.MIX_ID_PREFIX) or pid.startswith(cls.ALT_MIX_PREFIX)):
+                    continue
+                title = str(item.get("title") or "").strip().casefold()
+                if any(title == alias or alias in title for alias in ("my supermix", "мой супермикс", "супермикс", "supermix")):
                     return item
-        return None
+                supermix_candidates.append(item)
+        for item in supermix_candidates:
+            pid = str(item.get("playlistId") or "").strip()
+            if pid.startswith(cls.MIX_ID_PREFIX):
+                return item
+        return supermix_candidates[0] if supermix_candidates else None
 
     @classmethod
     def _discover_mix_catalog(cls, shelves):
@@ -3608,7 +3618,7 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         break
                 if matched_key and matched_key not in catalog:
                     catalog[matched_key] = entry
-                elif title_cf != "my supermix":
+                elif title_cf not in ("my supermix", "мой супермикс", "супермикс", "supermix"):
                     personal_pool.append(entry)
 
         fallback_keys = ("my_mix_1", "my_mix_2", "my_mix_3", "discover_mix", "new_release_mix", "replay_mix")
@@ -3675,19 +3685,8 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                     remaining = deadline - time.monotonic()
                     if self._cancelled.is_set() or remaining <= 0:
                         raise TimeoutError("Супермикс: время ожидания истекло.")
-                    kwargs["timeout"] = (min(3, remaining), min(5, remaining))
-                    # Сохраняем TLS verification и REQUESTS_CA_BUNDLE.
-                    resp = original_request(method, url, *args, **kwargs)
-                    try:
-                        raw_bytes = getattr(resp, "_content", None)
-                        if isinstance(raw_bytes, (bytes, bytearray)) and "browse" in str(url):
-                            if b"RDTMAK5uy_" in raw_bytes and b'"continuations"' in raw_bytes:
-                                resp._content = re.sub(
-                                    rb',\s*"continuations"\s*:\s*\[[^\]]*\]', b"", bytes(raw_bytes)
-                                )
-                    except Exception:
-                        pass
-                    return resp
+                    kwargs["timeout"] = (min(3.5, remaining), min(6.0, remaining))
+                    return original_request(method, url, *args, **kwargs)
 
                 session.request = bounded_request
                 client = YTMusic(headers, requests_session=session, language="en")
@@ -3704,7 +3703,7 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         except Exception:
                             playlist = None
                     if not playlist or not playlist.get("tracks"):
-                        shelves = client.get_home(limit=20)
+                        shelves = client.get_home(limit=8)
                         item = self._find_mix_for_key(shelves, self.mix_key)
                         if self._cancelled.is_set():
                             return
@@ -3935,8 +3934,10 @@ class BufferedStreamEntry:
         lower_url = self.remote_url.lower()
         proto = self.protocol.lower()
         return (
-            "m3u8" in proto
+            "hls" in proto
+            or "m3u8" in proto
             or "dash" in proto
+            or "hls" in lower_url
             or ".m3u8" in lower_url
             or "hls_playlist" in lower_url
             or "hls_variant" in lower_url
@@ -4196,7 +4197,11 @@ class BufferedStreamEntry:
                                 last_end = cur_idx * self.BLOCK_SIZE
 
                             if stored_any:
-                                if (self.total_size is not None and last_end >= self.total_size) or (status == 200 and not content_range):
+                                is_fully_read = (
+                                    (self.total_size is not None and last_end >= self.total_size)
+                                    or (self.total_size is None and status == 200 and not content_range and not buf)
+                                )
+                                if is_fully_read:
                                     with self._cond:
                                         if self.total_size is None:
                                             self.total_size = sum(len(b) for b in self.blocks.values())
@@ -4643,7 +4648,12 @@ class LocalStreamProxy:
                                 want = min(want, limit_byte - cursor + 1)
                             data_slice = entry.read_at(cursor, want)
                             if not data_slice:
-                                break
+                                if entry.eof or (total is not None and cursor >= total):
+                                    break
+                                time.sleep(0.08)
+                                data_slice = entry.read_at(cursor, want)
+                                if not data_slice:
+                                    break
                             self.wfile.write(data_slice)
                             cursor += len(data_slice)
                     except (BrokenPipeError, ConnectionResetError, OSError):
@@ -4904,12 +4914,8 @@ class StreamWorker(QThread):
         ]
         pure_audio = [
             f for f in formats
-            if f.get("vcodec") in (None, "none") and str(f.get("format_id") or "") != "18"
+            if f.get("vcodec") in (None, "none")
         ]
-        if (not stream_url or str(selected_info.get("format_id") or "") == "18") and pure_audio:
-            https_audio = [f for f in pure_audio if str(f.get("protocol") or "") in ("https", "http")]
-            chosen = (https_audio or pure_audio)[-1]
-            return chosen.get("url"), chosen
         if not stream_url:
             selected = (pure_audio[-1] if pure_audio else (formats[-1] if formats else None))
             stream_url = selected.get("url") if selected else None
@@ -4940,10 +4946,11 @@ class StreamWorker(QThread):
         ]
         pure_audio = [
             f for f in raw_formats
-            if f.get("vcodec") in (None, "none") and str(f.get("format_id") or "") != "18"
+            if f.get("vcodec") in (None, "none")
         ]
+        candidates = pure_audio or raw_formats
         same_ext_backups = [
-            str(f["url"]) for f in (pure_audio or raw_formats)
+            str(f["url"]) for f in candidates
             if str(f.get("ext") or "") == str(ext) and str(f.get("protocol") or "") == str(protocol)
         ]
         proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
@@ -5057,8 +5064,11 @@ class StreamWorker(QThread):
             if not chosen_tc:
                 for tc in transcodings:
                     if isinstance(tc, dict) and tc.get("url"):
-                        chosen_tc = tc
-                        break
+                        fmt = tc.get("format") or {}
+                        proto = str(fmt.get("protocol") or "").lower()
+                        if "encrypted" not in proto and "drm" not in proto:
+                            chosen_tc = tc
+                            break
             if not chosen_tc or not chosen_tc.get("url"):
                 return None
 
@@ -5122,22 +5132,22 @@ class StreamWorker(QThread):
         format_options = {
             "auto": (
                 "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][format_id=140]/"
-                "bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
+                "18/bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
                 "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "high": (
                 "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][abr>=192]/"
-                "bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https]/"
+                "bestaudio[protocol=https][format_id=140]/18/bestaudio[protocol=https]/"
                 "bestaudio[abr>=192]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "economy": (
                 "bestaudio[protocol=https][format_id=250]/bestaudio[protocol=https][format_id=249]/"
-                "bestaudio[protocol=https][abr<=128]/bestaudio[protocol=https]/"
+                "18/bestaudio[protocol=https][abr<=128]/bestaudio[protocol=https]/"
                 "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
             "compatibility": (
-                "bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https][ext=m4a]/"
+                "18/bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https][ext=m4a]/"
                 "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
             ),
@@ -5172,14 +5182,10 @@ class StreamWorker(QThread):
             "no_color": True,
         }
         if self._is_real_extract() and is_yt:
-            # ВАЖНО: используем "android_vr" с пропуском загрузки HTML-страницы и JS-плеера ("player_skip")
-            # и включаем "formats": ["missing_pot"], чтобы yt-dlp не скрывал чистые аудио-потоки 251/140 (~270 мс).
             options["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["android_vr"],
+                    "player_client": ["android", "mweb"],
                     "player_skip": ["webpage", "configs", "initial_data", "js"],
-                    "formats": ["missing_pot"],
-                    "fetch_pot": ["never"],
                 }
             }
             options["youtube_include_dash_manifest"] = False
@@ -5201,9 +5207,8 @@ class StreamWorker(QThread):
                 if can_retry_default:
                     retry_options["extractor_args"] = {
                         "youtube": {
-                            "player_client": ["android_vr", "mweb"],
+                            "player_client": ["android", "mweb", "web"],
                             "player_skip": ["configs"],
-                            "formats": ["missing_pot"],
                         }
                     }
                 else:
