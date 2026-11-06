@@ -3911,6 +3911,7 @@ class BufferedStreamEntry:
         self._session_lock = threading.Lock()
         self._session = None
         self._req_number = 0
+        self._has_initial_data = False
 
     def _get_session(self, reset=False, prefer_ipv4=False):
         with self._session_lock:
@@ -4009,7 +4010,7 @@ class BufferedStreamEntry:
                     pass
                 self._session = None
 
-    def wait_for_initial_bytes(self, min_bytes=8192, timeout=2.2):
+    def wait_for_initial_bytes(self, min_bytes=1024, timeout=1.8):
         self.start()
         deadline = time.monotonic() + max(0.2, float(timeout))
         with self._cond:
@@ -4019,22 +4020,24 @@ class BufferedStreamEntry:
                         return True
                 else:
                     first_block = self.blocks.get(0)
-                    if first_block and len(first_block) > 0:
+                    if (first_block and len(first_block) > 0) or getattr(self, "_has_initial_data", False):
                         return True
                 if self.eof:
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                self._cond.wait(timeout=min(0.1, remaining))
+                self._cond.wait(timeout=min(0.04, remaining))
             if self._is_hls() or self.Sequential_mode:
                 return len(self.hls_buffer) > 0
-            return bool(self.blocks.get(0))
+            return bool(self.blocks.get(0)) or getattr(self, "_has_initial_data", False)
 
     def _store_block(self, block_idx, data):
         with self._cond:
             self.blocks[block_idx] = bytes(data)
             self.blocks.move_to_end(block_idx)
+            if block_idx == 0:
+                self._has_initial_data = True
             if self._priority_block == block_idx:
                 self._priority_block = None
             while len(self.blocks) > self.MAX_CACHED_BLOCKS:
@@ -4181,6 +4184,10 @@ class BufferedStreamEntry:
                                     raw_chunk = raw_chunk[rem_skip:]
                                     skipped = start_byte
                                 buf.extend(raw_chunk)
+                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
+                                    with self._cond:
+                                        self._has_initial_data = True
+                                        self._cond.notify_all()
                                 while len(buf) >= self.BLOCK_SIZE and cur_idx < self.MAX_CACHED_BLOCKS:
                                     piece = bytes(buf[:self.BLOCK_SIZE])
                                     del buf[:self.BLOCK_SIZE]
@@ -4234,6 +4241,10 @@ class BufferedStreamEntry:
                                 if not chunk:
                                     break
                                 buf.extend(chunk)
+                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
+                                    with self._cond:
+                                        self._has_initial_data = True
+                                        self._cond.notify_all()
                                 while len(buf) >= self.BLOCK_SIZE:
                                     piece = bytes(buf[:self.BLOCK_SIZE])
                                     del buf[:self.BLOCK_SIZE]
@@ -4583,7 +4594,7 @@ class LocalStreamProxy:
                         self.end_headers()
                         return
 
-                    if not entry.wait_for_initial_bytes(min_bytes=8192, timeout=3.8):
+                    if not entry.wait_for_initial_bytes(min_bytes=1024, timeout=2.2):
                         self.send_response(502)
                         self.send_header("Content-Length", "0")
                         self.end_headers()
@@ -4749,6 +4760,85 @@ class StreamWorker(QThread):
     metadata_ready = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
+    _SHARED_YDL = None
+    _SHARED_YDL_LOCK = threading.Lock()
+    _SOUNDCLOUD_API_SESSION = None
+    _SOUNDCLOUD_API_SESSION_LOCK = threading.Lock()
+    _SOUNDCLOUD_RESOLVED_TRACKS = {}
+
+    @classmethod
+    def _get_soundcloud_session(cls):
+        with cls._SOUNDCLOUD_API_SESSION_LOCK:
+            if cls._SOUNDCLOUD_API_SESSION is None and requests is not None:
+                cls._SOUNDCLOUD_API_SESSION = _create_keepalive_stream_session(prefer_ipv4=False)
+            return cls._SOUNDCLOUD_API_SESSION
+
+    @classmethod
+    def get_soundcloud_client_id(cls):
+        """Возвращает кэшированный client_id для SoundCloud или извлекает его один раз в фоне."""
+        client_id = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
+        if client_id:
+            return client_id
+        try:
+            from yt_dlp.extractor import soundcloud as sc_mod
+            sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
+            client_id = getattr(sc_ie_cls, "_CLIENT_ID", None) if sc_ie_cls else None
+            if client_id:
+                SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
+                return client_id
+        except Exception:
+            pass
+        session = cls._get_soundcloud_session()
+        if session is not None:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://soundcloud.com/",
+            }
+            try:
+                home_resp = session.get("https://soundcloud.com/", headers=headers, timeout=(2.5, 3.5))
+                if home_resp.status_code == 200:
+                    scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', home_resp.text)
+                    for script_url in reversed(scripts[-4:]):
+                        js_resp = session.get(script_url, headers=headers, timeout=(2.0, 3.0))
+                        if js_resp.status_code == 200:
+                            m_id = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', js_resp.text)
+                            if m_id:
+                                client_id = m_id.group(1)
+                                SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
+                                return client_id
+            except Exception:
+                pass
+        return client_id
+
+    @classmethod
+    def _warmup_shared_ydl(cls):
+        """Предварительно инициализирует YoutubeDL в пуле, чтобы первый клик по треку не тратил 200+ мс на импорты."""
+        if cls._SHARED_YDL is not None:
+            return
+        opts = {
+            **yt_dlp_tls_options(),
+            "format": "bestaudio/best",
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "socket_timeout": 5,
+            "cachedir": None,
+            "ignoreconfig": True,
+            "no_color": True,
+            "check_formats": None,
+        }
+        with cls._SHARED_YDL_LOCK:
+            if cls._SHARED_YDL is None:
+                try:
+                    cls._SHARED_YDL = YoutubeDL(opts)
+                except Exception:
+                    pass
+
     def __init__(self, track, parent=None, cookie_file=None, cookies_from_browser=None, audio_quality="auto", avoid_format_id=""):
         super().__init__(parent)
         self.track = dict(track)
@@ -4821,13 +4911,31 @@ class StreamWorker(QThread):
                 inject_into_dict(fmt)
 
     def _extract(self, options):
-        with YoutubeDL(options) as ydl:
+        acquired = self._SHARED_YDL_LOCK.acquire(blocking=False)
+        ydl = None
+        should_close = False
+        try:
+            if acquired:
+                if self._SHARED_YDL is None:
+                    try:
+                        self._SHARED_YDL = YoutubeDL(options)
+                    except Exception:
+                        pass
+                if self._SHARED_YDL is not None:
+                    ydl = self._SHARED_YDL
+                    ydl.params.clear()
+                    ydl.params.update(options)
+            if ydl is None:
+                ydl = YoutubeDL(options)
+                should_close = True
+
             if type(ydl).__module__.startswith("yt_dlp"):
                 try:
                     from yt_dlp.extractor import soundcloud as sc_mod
                     sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
-                    if sc_ie_cls is not None and SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID and not getattr(sc_ie_cls, "_CLIENT_ID", None):
-                        sc_ie_cls._CLIENT_ID = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
+                    cached_cid = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID or self.get_soundcloud_client_id()
+                    if sc_ie_cls is not None and cached_cid and not getattr(sc_ie_cls, "_CLIENT_ID", None):
+                        sc_ie_cls._CLIENT_ID = cached_cid
                 except Exception:
                     pass
             info = ydl.extract_info(self.track["url"], download=False)
@@ -4844,6 +4952,14 @@ class StreamWorker(QThread):
                 except Exception:
                     pass
             return info
+        finally:
+            if acquired:
+                self._SHARED_YDL_LOCK.release()
+            elif ydl is not None and should_close:
+                try:
+                    ydl.close()
+                except Exception:
+                    pass
 
     def _download_stream_via_ytdlp(self, base_options, auth_options=None):
         """Прямая загрузка аудио силами самого yt-dlp в локальный кэш (точно как в DownloadWorker)."""
@@ -4959,7 +5075,7 @@ class StreamWorker(QThread):
             fragments=selected_info.get("fragments"),
             fragment_base_url=selected_info.get("fragment_base_url"),
         )
-        if proxy_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.8):
+        if proxy_entry.wait_for_initial_bytes(min_bytes=1024, timeout=1.8):
             return proxy_entry.canonical_url(proxy_url), selected_info, remote_host
         proxy_entry.close()
 
@@ -4975,14 +5091,14 @@ class StreamWorker(QThread):
                 fragments=alt.get("fragments"),
                 fragment_base_url=alt.get("fragment_base_url"),
             )
-            if alt_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.2):
+            if alt_entry.wait_for_initial_bytes(min_bytes=1024, timeout=1.8):
                 alt_host = QUrl(str(alt["url"])).host() or remote_host
                 return alt_entry.canonical_url(alt_proxy_url), alt, alt_host
             alt_entry.close()
         return None
 
     def _resolve_fast_soundcloud_stream(self):
-        """Прямой запрос к SoundCloud API v2 медиа-потоку (разрешение за ~100–180 мс без yt-dlp)."""
+        """Прямой запрос к SoundCloud API v2 медиа-потоку (разрешение за ~40–90 мс через keep-alive сессию)."""
         if requests is None or not self._is_real_extract():
             return None
         url = str(self.track.get("url") or "")
@@ -4993,8 +5109,10 @@ class StreamWorker(QThread):
         if not is_sc:
             return None
 
-        client_id = SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID
-        session = _create_keepalive_stream_session(prefer_ipv4=False)
+        client_id = self.get_soundcloud_client_id()
+        session = self._get_soundcloud_session()
+        if session is None:
+            session = _create_keepalive_stream_session(prefer_ipv4=False)
         if session is None:
             return None
         headers = {
@@ -5008,26 +5126,7 @@ class StreamWorker(QThread):
         }
         try:
             if not client_id:
-                try:
-                    from yt_dlp.extractor import soundcloud as sc_mod
-                    sc_ie_cls = getattr(sc_mod, "SoundcloudIE", None)
-                    client_id = getattr(sc_ie_cls, "_CLIENT_ID", None) if sc_ie_cls else None
-                except Exception:
-                    pass
-            if not client_id:
-                home_resp = session.get("https://soundcloud.com/", headers=headers, timeout=(2.5, 3.5))
-                if home_resp.status_code == 200:
-                    scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', home_resp.text)
-                    for script_url in reversed(scripts[-4:]):
-                        if self._cancel_requested:
-                            return None
-                        js_resp = session.get(script_url, headers=headers, timeout=(2.0, 3.0))
-                        if js_resp.status_code == 200:
-                            m_id = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', js_resp.text)
-                            if m_id:
-                                client_id = m_id.group(1)
-                                SearchWorker._SOUNDCLOUD_CACHED_CLIENT_ID = client_id
-                                break
+                client_id = self.get_soundcloud_client_id()
             if not client_id:
                 return None
 
@@ -5036,11 +5135,28 @@ class StreamWorker(QThread):
             track_duration = float(self.track.get("duration") or 0.0)
 
             if not transcodings and url.startswith(("https://", "http://")):
+                cached_res = self._SOUNDCLOUD_RESOLVED_TRACKS.get(url)
+                if cached_res and (time.monotonic() - cached_res[0]) < 1200:
+                    payload = cached_res[1]
+                    if isinstance(payload, dict):
+                        if payload.get("title"):
+                            track_title = payload.get("title")
+                        raw_dur = payload.get("duration") or payload.get("full_duration")
+                        if raw_dur:
+                            track_duration = float(raw_dur) / 1000.0 if float(raw_dur) > 1000 else float(raw_dur)
+                        med = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+                        transcodings = med.get("transcodings") if isinstance(med.get("transcodings"), list) else None
+
+            if not transcodings and url.startswith(("https://", "http://")):
                 resolve_url = f"https://api-v2.soundcloud.com/resolve?url={quote(url)}&client_id={client_id}"
-                resp = session.get(resolve_url, headers=headers, timeout=(3.0, 4.0))
+                resp = session.get(resolve_url, headers=headers, timeout=(2.5, 3.5))
                 if resp.status_code == 200:
                     payload = resp.json()
                     if isinstance(payload, dict):
+                        self._SOUNDCLOUD_RESOLVED_TRACKS[url] = (time.monotonic(), payload)
+                        if len(self._SOUNDCLOUD_RESOLVED_TRACKS) > 300:
+                            oldest_k = next(iter(self._SOUNDCLOUD_RESOLVED_TRACKS))
+                            self._SOUNDCLOUD_RESOLVED_TRACKS.pop(oldest_k, None)
                         if payload.get("title"):
                             track_title = payload.get("title")
                         raw_dur = payload.get("duration") or payload.get("full_duration")
@@ -5076,7 +5192,7 @@ class StreamWorker(QThread):
             delim = "&" if "?" in media_auth_url else "?"
             media_auth_url = f"{media_auth_url}{delim}client_id={client_id}"
 
-            m_resp = session.get(media_auth_url, headers=headers, timeout=(3.0, 4.0))
+            m_resp = session.get(media_auth_url, headers=headers, timeout=(2.5, 3.5))
             if m_resp.status_code != 200:
                 return None
             m_data = m_resp.json()
@@ -5098,7 +5214,7 @@ class StreamWorker(QThread):
                 ext=ext,
                 protocol=proto,
             )
-            if proxy_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.0):
+            if proxy_entry.wait_for_initial_bytes(min_bytes=1024, timeout=1.8):
                 canonical_url = proxy_entry.canonical_url(proxy_url)
                 remote_host = QUrl(str(stream_url)).host() or "sndcdn.com"
                 return {
@@ -5180,11 +5296,12 @@ class StreamWorker(QThread):
             "cachedir": None,
             "ignoreconfig": True,
             "no_color": True,
+            "check_formats": None,
         }
         if self._is_real_extract() and is_yt:
             options["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["android", "mweb"],
+                    "player_client": ["android"],
                     "player_skip": ["webpage", "configs", "initial_data", "js"],
                 }
             }
@@ -9779,10 +9896,10 @@ class MusicPlayer(QMainWindow):
         self.auto_play_generation = -1
         self.start_cards = []
 
-        # Прямые ссылки временные и могут истекать; сохраняем их на 15 минут.
+        # Прямые ссылки временные и могут истекать; сохраняем их на 45 минут.
         self.stream_cache = {}
         self._stream_details = OrderedDict()
-        self.stream_cache_ttl = 15 * 60
+        self.stream_cache_ttl = 45 * 60
         self._stream_workers = set()
         self.prefetch_worker = None
         self.prefetch_target = None
@@ -13022,17 +13139,31 @@ class MusicPlayer(QMainWindow):
         )
 
     def _prewarm_youtube_startup(self):
-        """В фоне прогревает cookies браузера при старте, чтобы клик по Миксу срабатывал мгновенно."""
-        try:
-            auth = self.youtube_auth_kwargs()
-            browser_spec = str(auth.get("cookies_from_browser") or "").strip()
-            if self.youtube_auth_mode == "browser" and browser_spec:
-                threading.Thread(
-                    target=lambda spec=browser_spec: YouTubeMusicAuth._cookies_from_browser(spec),
-                    daemon=True,
-                ).start()
-        except Exception:
-            pass
+        """В фоне прогревает cookies браузера, сессии SoundCloud и общий пул yt-dlp при старте, чтобы клик по треку или Миксу срабатывал мгновенно."""
+        def _prewarm_all():
+            try:
+                auth = self.youtube_auth_kwargs()
+                browser_spec = str(auth.get("cookies_from_browser") or "").strip()
+                if self.youtube_auth_mode == "browser" and browser_spec:
+                    try:
+                        YouTubeMusicAuth._cookies_from_browser(browser_spec)
+                    except Exception:
+                        pass
+                # Прогреваем клиент SoundCloud (client_id + TCP/TLS keepalive сессия)
+                try:
+                    StreamWorker.get_soundcloud_client_id()
+                    StreamWorker._get_soundcloud_session()
+                except Exception:
+                    pass
+                # Прогреваем общий экземпляр yt-dlp
+                try:
+                    StreamWorker._warmup_shared_ydl()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=_prewarm_all, daemon=True, name="StartupPrewarm").start()
 
     def _known_mix_Lookup(self, mix_key):
         """Возвращает сохранённые (mix_id, cover_url) для мгновенного запуска микса без get_home()."""
