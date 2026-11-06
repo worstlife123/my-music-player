@@ -3376,9 +3376,24 @@ class YouTubeMusicAuth:
             pairs.append((domain, name, value, path, include_subdomains.upper() == "TRUE"))
         return self._cookie_header_from_pairs(pairs)
 
+    _BROWSER_COOKIE_CACHE = {}
+    _BROWSER_COOKIE_TTL = 900.0
+
+    @classmethod
+    def invalidate_browser_cookie_cache(cls, browser_spec=None):
+        if browser_spec is None:
+            cls._BROWSER_COOKIE_CACHE.clear()
+        else:
+            cls._BROWSER_COOKIE_CACHE.pop(str(browser_spec or "").strip(), None)
+
     def _cookies_from_browser(self):
         if not self.browser_spec:
             raise RuntimeError("Не выбран браузерный профиль YouTube Music.")
+        spec_key = str(self.browser_spec).strip()
+        now = time.monotonic()
+        cached = self._BROWSER_COOKIE_CACHE.get(spec_key)
+        if cached and (now - cached[0]) < self._BROWSER_COOKIE_TTL and cached[1]:
+            return cached[1]
         try:
             from yt_dlp.cookies import extract_cookies_from_browser
             browser, profile, keyring, container = parse_cookies_from_browser(self.browser_spec)
@@ -3391,7 +3406,10 @@ class YouTubeMusicAuth:
                 for cookie in cookie_jar
                 if not cookie.is_expired()
             ]
-            return self._cookie_header_from_pairs(pairs)
+            header = self._cookie_header_from_pairs(pairs)
+            if header and "__Secure-3PAPISID=" in header:
+                self._BROWSER_COOKIE_CACHE[spec_key] = (now, header)
+            return header
         except Exception as error:
             raise RuntimeError(
                 "Не удалось прочитать cookies выбранного браузера. Полностью закрой Waterfox и его фоновые "
@@ -3527,12 +3545,15 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
     }
 
     def __init__(self, auth_mode, cookie_file="", browser_spec="", parent=None,
-                 mix_id="", anchor="", excluded_ids=None, limit=25, mix_key="supermix"):
+                 mix_id="", anchor="", excluded_ids=None, limit=25, mix_key="supermix",
+                 known_mix_id="", known_cover_url=""):
         super().__init__(parent)
         self.auth_mode = str(auth_mode or "file")
         self.cookie_file = str(cookie_file or "").strip()
         self.browser_spec = str(browser_spec or "").strip()
         self.mix_id = str(mix_id or "")
+        self.known_mix_id = str(known_mix_id or "").strip()
+        self.known_cover_url = str(known_cover_url or "").strip()
         self.mix_key = str(mix_key or "supermix").strip() or "supermix"
         self.anchor = str(anchor or "")
         self.excluded_ids = set(excluded_ids or ())
@@ -3656,34 +3677,56 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
                         raise TimeoutError("Супермикс: время ожидания истекло.")
                     kwargs["timeout"] = (min(3, remaining), min(5, remaining))
                     # Сохраняем TLS verification и REQUESTS_CA_BUNDLE.
-                    return original_request(method, url, *args, **kwargs)
+                    resp = original_request(method, url, *args, **kwargs)
+                    try:
+                        raw_bytes = getattr(resp, "_content", None)
+                        if isinstance(raw_bytes, (bytes, bytearray)) and "browse" in str(url):
+                            if b"RDTMAK5uy_" in raw_bytes and b'"continuations"' in raw_bytes:
+                                resp._content = re.sub(
+                                    rb',\s*"continuations"\s*:\s*\[[^\]]*\]', b"", bytes(raw_bytes)
+                                )
+                    except Exception:
+                        pass
+                    return resp
 
                 session.request = bounded_request
                 client = YTMusic(headers, requests_session=session, language="en")
+                playlist = None
                 if not self.mix_id:
-                    shelves = client.get_home(limit=20)
-                    item = self._find_mix_for_key(shelves, self.mix_key)
-                    if self._cancelled.is_set():
-                        return
-                    if item is None:
-                        self.failed.emit(
-                            "В аккаунте не найден My Supermix. Открой YouTube Music, проверь выбранный "
-                            "аккаунт и наличие супермикса, затем обнови cookies при необходимости."
-                        )
-                        return
-                    metadata["mix_id"] = item["playlistId"]
-                    metadata["mix_key"] = self.mix_key
-                    metadata["mix_title"] = str(item.get("title") or "")
-                    thumbnails = item.get("thumbnails") or []
-                    metadata["cover_url"] = normalize_artwork_url(thumbnails[-1].get("url", "")) if thumbnails else ""
-                    catalog = self._discover_mix_catalog(shelves)
-                    if catalog:
-                        metadata["catalog"] = {
-                            k: {"mix_id": v["playlistId"], "cover_url": v["cover_url"],
-                                "title": v["title"], "description": v["description"]}
-                            for k, v in catalog.items()
-                        }
-                    playlist = client.get_watch_playlist(playlistId=metadata["mix_id"], limit=self.limit)
+                    if self.known_mix_id:
+                        try:
+                            playlist = client.get_watch_playlist(playlistId=self.known_mix_id, limit=self.limit)
+                            if playlist and playlist.get("tracks"):
+                                metadata["mix_id"] = self.known_mix_id
+                                metadata["mix_key"] = self.mix_key
+                                if self.known_cover_url:
+                                    metadata["cover_url"] = self.known_cover_url
+                        except Exception:
+                            playlist = None
+                    if not playlist or not playlist.get("tracks"):
+                        shelves = client.get_home(limit=20)
+                        item = self._find_mix_for_key(shelves, self.mix_key)
+                        if self._cancelled.is_set():
+                            return
+                        if item is None:
+                            self.failed.emit(
+                                "В аккаунте не найден My Supermix. Открой YouTube Music, проверь выбранный "
+                                "аккаунт и наличие супермикса, затем обнови cookies при необходимости."
+                            )
+                            return
+                        metadata["mix_id"] = item["playlistId"]
+                        metadata["mix_key"] = self.mix_key
+                        metadata["mix_title"] = str(item.get("title") or "")
+                        thumbnails = item.get("thumbnails") or []
+                        metadata["cover_url"] = normalize_artwork_url(thumbnails[-1].get("url", "")) if thumbnails else ""
+                        catalog = self._discover_mix_catalog(shelves)
+                        if catalog:
+                            metadata["catalog"] = {
+                                k: {"mix_id": v["playlistId"], "cover_url": v["cover_url"],
+                                    "title": v["title"], "description": v["description"]}
+                                for k, v in catalog.items()
+                            }
+                        playlist = client.get_watch_playlist(playlistId=metadata["mix_id"], limit=self.limit)
                 else:
                     options = {"playlistId": self.mix_id, "radio": True, "limit": self.limit}
                     if self.anchor:
@@ -3713,6 +3756,7 @@ class SupermixWorker(QThread, YouTubeMusicAuth):
             # Не выводим ответ сервера/заголовки: в исключении могут оказаться cookies.
             detail = str(error).lower()
             if "403" in detail or "401" in detail:
+                self.invalidate_browser_cookie_cache(self.browser_spec)
                 message = "YouTube Music отклонил доступ к My Supermix (HTTP 401/403). Проверь аккаунт и обнови cookies."
             elif "cookie" in detail or "sapisid" in detail:
                 message = "Не удалось прочитать авторизацию My Supermix. Проверь профиль браузера или обнови cookies.txt."
@@ -4908,7 +4952,7 @@ class StreamWorker(QThread):
             fragments=selected_info.get("fragments"),
             fragment_base_url=selected_info.get("fragment_base_url"),
         )
-        if proxy_entry.wait_for_initial_bytes(min_bytes=8192, timeout=3.2):
+        if proxy_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.8):
             return proxy_entry.canonical_url(proxy_url), selected_info, remote_host
         proxy_entry.close()
 
@@ -4924,7 +4968,7 @@ class StreamWorker(QThread):
                 fragments=alt.get("fragments"),
                 fragment_base_url=alt.get("fragment_base_url"),
             )
-            if alt_entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.5):
+            if alt_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.2):
                 alt_host = QUrl(str(alt["url"])).host() or remote_host
                 return alt_entry.canonical_url(alt_proxy_url), alt, alt_host
             alt_entry.close()
@@ -5044,7 +5088,7 @@ class StreamWorker(QThread):
                 ext=ext,
                 protocol=proto,
             )
-            if proxy_entry.wait_for_initial_bytes(min_bytes=8192, timeout=2.2):
+            if proxy_entry.wait_for_initial_bytes(min_bytes=4096, timeout=2.0):
                 canonical_url = proxy_entry.canonical_url(proxy_url)
                 remote_host = QUrl(str(stream_url)).host() or "sndcdn.com"
                 return {
@@ -5128,11 +5172,14 @@ class StreamWorker(QThread):
             "no_color": True,
         }
         if self._is_real_extract() and is_yt:
-            # ВАЖНО: используем "android_vr" без "tv_embedded" (который блокируется лейблами SME/UMG на музыкальных треках)
-            # и пропускаем тяжелые DASH/HLS манифесты, так как форматы 251/140 уже есть в основном ответе.
+            # ВАЖНО: используем "android_vr" с пропуском загрузки HTML-страницы и JS-плеера ("player_skip")
+            # и включаем "formats": ["missing_pot"], чтобы yt-dlp не скрывал чистые аудио-потоки 251/140 (~270 мс).
             options["extractor_args"] = {
                 "youtube": {
                     "player_client": ["android_vr"],
+                    "player_skip": ["webpage", "configs", "initial_data", "js"],
+                    "formats": ["missing_pot"],
+                    "fetch_pot": ["never"],
                 }
             }
             options["youtube_include_dash_manifest"] = False
@@ -5151,7 +5198,16 @@ class StreamWorker(QThread):
                 if not can_retry_default and (not auth_options or not self._auth_may_help(public_error)):
                     raise
                 retry_options = dict(options)
-                retry_options.pop("extractor_args", None)
+                if can_retry_default:
+                    retry_options["extractor_args"] = {
+                        "youtube": {
+                            "player_client": ["android_vr", "mweb"],
+                            "player_skip": ["configs"],
+                            "formats": ["missing_pot"],
+                        }
+                    }
+                else:
+                    retry_options.pop("extractor_args", None)
                 if auth_options and (self._auth_may_help(public_error) or not can_retry_default):
                     retry_options.update(auth_options)
                     used_auth = True
@@ -5357,13 +5413,27 @@ def _parse_version_tuple(version_str):
     return tuple(int(p) for p in parts[:4])
 
 
+def _detect_github_repo(default_repo=GITHUB_REPO):
+    """Определяет owner/repo из локального .git/config, если приложение запущено из клона репозитория."""
+    try:
+        git_cfg = Path(__file__).resolve().parent / ".git" / "config"
+        if git_cfg.is_file():
+            text = git_cfg.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"github\.com[:/]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?\s*$", text, re.M)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    return str(default_repo or GITHUB_REPO).strip()
+
+
 class AppUpdateCheckerWorker(QThread):
-    """Проверяет наличие новой версии и готового .exe в GitHub Releases и ветке main."""
+    """Проверяет наличие новой версии и готового .exe в GitHub Releases, ветке main и локальном git."""
     update_checked = pyqtSignal(dict)
 
     def __init__(self, repo=GITHUB_REPO, current_version=APP_VERSION, parent=None):
         super().__init__(parent)
-        self.repo = str(repo or GITHUB_REPO).strip()
+        self.repo = _detect_github_repo(repo)
         self.current_version = str(current_version or APP_VERSION).strip()
         self._cancel_requested = False
 
@@ -5396,10 +5466,14 @@ class AppUpdateCheckerWorker(QThread):
     def run(self):
         result = {
             "ok": False,
+            "repo": self.repo,
             "current_version": self.current_version,
             "latest_version": self.current_version,
             "tag_name": f"v{self.current_version}",
             "is_newer": False,
+            "no_releases_yet": False,
+            "can_git_pull": False,
+            "has_git_commits": False,
             "exe_url": "",
             "exe_sha256_url": "",
             "zip_url": "",
@@ -5411,16 +5485,23 @@ class AppUpdateCheckerWorker(QThread):
             "notes": "",
             "error": "",
         }
+        last_err = ""
         try:
             release_data = None
             try:
                 release_data = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases/latest")
-            except Exception:
+            except Exception as e1:
+                last_err = str(e1)
                 try:
                     all_releases = self._http_get_json(f"https://api.github.com/repos/{self.repo}/releases")
-                    if isinstance(all_releases, list) and all_releases:
-                        release_data = all_releases[0]
-                except Exception:
+                    if isinstance(all_releases, list):
+                        result["ok"] = True
+                        if all_releases:
+                            release_data = all_releases[0]
+                        else:
+                            result["no_releases_yet"] = True
+                except Exception as e2:
+                    last_err = str(e2)
                     release_data = None
 
             if self._cancel_requested:
@@ -5470,11 +5551,40 @@ class AppUpdateCheckerWorker(QThread):
                         best_version = src_ver
                         result["tag_name"] = f"v{src_ver.lstrip('vV')}"
                     result["ok"] = True
-            except Exception:
-                pass
+            except Exception as e3:
+                if not last_err:
+                    last_err = str(e3)
+
+            # Если приложение запущено из git-репозитория (включая приватный репозиторий)
+            app_root = Path(__file__).resolve().parent
+            if not getattr(sys, "frozen", False) and (app_root / ".git").exists():
+                try:
+                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+                    local_proc = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=str(app_root), capture_output=True, text=True, timeout=3, creationflags=flags
+                    )
+                    remote_proc = subprocess.run(
+                        ["git", "ls-remote", "origin", "HEAD"],
+                        cwd=str(app_root), capture_output=True, text=True, timeout=4, creationflags=flags
+                    )
+                    if local_proc.returncode == 0 and remote_proc.returncode == 0:
+                        local_sha = local_proc.stdout.strip()
+                        remote_sha = (remote_proc.stdout.strip().split() or [""])[0]
+                        result["can_git_pull"] = True
+                        result["ok"] = True
+                        if local_sha and remote_sha and local_sha != remote_sha:
+                            result["has_git_commits"] = True
+                except Exception:
+                    pass
 
             result["latest_version"] = best_version
-            result["is_newer"] = _parse_version_tuple(best_version) > _parse_version_tuple(self.current_version)
+            result["is_newer"] = (
+                _parse_version_tuple(best_version) > _parse_version_tuple(self.current_version)
+                or bool(result.get("has_git_commits"))
+            )
+            if not result["ok"] and last_err:
+                result["error"] = last_err
         except Exception as exc:
             result["error"] = str(exc)
 
@@ -5483,7 +5593,7 @@ class AppUpdateCheckerWorker(QThread):
 
 
 class AppUpdateInstallerWorker(QThread):
-    """Скачивает обновление (готовый .exe, портативный .zip или исходник .py) и подготавливает автоперезапуск."""
+    """Скачивает обновление (готовый .exe, портативный .zip, git pull или исходник .py) и подготавливает автоперезапуск."""
     progress_changed = pyqtSignal(int, str)
     update_ready_to_restart = pyqtSignal(str, str)
     update_failed = pyqtSignal(str)
@@ -5553,7 +5663,7 @@ class AppUpdateInstallerWorker(QThread):
             zip_url = str(self.update_info.get("zip_url") or "")
             zip_sha_url = str(self.update_info.get("zip_sha256_url") or "")
             source_url = str(self.update_info.get("source_url") or "")
-            ver = str(self.update_info.get("latest_version") or "")
+            ver = str(self.update_info.get("latest_version") or APP_VERSION)
 
             if is_frozen and sys.platform == "win32":
                 current_exe = Path(sys.executable).resolve()
@@ -5630,7 +5740,24 @@ class AppUpdateInstallerWorker(QThread):
                     self.update_ready_to_restart.emit(str(bat_path), f"Новый AuroraMusicPlayer.exe (v{ver}) готов к запуску.")
                     return
 
-            # Вариант 3: Запуск из исходного .py файла — обновляем скрипт напрямую из ветки main
+            # Вариант 3: Запуск из исходного .py файла в git-репозитории (git pull)
+            app_root = Path(__file__).resolve().parent
+            if not is_frozen and (app_root / ".git").exists():
+                try:
+                    self.progress_changed.emit(35, "Обновление через git pull…")
+                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+                    pull_proc = subprocess.run(
+                        ["git", "pull", "--ff-only"],
+                        cwd=str(app_root), capture_output=True, text=True, timeout=15, creationflags=flags
+                    )
+                    if pull_proc.returncode == 0:
+                        self.progress_changed.emit(100, "Обновление через Git завершено!")
+                        self.update_ready_to_restart.emit("__python_restart__", f"Приложение обновлено через Git до актуальной версии v{ver}.")
+                        return
+                except Exception:
+                    pass
+
+            # Вариант 4: Запуск из исходного .py файла — обновляем скрипт напрямую из ветки main
             if source_url:
                 import ast
                 script_path = Path(__file__).resolve()
@@ -5648,7 +5775,7 @@ class AppUpdateInstallerWorker(QThread):
                 self.update_ready_to_restart.emit("__python_restart__", f"Исходный код обновлён до версии v{ver}.")
                 return
 
-            raise RuntimeError("В релизе не найден подходящий файл обновления.")
+            raise RuntimeError("В релизе пока нет готового .exe файла. Дождитесь завершения сборки в GitHub Actions.")
         except Exception as exc:
             if not self._cancel_requested:
                 self.update_failed.emit(str(exc))
@@ -9605,7 +9732,22 @@ class MusicPlayer(QMainWindow):
         self.supermix_worker = None
         self.supermix_refill_worker = None
         self.supermix_session = None
-        self.supermix_cover_url = ""
+        self.supermix_cover_url = str(self.settings.value("supermix_cover_url", "") or "")
+        self.youtube_mix_catalog = {}
+        self.youtube_mix_covers = {}
+        try:
+            raw_cat = str(self.settings.value("youtube_mix_catalog_json", "") or "").strip()
+            if raw_cat:
+                parsed_cat = json.loads(raw_cat)
+                if isinstance(parsed_cat, dict):
+                    self.youtube_mix_catalog = parsed_cat
+                    for ck, cinfo in parsed_cat.items():
+                        if isinstance(cinfo, dict) and cinfo.get("cover_url"):
+                            self.youtube_mix_covers[str(ck)] = str(cinfo["cover_url"])
+                            if ck == "supermix" and not self.supermix_cover_url:
+                                self.supermix_cover_url = str(cinfo["cover_url"])
+        except Exception:
+            pass
         self.supermix_retry_timer = QTimer(self)
         self.supermix_retry_timer.setSingleShot(True)
         self.supermix_retry_timer.timeout.connect(self.maybe_refill_supermix)
@@ -9761,6 +9903,10 @@ class MusicPlayer(QMainWindow):
                 and _SMOKE_DIRECTORY is None
                 and "unittest" not in sys.modules):
             self._startup_update_timer.start(3200)
+            QTimer.singleShot(150, self._prewarm_youtube_startup)
+            if self.supermix_cover_url or self.youtube_mix_covers:
+                QTimer.singleShot(250, self._update_supermix_cover)
+                QTimer.singleShot(250, self._update_youtube_mix_covers)
 
     # ---------------------------------------------------------
     # Интерфейс. Две постоянные колонки + выдвижная очередь.
@@ -11251,11 +11397,21 @@ class MusicPlayer(QMainWindow):
             QPushButton#searchSubmit:hover { background: #1ED760; }
             QPushButton#searchSubmit:pressed { background: #43BE76; }
             QPushButton#searchSubmit:disabled { background: #26362E; color: #7E9489; }
+            QDialog, QMessageBox { background-color: #151921; color: #F2F5F9; }
+            QMessageBox QLabel, QDialog QLabel { background: transparent; color: #F2F5F9; }
+            QMessageBox QLabel { min-width: 300px; }
+            QMessageBox QPushButton {
+                background: #212834; color: #F2F5F9; border: 1px solid #303948;
+                border-radius: 9px; padding: 8px 18px; min-width: 82px; font-weight: 600;
+            }
+            QMessageBox QPushButton:hover {
+                background: #2A3444; border-color: #5CE092; color: #FFFFFF;
+            }
         """
         light_styles = r"""
             QMainWindow, QWidget#root { background: #E9EDF2; }
             QWidget { color: #18202A; }
-            QMessageBox { background: #F3F6FA; color: #18202A; }
+            QDialog, QMessageBox { background-color: #F3F6FA; color: #18202A; }
             QMessageBox QLabel { background: transparent; color: #18202A; min-width: 280px; }
             QMessageBox QPushButton {
                 background: #E8EEF5; color: #18202A; border: 1px solid #CFD8E3;
@@ -11713,32 +11869,9 @@ class MusicPlayer(QMainWindow):
                 except Exception:
                     pass
             if manual:
-                self._prompt_and_install_update(info)
+                self._show_update_dialog(info)
         elif manual:
-            if info.get("ok"):
-                answer = QMessageBox.question(
-                    self,
-                    "Обновление приложения",
-                    f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
-                    "Хотите всё равно переустановить последнюю версию с GitHub или открыть страницу релизов?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
-                    QMessageBox.StandardButton.Close,
-                )
-                if answer == QMessageBox.StandardButton.Yes:
-                    self.start_self_update(info)
-                elif answer == QMessageBox.StandardButton.Open:
-                    QDesktopServices.openUrl(QUrl(info.get("release_url") or f"https://github.com/{GITHUB_REPO}/releases"))
-            else:
-                answer = QMessageBox.information(
-                    self,
-                    "Проверка обновлений",
-                    f"Не удалось получить список релизов через API GitHub ({info.get('error') or 'нет ответа'}).\n\n"
-                    "Открыть страницу готовых .exe сборок на GitHub в браузере?",
-                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
-                    QMessageBox.StandardButton.Open,
-                )
-                if answer == QMessageBox.StandardButton.Open:
-                    QDesktopServices.openUrl(QUrl(f"https://github.com/{GITHUB_REPO}/releases"))
+            self._show_update_dialog(info)
 
     def on_update_button_clicked(self):
         if self._update_installer_worker is not None and self._update_installer_worker.isRunning():
@@ -11746,44 +11879,164 @@ class MusicPlayer(QMainWindow):
             return
         info = self._available_update_info
         if isinstance(info, dict) and info.get("is_newer"):
-            self._prompt_and_install_update(info)
+            self._show_update_dialog(info)
         else:
             self.check_for_updates(manual=True)
 
     def _prompt_and_install_update(self, info):
+        self._show_update_dialog(info)
+
+    def _show_update_dialog(self, info):
+        info = dict(info or {})
+        repo = str(info.get("repo") or _detect_github_repo(GITHUB_REPO))
         latest_ver = str(info.get("latest_version") or APP_VERSION)
+        has_newer = bool(info.get("is_newer"))
+        is_ok = bool(info.get("ok"))
         notes = str(info.get("notes") or "").strip()
-        notes_block = f"\n\nЧто нового:\n{notes[:600]}" if notes else ""
-        is_frozen = bool(getattr(sys, "frozen", False))
-        mode_desc = (
-            "Плеер автоматически скачает новый .exe / архив с GitHub Releases, заменит файлы и перезапустится."
-            if is_frozen and sys.platform == "win32"
-            else "Плеер автоматически скачает свежую версию с GitHub, сохранит резервную копию и перезапустится."
+        release_url = str(info.get("release_url") or f"https://github.com/{repo}/releases")
+        actions_url = str(info.get("actions_url") or f"https://github.com/{repo}/actions/workflows/windows-build.yml")
+
+        dialog = QDialog(self)
+        dialog.setObjectName("auroraUpdateDialog")
+        dialog.setWindowTitle("Обновление Aurora Music Player")
+        dialog.setMinimumWidth(480)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+
+        title_lbl = QLabel(
+            f"Доступна новая версия v{latest_ver}" if has_newer else f"Aurora Music Player · v{APP_VERSION}",
+            dialog,
         )
-        box = QMessageBox(self)
-        box.setWindowTitle(f"Обновление Aurora до v{latest_ver}")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(
-            f"Доступна новая версия Aurora Music Player v{latest_ver} (у вас v{APP_VERSION}).\n\n"
-            f"{mode_desc}{notes_block}"
+        title_lbl.setObjectName("updateDialogTitle")
+        title_lbl.setWordWrap(True)
+        layout.addWidget(title_lbl)
+
+        if has_newer:
+            extra_commits = " (найдены новые коммиты в Git)" if info.get("has_git_commits") else ""
+            body_text = (
+                f"Установлена версия: v{APP_VERSION}\n"
+                f"Актуальная версия на GitHub: v{latest_ver}{extra_commits}\n\n"
+                "Нажмите «Обновить и перезапустить», чтобы автоматически установить свежую версию "
+                "и перезапустить плеер."
+            )
+            if notes:
+                body_text += f"\n\nЧто нового:\n{notes[:500]}"
+        elif is_ok:
+            if info.get("no_releases_yet"):
+                body_text = (
+                    f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
+                    "В разделе GitHub Releases пока нет опубликованных тегов, но вы можете обновить "
+                    "приложение напрямую из ветки main или открыть страницу сборок GitHub Actions (.exe)."
+                )
+            else:
+                body_text = (
+                    f"У вас установлена актуальная версия Aurora v{APP_VERSION}.\n\n"
+                    "Вы можете принудительно обновить файлы из репозитория GitHub или открыть страницу готовых .exe релизов."
+                )
+        else:
+            err_detail = str(info.get("error") or "репозиторий приватный или нет опубликованных релизов")
+            body_text = (
+                f"Текущая версия: Aurora v{APP_VERSION}\n"
+                f"Репозиторий: github.com/{repo}\n\n"
+                f"Статус API GitHub: {err_detail}.\n"
+                "Вы можете запустить обновление напрямую (через Git / ветку main) или открыть страницу готовых .exe сборок в браузере."
+            )
+
+        desc_lbl = QLabel(body_text, dialog)
+        desc_lbl.setObjectName("updateDialogDesc")
+        desc_lbl.setWordWrap(True)
+        layout.addWidget(desc_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        install_btn = QPushButton(
+            "⬇ Обновить и перезапустить" if has_newer else "↻ Переустановить с GitHub",
+            dialog,
         )
-        install_btn = box.addButton("⬇ Обновить и перезапустить", QMessageBox.ButtonRole.AcceptRole)
-        github_btn = box.addButton("Скачать .exe с GitHub ↗", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is install_btn:
+        install_btn.setObjectName("accentButton")
+        install_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        releases_btn = QPushButton("GitHub Releases (.exe) ↗", dialog)
+        releases_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        actions_btn = QPushButton("GitHub Actions ↗", dialog)
+        actions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        close_btn = QPushButton("Закрыть", dialog)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        btn_row.addWidget(install_btn)
+        btn_row.addWidget(releases_btn)
+        btn_row.addWidget(actions_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        action_taken = [None]
+
+        def on_install():
+            action_taken[0] = "install"
+            dialog.accept()
+
+        def on_releases():
+            QDesktopServices.openUrl(QUrl(release_url))
+
+        def on_actions():
+            QDesktopServices.openUrl(QUrl(actions_url))
+
+        install_btn.clicked.connect(on_install)
+        releases_btn.clicked.connect(on_releases)
+        actions_btn.clicked.connect(on_actions)
+        close_btn.clicked.connect(dialog.reject)
+
+        if self.theme == "light":
+            dialog.setStyleSheet("""
+                QDialog#auroraUpdateDialog { background-color: #F5F7FA; color: #18202A; }
+                QDialog#auroraUpdateDialog QLabel { color: #18202A; background: transparent; font-size: 13.5px; }
+                QDialog#auroraUpdateDialog QLabel#updateDialogTitle { color: #111822; font-size: 19px; font-weight: 800; }
+                QDialog#auroraUpdateDialog QLabel#updateDialogDesc { color: #475569; }
+                QDialog#auroraUpdateDialog QPushButton {
+                    background: #E6ECF4; color: #18202A; border: 1px solid #CBD5E1;
+                    border-radius: 10px; padding: 9px 14px; font-weight: 600;
+                }
+                QDialog#auroraUpdateDialog QPushButton:hover { background: #FFFFFF; border-color: #1DB954; color: #146C38; }
+                QDialog#auroraUpdateDialog QPushButton#accentButton {
+                    background: #1DB954; color: #FFFFFF; border: none; font-weight: 800;
+                }
+                QDialog#auroraUpdateDialog QPushButton#accentButton:hover { background: #169C46; }
+            """)
+        else:
+            dialog.setStyleSheet("""
+                QDialog#auroraUpdateDialog { background-color: #161B23; color: #F2F5F9; border: 1px solid #283241; }
+                QDialog#auroraUpdateDialog QLabel { color: #F2F5F9; background: transparent; font-size: 13.5px; }
+                QDialog#auroraUpdateDialog QLabel#updateDialogTitle { color: #FFFFFF; font-size: 19px; font-weight: 800; }
+                QDialog#auroraUpdateDialog QLabel#updateDialogDesc { color: #A8B3C4; }
+                QDialog#auroraUpdateDialog QPushButton {
+                    background: #212834; color: #F2F5F9; border: 1px solid #323D4E;
+                    border-radius: 10px; padding: 9px 14px; font-weight: 600;
+                }
+                QDialog#auroraUpdateDialog QPushButton:hover { background: #2A3444; border-color: #5CE092; color: #FFFFFF; }
+                QDialog#auroraUpdateDialog QPushButton#accentButton {
+                    background: #1DB954; color: #09140D; border: none; font-weight: 800;
+                }
+                QDialog#auroraUpdateDialog QPushButton#accentButton:hover { background: #2FE06D; color: #09140D; }
+            """)
+
+        dialog.exec()
+        dialog.deleteLater()
+        if action_taken[0] == "install":
             self.start_self_update(info)
-        elif clicked is github_btn:
-            QDesktopServices.openUrl(QUrl(info.get("release_url") or f"https://github.com/{GITHUB_REPO}/releases"))
 
     def start_self_update(self, info=None):
         if self._update_installer_worker is not None and self._update_installer_worker.isRunning():
             return
+        repo = _detect_github_repo(GITHUB_REPO)
         target_info = dict(info or self._available_update_info or {
             "latest_version": APP_VERSION,
-            "source_url": f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/player_aurora_smart_beautiful_fixed_ui_repaint.py",
-            "release_url": f"https://github.com/{GITHUB_REPO}/releases",
+            "source_url": f"https://raw.githubusercontent.com/{repo}/main/player_aurora_smart_beautiful_fixed_ui_repaint.py",
+            "release_url": f"https://github.com/{repo}/releases",
         })
         self.show_toast("Начинаю загрузку обновления с GitHub…", 4000)
         self.set_status("Скачиваю обновление с GitHub…")
@@ -12763,6 +13016,32 @@ class MusicPlayer(QMainWindow):
             browser_spec=auth.get("cookies_from_browser", ""), parent=self, **kwargs
         )
 
+    def _prewarm_youtube_startup(self):
+        """В фоне прогревает cookies браузера при старте, чтобы клик по Миксу срабатывал мгновенно."""
+        try:
+            auth = self.youtube_auth_kwargs()
+            browser_spec = str(auth.get("cookies_from_browser") or "").strip()
+            if self.youtube_auth_mode == "browser" and browser_spec:
+                threading.Thread(
+                    target=lambda spec=browser_spec: YouTubeMusicAuth._cookies_from_browser(spec),
+                    daemon=True,
+                ).start()
+        except Exception:
+            pass
+
+    def _known_mix_Lookup(self, mix_key):
+        """Возвращает сохранённые (mix_id, cover_url) для мгновенного запуска микса без get_home()."""
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or "unittest" in sys.modules:
+            return "", ""
+        catalog = getattr(self, "youtube_mix_catalog", {}) or {}
+        entry = catalog.get(mix_key)
+        if isinstance(entry, dict):
+            mid = str(entry.get("mix_id") or "").strip()
+            cov = str(entry.get("cover_url") or "").strip()
+            if mid:
+                return mid, cov
+        return "", ""
+
     def play_supermix(self):
         """Открывает настоящий My Supermix; до ответа сохраняет текущую очередь."""
         if not self.youtube_auth_kwargs():
@@ -12770,7 +13049,12 @@ class MusicPlayer(QMainWindow):
             return
         self._active_youtube_mix_key = "supermix"
         self._cancel_supermix()
-        worker = self._make_supermix_worker(excluded_ids=self._youtube_disliked_video_ids())
+        known_mid, known_cov = self._known_mix_Lookup("supermix")
+        extra_kw = {"excluded_ids": self._youtube_disliked_video_ids()}
+        if known_mid:
+            extra_kw["known_mix_id"] = known_mid
+            extra_kw["known_cover_url"] = known_cov or self.supermix_cover_url
+        worker = self._make_supermix_worker(**extra_kw)
         self.supermix_worker = worker
         worker.result_ready.connect(lambda result, meta, w=worker: self.on_supermix_ready(w, result, meta))
         worker.failed.connect(lambda message, w=worker: self.on_supermix_error(w, message))
@@ -12791,10 +13075,15 @@ class MusicPlayer(QMainWindow):
             return
         self._active_youtube_mix_key = mix_key
         self._cancel_supermix()
-        worker = self._make_supermix_worker(
-            mix_key=mix_key,
-            excluded_ids=self._youtube_disliked_video_ids(),
-        )
+        known_mid, known_cov = self._known_mix_Lookup(mix_key)
+        extra_kw = {
+            "mix_key": mix_key,
+            "excluded_ids": self._youtube_disliked_video_ids(),
+        }
+        if known_mid:
+            extra_kw["known_mix_id"] = known_mid
+            extra_kw["known_cover_url"] = known_cov
+        worker = self._make_supermix_worker(**extra_kw)
         self.supermix_worker = worker
         worker.result_ready.connect(lambda result, meta, w=worker: self.on_supermix_ready(w, result, meta))
         worker.failed.connect(lambda message, w=worker: self.on_supermix_error(w, message))
@@ -12830,13 +13119,22 @@ class MusicPlayer(QMainWindow):
             self.youtube_mix_catalog = {}
         if isinstance(metadata.get("catalog"), dict):
             self.youtube_mix_catalog.update(metadata["catalog"])
+        cover_url = str(metadata.get("cover_url") or "")
+        if mix_id:
+            prev_entry = self.youtube_mix_catalog.get(mix_key) if isinstance(self.youtube_mix_catalog.get(mix_key), dict) else {}
+            self.youtube_mix_catalog[mix_key] = {
+                "mix_id": mix_id,
+                "title": str(metadata.get("mix_title") or prev_entry.get("title") or ""),
+                "description": str(prev_entry.get("description") or ""),
+                "cover_url": cover_url or str(prev_entry.get("cover_url") or ""),
+            }
         session = {"mix_id": mix_id, "seen": {self.youtube_video_id(t) for t in result},
                    "anchor": "", "waiting": False, "failures": 0}
         if mix_key != "supermix":
             session["mix_key"] = mix_key
-        cover_url = str(metadata.get("cover_url") or "")
-        if mix_key == "supermix":
+        if mix_key == "supermix" and cover_url:
             self.supermix_cover_url = cover_url
+            self.settings.setValue("supermix_cover_url", cover_url)
         if not hasattr(self, "youtube_mix_covers") or not isinstance(self.youtube_mix_covers, dict):
             self.youtube_mix_covers = {}
         if cover_url:
@@ -12846,6 +13144,10 @@ class MusicPlayer(QMainWindow):
                 self.youtube_mix_covers[cat_key] = str(cat_info["cover_url"])
                 if cat_key == "supermix" and not self.supermix_cover_url:
                     self.supermix_cover_url = str(cat_info["cover_url"])
+        try:
+            self.settings.setValue("youtube_mix_catalog_json", json.dumps(self.youtube_mix_catalog, ensure_ascii=False))
+        except Exception:
+            pass
         titles = {k: title for k, title, _, _, _ in self.YOUTUBE_EXTRA_MIX_SPECS}
         mix_label = "My Supermix" if mix_key == "supermix" else titles.get(mix_key, metadata.get("mix_title") or "Микс YouTube Music")
         self._start_music_queue(result, "youtube", f"{mix_label} · {len(result)} треков · продолжение загружается автоматически.",
@@ -16638,11 +16940,14 @@ class MusicPlayer(QMainWindow):
             return
         self._stop_supermix_session()
         self.supermix_cover_url = ""
+        self.youtube_mix_catalog = {}
+        self.youtube_mix_covers = {}
+        YouTubeMusicAuth.invalidate_browser_cookie_cache()
         self.youtube_cookie_file = ""
         self.youtube_auth_mode = "file"
         self.youtube_auth_browser = "chrome"
         self.youtube_auth_profile = ""
-        for key in ("youtube_cookie_file", "youtube_auth_mode", "youtube_auth_browser", "youtube_auth_profile"):
+        for key in ("youtube_cookie_file", "youtube_auth_mode", "youtube_auth_browser", "youtube_auth_profile", "youtube_mix_catalog_json", "supermix_cover_url"):
             self.settings.remove(key)
         self.settings.sync()
         self.refresh_likes_list()
