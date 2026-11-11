@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, quote_plus, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, Request, build_opener
 
 try:
@@ -74,10 +74,10 @@ def _ensure_python_runtime():
 
 
 try:
-    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
+    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData, QCoreApplication
 except ImportError:
     _ensure_python_runtime()
-    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData
+    from PyQt6.QtCore import Qt, QThread, QUrl, QSize, QRect, QRectF, QTimer, QSettings, QPointF, QPoint, QEvent, QEasingCurve, QPropertyAnimation, QVariantAnimation, pyqtSignal, pyqtProperty, QStandardPaths, QAbstractNativeEventFilter, QBuffer, QIODevice, QSaveFile, QSignalBlocker, QT_VERSION_STR, QObject, QMimeData, QCoreApplication
 
 if requests is None:
     try:
@@ -98,7 +98,52 @@ from PyQt6.QtWidgets import (
     QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 
-from youtube_music_backend import YouTubeMusicPlayer, YouTubeMusicSession, youtube_music_url
+# WebEngine is optional at application startup. Enable its supported late-import
+# path before QApplication, then load it only when a YouTube track is requested.
+if QCoreApplication.instance() is None:
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+
+YouTubeMusicPlayer = None
+YouTubeMusicSession = None
+
+
+def youtube_music_url(track):
+    """Resolve YouTube IDs without importing the optional browser module."""
+    parsed = urlsplit(str(track.get("url") or "").strip())
+    host = (parsed.hostname or "").lower()
+    youtube_host = host in ("youtube.com", "youtu.be") or host.endswith(".youtube.com")
+    if track.get("source") != "youtube" and not youtube_host:
+        return ""
+    video_id = str(track.get("video_id") or track.get("videoId") or "").strip()
+    if not video_id and youtube_host:
+        if host == "youtu.be":
+            video_id = parsed.path.strip("/").split("/")[0]
+        elif parsed.path.startswith(("/shorts/", "/embed/")):
+            video_id = parsed.path.split("/")[2]
+        else:
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+    return "https://music.youtube.com/watch?v=" + video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else ""
+
+
+def _load_youtube_music_backend():
+    """Unavailable browser support must not prevent native playback or startup."""
+    global YouTubeMusicPlayer, YouTubeMusicSession
+    try:
+        import youtube_music_backend as backend
+        if backend.QWebEngineProfile is None:
+            return False
+        if YouTubeMusicPlayer is None:
+            YouTubeMusicPlayer = backend.YouTubeMusicPlayer
+        if YouTubeMusicSession is None:
+            YouTubeMusicSession = backend.YouTubeMusicSession
+        return True
+    except (ImportError, OSError, RuntimeError) as error:
+        logging.getLogger("aurora").info("Веб-плеер YouTube недоступен; используется прежний запуск: %s", error)
+        return False
+
+
+def _is_youtube_music_player(player):
+    return YouTubeMusicPlayer is not None and isinstance(player, YouTubeMusicPlayer)
 
 
 def YoutubeDL(*args, **kwargs):
@@ -11769,6 +11814,8 @@ class MusicPlayer(QMainWindow):
     def _media_player_for(self, slot, media_url):
         is_youtube = media_url.host() == "music.youtube.com" and media_url.path() == "/watch"
         if is_youtube:
+            if not _load_youtube_music_backend():
+                raise RuntimeError("Веб-плеер YouTube Music недоступен.")
             if self._youtube_session is None:
                 self._youtube_session = YouTubeMusicSession(self)
             auth = self.youtube_auth_kwargs()
@@ -19360,10 +19407,10 @@ class MusicPlayer(QMainWindow):
     def start_stream_extraction(self, track):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
         youtube_url = youtube_music_url(track)
-        if youtube_url:
+        if youtube_url and _load_youtube_music_backend():
             self.start_pending_media(QUrl(youtube_url), "YouTube Music playerApi")
             return
-        if track.get("source") == "youtube":
+        if track.get("source") == "youtube" and not youtube_url:
             self.stream_error(self._key(track), "Не удалось определить video ID трека YouTube.")
             return
         key = self._key(track)
@@ -19613,7 +19660,7 @@ class MusicPlayer(QMainWindow):
         self.pending_position_seen = False
         self._recovery_seek_applied = False
         self.pending_media_timer.start(max(60000, self.PENDING_MEDIA_TIMEOUT_MS)
-                                       if isinstance(player, YouTubeMusicPlayer) else self.PENDING_MEDIA_TIMEOUT_MS)
+                                       if _is_youtube_music_player(player) else self.PENDING_MEDIA_TIMEOUT_MS)
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url or self._network_recovery is not None:
@@ -19649,7 +19696,7 @@ class MusicPlayer(QMainWindow):
                 and not self.player.source().isLocalFile())
 
     def _ended_early(self):
-        if isinstance(self.player, YouTubeMusicPlayer):
+        if _is_youtube_music_player(self.player):
             # The official API's end event is authoritative; it is not a
             # truncated FFmpeg stream, even if catalog duration was stale.
             return False
@@ -20278,13 +20325,17 @@ def run_smoke_test():
             raise RuntimeError("Не удалось отрисовать главное окно")
         # Also exercise QtWebEngineProcess/resources from the frozen bundle,
         # without a network request or account. Import checks alone miss these.
-        window._youtube_session = YouTubeMusicSession(window)
-        browser = YouTubeMusicPlayer(window._youtube_session, window)
-        browser_ready = [False]
-        browser.page.loadFinished.connect(lambda ok: browser.page.runJavaScript(
-            "2 + 2", lambda value: browser_ready.__setitem__(0, value == 4)
-        ) if ok else None)
-        browser.page.setHtml("<!doctype html><title>Aurora playback smoke test</title>")
+        browser_ready = [True]
+        if _load_youtube_music_backend():
+            window._youtube_session = YouTubeMusicSession(window)
+            browser = YouTubeMusicPlayer(window._youtube_session, window)
+            browser_ready[0] = False
+            browser.page.loadFinished.connect(lambda ok: browser.page.runJavaScript(
+                "2 + 2", lambda value: browser_ready.__setitem__(0, value == 4)
+            ) if ok else None)
+            browser.page.setHtml("<!doctype html><title>Aurora playback smoke test</title>")
+        elif getattr(sys, "frozen", False):
+            raise RuntimeError("В готовой сборке отсутствует модуль YouTube Music / Qt WebEngine.")
         window.show_mini_player()
         path = root / "sample.wav"
         with wave.open(str(path), "wb") as sound:

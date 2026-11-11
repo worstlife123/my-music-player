@@ -234,14 +234,22 @@ class PlaybackIntegration(unittest.TestCase):
             self.assertEqual(self.w.current_track['url'], second['url'])
             next_track.assert_called_once_with(1)
 
-    def test_missing_browser_dependency_reports_error_without_interrupting_old_audio(self):
+    def test_missing_browser_dependency_uses_native_playback_without_interrupting_old_audio(self):
         self.start(self.local_track('old-without-browser'))
         previous = self.w.player
-        with patch.object(backend, 'QWebEngineProfile', None):
+        self.browser_fixture()
+        audio = self.local_track('youtube-native-fallback')
+        with patch.object(backend, 'QWebEngineProfile', None), \
+             patch.object(m.StreamWorker, '_extract', return_value={
+                 'url': m.QUrl.fromLocalFile(audio['url']).toString(), 'duration': 10,
+                 'title': 'Native fallback'}):
             self.w.play_track(self.youtube_track('missing0001'), -1)
-        self.assertIsNone(self.w.requested_track)
-        self.assertIs(self.w.player, previous)
-        self.assertEqual(previous.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+            self.assertIs(self.w.player, previous)
+            self.assertEqual(previous.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+            wait_for(lambda: self.w.requested_track is None and self.w.current_track['video_id'] == 'missing0001')
+        self.assertIsInstance(self.w.player, m.QMediaPlayer)
+        self.assertTrue(self.w.player.source().isLocalFile())
+        self.assertEqual(self.w.player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
 
 
 class BrowserPlayerContract(unittest.TestCase):
@@ -392,8 +400,8 @@ class YouTubeUrls(unittest.TestCase):
         for url in ('https://youtu.be/browser0001?t=12',
                     'https://youtube.com/shorts/browser0001',
                     'https://music.youtube.com/watch?v=browser0001&list=PRIVATE'):
-            self.assertEqual(backend.youtube_music_url({'url': url}), expected)
-        self.assertEqual(backend.youtube_music_url({'source': 'youtube', 'video_id': 'browser0001'}), expected)
+            self.assertEqual(m.youtube_music_url({'url': url}), expected)
+        self.assertEqual(m.youtube_music_url({'source': 'youtube', 'video_id': 'browser0001'}), expected)
         for url in ('https://youtube.com.evil.invalid/watch?v=browser0001',
                     'https://soundcloud.com/test/song', 'https://youtube.com/watch?v=bad'):
-            self.assertEqual(backend.youtube_music_url({'url': url}), '')
+            self.assertEqual(m.youtube_music_url({'url': url}), '')
