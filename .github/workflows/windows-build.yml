@@ -69,6 +69,8 @@ jobs:
             "--specpath", ".",
             "--collect-all", "yt_dlp",
             "--collect-all", "ytmusicapi",
+            "--hidden-import", "youtube_music_backend",
+            "--hidden-import", "PyQt6.QtWebEngineWidgets",
             "--hidden-import", "PyQt6.QtWebEngineCore",
             "--hidden-import", "requests",
             "--hidden-import", "certifi"
@@ -124,6 +126,8 @@ jobs:
             "--specpath", ".",
             "--collect-all", "yt_dlp",
             "--collect-all", "ytmusicapi",
+            "--hidden-import", "youtube_music_backend",
+            "--hidden-import", "PyQt6.QtWebEngineWidgets",
             "--hidden-import", "PyQt6.QtWebEngineCore",
             "--hidden-import", "requests",
             "--hidden-import", "certifi"
@@ -146,6 +150,12 @@ jobs:
           if (-not (Test-Path .\dist\AuroraMusicPlayer.exe)) {
             throw 'Single-file AuroraMusicPlayer.exe was not produced'
           }
+          $singlePlayer = Start-Process -FilePath .\dist\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $singlePlayer.WaitForExit(60000)) {
+            Stop-Process -Id $singlePlayer.Id -Force
+            throw 'Single-file player smoke test timed out'
+          }
+          if ($singlePlayer.ExitCode -ne 0) { throw "Single-file player smoke test failed: $($singlePlayer.ExitCode)" }
           $exeHash = (Get-FileHash .\dist\AuroraMusicPlayer.exe -Algorithm SHA256).Hash.ToLower()
           "$exeHash  AuroraMusicPlayer.exe" | Set-Content .\dist\AuroraMusicPlayer.exe.sha256.txt -Encoding ascii
 

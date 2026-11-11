@@ -234,22 +234,31 @@ class PlaybackIntegration(unittest.TestCase):
             self.assertEqual(self.w.current_track['url'], second['url'])
             next_track.assert_called_once_with(1)
 
-    def test_missing_browser_dependency_uses_native_playback_without_interrupting_old_audio(self):
+    def test_missing_browser_dependency_does_not_fall_back_to_native_youtube_playback(self):
         self.start(self.local_track('old-without-browser'))
         previous = self.w.player
         self.browser_fixture()
-        audio = self.local_track('youtube-native-fallback')
         with patch.object(backend, 'QWebEngineProfile', None), \
-             patch.object(m.StreamWorker, '_extract', return_value={
-                 'url': m.QUrl.fromLocalFile(audio['url']).toString(), 'duration': 10,
-                 'title': 'Native fallback'}):
+             patch.object(m, 'StreamWorker') as extractor:
             self.w.play_track(self.youtube_track('missing0001'), -1)
-            self.assertIs(self.w.player, previous)
-            self.assertEqual(previous.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
-            wait_for(lambda: self.w.requested_track is None and self.w.current_track['video_id'] == 'missing0001')
-        self.assertIsInstance(self.w.player, m.QMediaPlayer)
-        self.assertTrue(self.w.player.source().isLocalFile())
-        self.assertEqual(self.w.player.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+            extractor.assert_not_called()
+        self.assertIsNone(self.w.requested_track)
+        self.assertIsNone(self.w.pending_slot)
+        self.assertIs(self.w.player, previous)
+        self.assertEqual(previous.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
+
+    def test_youtube_does_not_use_an_old_cached_stream_url(self):
+        self.browser_fixture()
+        track = self.youtube_track('cached00001')
+        self.w.save_stream(track['url'], 'https://example.invalid/old-audio.m4a', 'Old cache')
+        with patch.object(m, 'StreamWorker') as extractor:
+            self.w.play_track(track, -1)
+            extractor.assert_not_called()
+        player = self.w.players[self.w.pending_slot]
+        self.assertIsInstance(player, backend.YouTubeMusicPlayer)
+        self.assertEqual(player.source().host(), 'music.youtube.com')
+        self.snapshot(player)
+        self.assertIs(self.w.player, player)
 
 
 class BrowserPlayerContract(unittest.TestCase):

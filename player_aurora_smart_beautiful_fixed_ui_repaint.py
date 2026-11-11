@@ -126,7 +126,7 @@ def youtube_music_url(track):
 
 
 def _load_youtube_music_backend():
-    """Unavailable browser support must not prevent native playback or startup."""
+    """Defer browser imports so an unavailable runtime cannot block the window."""
     global YouTubeMusicPlayer, YouTubeMusicSession
     try:
         import youtube_music_backend as backend
@@ -138,7 +138,7 @@ def _load_youtube_music_backend():
             YouTubeMusicSession = backend.YouTubeMusicSession
         return True
     except (ImportError, OSError, RuntimeError) as error:
-        logging.getLogger("aurora").info("Веб-плеер YouTube недоступен; используется прежний запуск: %s", error)
+        logging.getLogger("aurora").warning("Веб-плеер YouTube недоступен: %s", error)
         return False
 
 
@@ -19407,7 +19407,12 @@ class MusicPlayer(QMainWindow):
     def start_stream_extraction(self, track):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
         youtube_url = youtube_music_url(track)
-        if youtube_url and _load_youtube_music_backend():
+        if youtube_url:
+            if not _load_youtube_music_backend():
+                self.stream_error(self._key(track),
+                                  "Не удалось подключить веб-плеер YouTube Music. "
+                                  "Используй полную сборку приложения или пересобери EXE через build_exe.bat.")
+                return
             self.start_pending_media(QUrl(youtube_url), "YouTube Music playerApi")
             return
         if track.get("source") == "youtube" and not youtube_url:

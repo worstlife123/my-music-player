@@ -65,13 +65,21 @@ echo [2/3] Installing or updating build dependencies. Internet is required.
 if errorlevel 1 goto failed
 
 :after_dependencies
+echo Checking the required YouTube Music browser runtime...
+"%PLAYER_BUILD_PYTHON%" -c "from PyQt6.QtWebEngineCore import QWebEnginePage; from PyQt6.QtWebEngineWidgets import QWebEngineView; import youtube_music_backend"
+if errorlevel 1 goto failed
+
 if exist "fonts\*" set "PLAYER_FONT_OPTIONS=--add-data "%CD%\fonts;fonts""
 if exist "tools\generate_app_icon.py" "%PLAYER_BUILD_PYTHON%" tools\generate_app_icon.py >nul 2>&1
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "%CD%\assets;assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath . --collect-all yt_dlp --collect-all ytmusicapi --hidden-import PyQt6.QtWebEngineCore --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "%CD%\assets;assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath . --collect-all yt_dlp --collect-all ytmusicapi --hidden-import youtube_music_backend --hidden-import PyQt6.QtWebEngineCore --hidden-import PyQt6.QtWebEngineWidgets --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
 if not exist "%PLAYER_OUTPUT%" goto failed
+
+echo Testing the built application, Chromium runtime and audio decoding...
+start "" /wait "%PLAYER_OUTPUT%" --smoke-test
+if not "%ERRORLEVEL%"=="0" goto failed
 
 echo.
 echo BUILD SUCCEEDED
