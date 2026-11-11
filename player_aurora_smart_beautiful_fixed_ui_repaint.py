@@ -98,6 +98,8 @@ from PyQt6.QtWidgets import (
     QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 
+from youtube_music_backend import YouTubeMusicPlayer, YouTubeMusicSession, youtube_music_url
+
 
 def YoutubeDL(*args, **kwargs):
     """Load the extraction engine in its worker, without delaying the first window."""
@@ -3288,7 +3290,7 @@ class YouTubeMusicAuth:
     """Общая авторизация каталога и лайков через существующее подключение."""
 
     @staticmethod
-    def _cookie_header_from_pairs(pairs):
+    def _cookie_header_from_pairs(pairs, include_consent=False):
         """Оставляет только cookies авторизации для music.youtube.com.
 
         Пары: (domain, name, value[, path, include_subdomains]).
@@ -3301,6 +3303,8 @@ class YouTubeMusicAuth:
             "__Secure-3PSIDCC", "__Secure-1PAPISID", "__Secure-1PSID",
             "__Secure-1PSIDTS", "__Secure-1PSIDCC", "SIDCC",
         )
+        if include_consent:
+            allowed += ("SOCS", "CONSENT")
         selected = {}
         api_path = "/youtubei/v1/like/like"
 
@@ -3348,7 +3352,7 @@ class YouTubeMusicAuth:
             total_bytes += addition
         return "; ".join(components)
 
-    def _cookies_from_file(self):
+    def _cookies_from_file(self, include_consent=False):
         cookie_path = Path(self.cookie_file).expanduser()
         if not cookie_path.is_file():
             raise RuntimeError("Файл cookies.txt не найден. Подключи актуальный файл авторизации YouTube Music.")
@@ -3374,7 +3378,7 @@ class YouTubeMusicAuth:
             except ValueError:
                 continue
             pairs.append((domain, name, value, path, include_subdomains.upper() == "TRUE"))
-        return self._cookie_header_from_pairs(pairs)
+        return self._cookie_header_from_pairs(pairs, include_consent=include_consent)
 
     _BROWSER_COOKIE_CACHE = {}
     _BROWSER_COOKIE_TTL = 900.0
@@ -3384,14 +3388,17 @@ class YouTubeMusicAuth:
         if browser_spec is None:
             cls._BROWSER_COOKIE_CACHE.clear()
         else:
-            cls._BROWSER_COOKIE_CACHE.pop(str(browser_spec or "").strip(), None)
+            spec_key = str(browser_spec or "").strip()
+            cls._BROWSER_COOKIE_CACHE.pop(spec_key, None)
+            cls._BROWSER_COOKIE_CACHE.pop((spec_key, True), None)
 
-    def _cookies_from_browser(self):
+    def _cookies_from_browser(self, include_consent=False):
         if not self.browser_spec:
             raise RuntimeError("Не выбран браузерный профиль YouTube Music.")
         spec_key = str(self.browser_spec).strip()
+        cache_key = (spec_key, True) if include_consent else spec_key
         now = time.monotonic()
-        cached = self._BROWSER_COOKIE_CACHE.get(spec_key)
+        cached = self._BROWSER_COOKIE_CACHE.get(cache_key)
         if cached and (now - cached[0]) < self._BROWSER_COOKIE_TTL and cached[1]:
             return cached[1]
         try:
@@ -3406,9 +3413,9 @@ class YouTubeMusicAuth:
                 for cookie in cookie_jar
                 if not cookie.is_expired()
             ]
-            header = self._cookie_header_from_pairs(pairs)
+            header = self._cookie_header_from_pairs(pairs, include_consent=include_consent)
             if header and "__Secure-3PAPISID=" in header:
-                self._BROWSER_COOKIE_CACHE[spec_key] = (now, header)
+                self._BROWSER_COOKIE_CACHE[cache_key] = (now, header)
             return header
         except Exception as error:
             raise RuntimeError(
@@ -9824,6 +9831,9 @@ class MusicPlayer(QMainWindow):
         # Два QMediaPlayer с отдельными QAudioOutput: основной и резервный.
         # Резервный можно открывать и буферизовать, не прерывая основной.
         self.players = [QMediaPlayer(self), QMediaPlayer(self)]
+        self._native_players = list(self.players)
+        self._youtube_players = {}
+        self._youtube_session = None
         self.audio_outputs = [QAudioOutput(self), QAudioOutput(self)]
         self.volume = max(0.0, min(1.0, self.settings.value("volume", 70, type=int) / 100.0))
         for player, output in zip(self.players, self.audio_outputs):
@@ -11732,22 +11742,61 @@ class MusicPlayer(QMainWindow):
         # Каждый плеер сообщает номер своего слота. Это необходимо,
         # чтобы движение старой песни не считалось началом новой.
         for index, player in enumerate(self.players):
-            player.positionChanged.connect(
-                lambda position, i=index: self.on_slot_position(i, position)
+            self._connect_media_slot(index, player)
+
+    def _connect_media_slot(self, slot, player):
+        # A late event from the other backend must not commit a new selection.
+        for signal, handler in (
+            (player.positionChanged, self.on_slot_position),
+            (player.durationChanged, self.on_slot_duration),
+            (player.playbackStateChanged, self.on_slot_playback_state),
+            (player.mediaStatusChanged, self.on_slot_status),
+            (player.errorOccurred, self.on_slot_error),
+        ):
+            signal.connect(lambda *args, p=player, i=slot, h=handler:
+                           h(i, *args) if self.players[i] is p else None)
+        player.seekableChanged.connect(lambda _seekable, p=player, i=slot:
+                                       self._apply_recovery_seek(i) if self.players[i] is p else None)
+
+    @staticmethod
+    def _youtube_playback_cookies(auth):
+        reader = YouTubeMusicAuth()
+        reader.cookie_file = auth.get("cookie_file", "")
+        reader.browser_spec = auth.get("cookies_from_browser", "")
+        return (reader._cookies_from_browser(include_consent=True) if reader.browser_spec else
+                reader._cookies_from_file(include_consent=True))
+
+    def _media_player_for(self, slot, media_url):
+        is_youtube = media_url.host() == "music.youtube.com" and media_url.path() == "/watch"
+        if is_youtube:
+            if self._youtube_session is None:
+                self._youtube_session = YouTubeMusicSession(self)
+            auth = self.youtube_auth_kwargs()
+            signature = tuple(sorted(auth.items()))
+            if auth.get("cookie_file"):
+                try:
+                    signature += (Path(auth["cookie_file"]).stat().st_mtime_ns,)
+                except OSError:
+                    pass
+            self._youtube_session.configure(
+                signature, (lambda a=dict(auth): self._youtube_playback_cookies(a)) if auth else None
             )
-            player.durationChanged.connect(
-                lambda duration, i=index: self.on_slot_duration(i, duration)
-            )
-            player.playbackStateChanged.connect(
-                lambda state, i=index: self.on_slot_playback_state(i, state)
-            )
-            player.mediaStatusChanged.connect(
-                lambda status, i=index: self.on_slot_status(i, status)
-            )
-            player.errorOccurred.connect(
-                lambda error, message, i=index: self.on_slot_error(i, error, message)
-            )
-            player.seekableChanged.connect(lambda seekable, i=index: self._apply_recovery_seek(i))
+            if slot not in self._youtube_players:
+                backend = YouTubeMusicPlayer(self._youtube_session, self)
+                backend.setAudioOutput(self.audio_outputs[slot])
+                self._connect_media_slot(slot, backend)
+                self._youtube_players[slot] = backend
+            player = self._youtube_players[slot]
+        else:
+            player = self._native_players[slot]
+        if self.players[slot] is not player:
+            with QSignalBlocker(self.players[slot]):
+                self.players[slot].stop()
+                self.players[slot].setSource(QUrl())
+            self.players[slot] = player
+            self.standby_key = None
+            self.standby_ready = False
+        return player
 
     # ---------------------------------------------------------
     # Меню и настройки. Все элементы сохраняются через QSettings.
@@ -16910,6 +16959,8 @@ class MusicPlayer(QMainWindow):
                 self.settings.setValue("youtube_auth_mode", "browser")
                 self.settings.setValue("youtube_auth_browser", self.youtube_auth_browser)
                 self.settings.setValue("youtube_auth_profile", self.youtube_auth_profile)
+            if self._youtube_session is not None:
+                self._youtube_session.clear_account()
             self.settings.sync()
             dialog.accept()
             self.refresh_likes_list()
@@ -16996,6 +17047,8 @@ class MusicPlayer(QMainWindow):
         self.youtube_auth_mode = "file"
         self.youtube_auth_browser = "chrome"
         self.youtube_auth_profile = ""
+        if self._youtube_session is not None:
+            self._youtube_session.clear_account()
         for key in ("youtube_cookie_file", "youtube_auth_mode", "youtube_auth_browser", "youtube_auth_profile", "youtube_mix_catalog_json", "supermix_cover_url"):
             self.settings.remove(key)
         self.settings.sync()
@@ -19221,6 +19274,9 @@ class MusicPlayer(QMainWindow):
         if track.get("source") == "local":
             self.preload_in_qt(track, QUrl.fromLocalFile(key))
             return
+        if youtube_music_url(track) or track.get("source") == "youtube":
+            # YTM owns audio delivery; never cache expiring YouTube stream URLs.
+            return
         cached = self.get_cached_stream(key)
         if cached:
             self.preload_in_qt(track, QUrl(cached["url"]))
@@ -19262,7 +19318,7 @@ class MusicPlayer(QMainWindow):
                     entry.start()
             return
         slot = self.idle_slot()
-        player = self.players[slot]
+        player = self._media_player_for(slot, media_url)
         key = self._key(track)
         if self.standby_key == key and player.source() == media_url:
             return
@@ -19303,6 +19359,13 @@ class MusicPlayer(QMainWindow):
 
     def start_stream_extraction(self, track):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
+        youtube_url = youtube_music_url(track)
+        if youtube_url:
+            self.start_pending_media(QUrl(youtube_url), "YouTube Music playerApi")
+            return
+        if track.get("source") == "youtube":
+            self.stream_error(self._key(track), "Не удалось определить video ID трека YouTube.")
+            return
         key = self._key(track)
         if self.prefetch_worker is not None and self.prefetch_target != key:
             self.prefetch_worker.cancel()
@@ -19379,6 +19442,9 @@ class MusicPlayer(QMainWindow):
             return
         if track.get("source") == "local":
             self.start_pending_media(QUrl.fromLocalFile(key), "локальный файл")
+            return
+        if youtube_music_url(track) or track.get("source") == "youtube":
+            self.start_stream_extraction(track)
             return
 
         # Повторно используем предварительно ОТКРЫТЫЙ в Qt источник.
@@ -19531,7 +19597,11 @@ class MusicPlayer(QMainWindow):
             return
         self.stop_fade()
         slot = self.idle_slot()
-        player = self.players[slot]
+        try:
+            player = self._media_player_for(slot, media_url)
+        except (ImportError, RuntimeError) as error:
+            self.stream_error(self._key(self.requested_track), str(error))
+            return
         self.pending_slot = slot
         self.pending_started = time.perf_counter()
         self.pending_media_url = media_url
@@ -19542,7 +19612,8 @@ class MusicPlayer(QMainWindow):
         ) and player.source() == media_url
         self.pending_position_seen = False
         self._recovery_seek_applied = False
-        self.pending_media_timer.start(self.PENDING_MEDIA_TIMEOUT_MS)
+        self.pending_media_timer.start(max(60000, self.PENDING_MEDIA_TIMEOUT_MS)
+                                       if isinstance(player, YouTubeMusicPlayer) else self.PENDING_MEDIA_TIMEOUT_MS)
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url or self._network_recovery is not None:
@@ -19578,6 +19649,10 @@ class MusicPlayer(QMainWindow):
                 and not self.player.source().isLocalFile())
 
     def _ended_early(self):
+        if isinstance(self.player, YouTubeMusicPlayer):
+            # The official API's end event is authoritative; it is not a
+            # truncated FFmpeg stream, even if catalog duration was stale.
+            return False
         duration = self.playback_duration_ms()
         position = self._last_progress_position
         if duration <= 0 or position <= 0:
@@ -19971,7 +20046,8 @@ class MusicPlayer(QMainWindow):
             if track and track.get("source") != "local" and not self.pending_refreshed:
                 self.pending_refreshed = True
                 self.stream_cache.pop(self._key(track), None)
-                self.set_status("Поток отклонён Qt. Запрашиваю свежую ссылку…")
+                self.set_status("Повторно подключаю плеер YouTube Music…" if track.get("source") == "youtube" else
+                                "Поток отклонён Qt. Запрашиваю свежую ссылку…")
                 self.start_stream_extraction(track)
                 return
             failed_track = dict(track or {})
@@ -20161,6 +20237,8 @@ class MusicPlayer(QMainWindow):
             self.mini_player.hide()
         for player in self.players:
             player.stop()
+        if self._youtube_session is not None:
+            self._youtube_session.shutdown()
         if self.tray_icon is not None:
             self.tray_icon.hide()
         event.accept()
@@ -20181,6 +20259,7 @@ def run_smoke_test():
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.environ[variable] = str(path)
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
         set_windows_app_id()
         app = QApplication([sys.argv[0]])
         configure_application(app)
@@ -20197,6 +20276,15 @@ def run_smoke_test():
         app.processEvents()
         if window.grab().isNull():
             raise RuntimeError("Не удалось отрисовать главное окно")
+        # Also exercise QtWebEngineProcess/resources from the frozen bundle,
+        # without a network request or account. Import checks alone miss these.
+        window._youtube_session = YouTubeMusicSession(window)
+        browser = YouTubeMusicPlayer(window._youtube_session, window)
+        browser_ready = [False]
+        browser.page.loadFinished.connect(lambda ok: browser.page.runJavaScript(
+            "2 + 2", lambda value: browser_ready.__setitem__(0, value == 4)
+        ) if ok else None)
+        browser.page.setHtml("<!doctype html><title>Aurora playback smoke test</title>")
         window.show_mini_player()
         path = root / "sample.wav"
         with wave.open(str(path), "wb") as sound:
@@ -20215,7 +20303,7 @@ def run_smoke_test():
             app.exit(code)
         timer = QTimer(window)
         timer.setInterval(100)
-        timer.timeout.connect(lambda: finish(0) if window.current_track and window.player.position() > 0 else None)
+        timer.timeout.connect(lambda: finish(0) if browser_ready[0] and window.current_track and window.player.position() > 0 else None)
         QTimer.singleShot(15000, lambda: finish(1))
         window.play_track({"source": "local", "url": str(path), "title": "Smoke test"}, -1)
         timer.start()

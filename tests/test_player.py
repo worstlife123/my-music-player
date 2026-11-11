@@ -28,7 +28,7 @@ spec.loader.exec_module(m)
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QEventLoop, QSettings
 from PyQt6.QtGui import QEnterEvent, QImage
-app = m.QApplication([])
+app = m.QApplication(['aurora-tests'])
 m.configure_application(app)
 app.setStyle('Fusion')
 m.setup_font(app)
@@ -2772,7 +2772,10 @@ class PlayerChanges(unittest.TestCase):
 
     def test_latest_search_selection_starts_before_cancelled_extraction_finishes(self):
         w = self.w
-        tracks = [self.youtube_track('select0000' + str(i)) for i in range(3)]
+        # YouTube now uses its browser player; this still covers the extractor
+        # used by SoundCloud, including cancellation and its two-worker budget.
+        tracks = [dict(self.youtube_track('select0000' + str(i)), source='soundcloud',
+                       url='https://soundcloud.com/test/select' + str(i)) for i in range(3)]
         started = {track['url']: threading.Event() for track in tracks}
         release = {track['url']: threading.Event() for track in tracks}
         opened = []

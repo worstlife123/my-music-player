@@ -41,7 +41,7 @@ jobs:
       - name: Install Python and build dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
+          python -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "PyQt6-WebEngine>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
           if ($LASTEXITCODE -ne 0) { throw 'Failed to install Python dependencies' }
           if (Test-Path "tools/generate_app_icon.py") {
             python tools/generate_app_icon.py
@@ -69,6 +69,7 @@ jobs:
             "--specpath", ".",
             "--collect-all", "yt_dlp",
             "--collect-all", "ytmusicapi",
+            "--hidden-import", "PyQt6.QtWebEngineCore",
             "--hidden-import", "requests",
             "--hidden-import", "certifi"
           )
@@ -91,7 +92,7 @@ jobs:
             throw 'dist/AuroraMusicPlayer/AuroraMusicPlayer.exe was not produced'
           }
 
-      - name: Test frozen Qt, mini-player and audio decoding
+      - name: Test frozen Qt, WebEngine, mini-player and audio decoding
         shell: pwsh
         run: |
           $player = Start-Process -FilePath .\dist\AuroraMusicPlayer\AuroraMusicPlayer.exe -ArgumentList '--smoke-test' -PassThru
@@ -123,6 +124,7 @@ jobs:
             "--specpath", ".",
             "--collect-all", "yt_dlp",
             "--collect-all", "ytmusicapi",
+            "--hidden-import", "PyQt6.QtWebEngineCore",
             "--hidden-import", "requests",
             "--hidden-import", "certifi"
           )

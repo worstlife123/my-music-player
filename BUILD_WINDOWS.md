@@ -1,14 +1,17 @@
 # Сборка EXE для Windows
 
 1. Установи **Python 3.13 или 3.12, 64-bit** с [python.org](https://www.python.org/downloads/windows/). При установке включи Python Launcher или добавление Python в PATH.
-2. Положи `build_exe.bat` рядом с актуальным `player_aurora_smart_beautiful_fixed_ui_repaint.py`. Также поддерживается имя `player.py`. Рядом нужны папки `assets` (с `aurora.ico`) и `fonts` из репозитория.
+2. Положи `build_exe.bat` рядом с актуальными `player_aurora_smart_beautiful_fixed_ui_repaint.py` и `youtube_music_backend.py`. Также поддерживается имя главного файла `player.py`. Рядом нужны папки `assets` (с `aurora.ico`) и `fonts` из репозитория.
 3. Запусти `build_exe.bat` двойным щелчком и дождись **BUILD SUCCEEDED**. Для установки зависимостей нужен интернет; права администратора не требуются.
 4. Готовый плеер: **`dist\AuroraMusicPlayer\AuroraMusicPlayer.exe`**.
 
 Скрипт создаёт отдельное окружение `.build-venv`, устанавливает PyInstaller,
-PyQt6, yt-dlp с дополнительными зависимостями и ytmusicapi. Библиотеки Qt для
-воспроизведения звука собирает штатный hook PyInstaller. yt-dlp и ytmusicapi
+PyQt6, PyQt6-WebEngine, yt-dlp с дополнительными зависимостями и ytmusicapi. Библиотеки Qt для
+воспроизведения звука и Chromium (QtWebEngineProcess, ресурсы и локали)
+собирают штатные hooks PyInstaller. yt-dlp и ytmusicapi
 включаются вместе с данными пакетов и динамически загружаемыми модулями.
+Проверка готовой сборки `--smoke-test` запускает также невидимый Chromium и
+локальный JavaScript, чтобы обнаружить отсутствие QtWebEngineProcess или его ресурсов.
 Папка `fonts` включается целиком: шрифт Inter с кириллицей и его лицензия
 SIL OFL 1.1. Отдельная установка шрифта не требуется.
 Иконка `assets\aurora.ico` включается в ресурс EXE через `--icon` и в данные
