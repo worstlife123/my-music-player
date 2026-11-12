@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import wave
@@ -27,6 +28,7 @@ class FakePage(QObject):
         super().__init__(parent)
         self._url = QUrl()
         self.scripts = []
+        self.loads = []
         self.muted = True
 
     def settings(self):
@@ -49,6 +51,7 @@ class FakePage(QObject):
 
     def load(self, url):
         self._url = QUrl(url)
+        self.loads.append(QUrl(url))
 
     def runJavaScript(self, script, callback=None):
         self.scripts.append((script, callback))
@@ -147,6 +150,17 @@ class PlaybackIntegration(unittest.TestCase):
         self.snapshot(player, seconds=2)
         self.assertEqual(player.playbackState(), m.QMediaPlayer.PlaybackState.StoppedState)
         self.assertTrue(player.page.muted)
+
+    def test_changing_the_track_keeps_the_first_youtube_page_booting(self):
+        self.browser_fixture()
+        self.w.play_track(self.youtube_track('first000001'), -1)
+        player = self.w.players[self.w.pending_slot]
+        first_loads = list(player.page.loads)
+        self.w.play_track(self.youtube_track('second00001'), -1)
+        self.assertIs(self.w.players[self.w.pending_slot], player)
+        self.assertEqual(player.page.loads, first_loads)
+        self.snapshot(player)
+        self.assertEqual(self.w.current_track['video_id'], 'second00001')
 
     def test_pause_resume_volume_and_position_restore_use_existing_controls(self):
         self.browser_fixture()
@@ -247,6 +261,14 @@ class PlaybackIntegration(unittest.TestCase):
         self.assertIs(self.w.player, previous)
         self.assertEqual(previous.playbackState(), m.QMediaPlayer.PlaybackState.PlayingState)
 
+    def test_old_web_driver_is_rejected_without_a_native_youtube_fallback(self):
+        self.browser_fixture()
+        with patch.object(backend, 'WEB_DRIVER_PROTOCOL', 1), patch.object(m, 'StreamWorker') as extractor:
+            self.w.play_track(self.youtube_track('outdated001'), -1)
+        extractor.assert_not_called()
+        self.assertIsNone(self.w.requested_track)
+        self.assertIsNone(self.w.pending_slot)
+
     def test_youtube_does_not_use_an_old_cached_stream_url(self):
         self.browser_fixture()
         track = self.youtube_track('cached00001')
@@ -304,10 +326,10 @@ class BrowserPlayerContract(unittest.TestCase):
           document.querySelector('ytmusic-player-bar').playerApi=api;
           document.addEventListener('yt-navigate',e=>{calls.push(['navigate',e.detail.endpoint.watchEndpoint.videoId]);id=e.detail.endpoint.watchEndpoint.videoId;});
         </script>''')
-        self.assertIsNone(self.poll())
+        self.assertEqual(self.poll()['phase'], 'api_not_ready')
         self.assertEqual(self.javascript('calls'), [])
         self.javascript('ready=true')
-        self.assertIsNone(self.poll())
+        self.assertEqual(self.poll()['phase'], 'waiting_video')
         self.assertIn(['navigate', 'browser0001'], self.javascript('calls'))
         response = self.poll()
         self.assertEqual(response['videoId'], 'browser0001')
@@ -321,6 +343,97 @@ class BrowserPlayerContract(unittest.TestCase):
         self.assertEqual(self.javascript('[innerWidth, innerHeight, document.visibilityState]'), [1280, 720, 'visible'])
         self.assertTrue(self.player.view.testAttribute(m.Qt.WidgetAttribute.WA_DontShowOnScreen))
         self.assertEqual(self.player.view.focusPolicy(), m.Qt.FocusPolicy.NoFocus)
+
+    def test_play_is_sent_before_the_player_publishes_video_metadata(self):
+        self.document('''<ytmusic-player-bar></ytmusic-player-bar><script>
+          window.calls=[]; window.id=''; window.pending='browser0001'; window.state=5;
+          document.querySelector('ytmusic-player-bar').playerApi={isReady:()=>true,
+            getPlayerResponse:()=>id?{videoDetails:{videoId:id}}:{}, getPlayerState:()=>state,
+            getCurrentTime:()=>1, getDuration:()=>180, setVolume:()=>{},
+            playVideo:()=>{calls.push('play');id=pending;state=1;}, pauseVideo:()=>{},
+            seekTo:()=>{}};
+          document.addEventListener('yt-navigate',e=>{pending=e.detail.endpoint.watchEndpoint.videoId;});
+        </script>''')
+        self.poll()
+        self.poll()
+        self.assertIn('play', self.javascript('calls'))
+        self.assertEqual(self.poll()['videoId'], 'browser0001')
+
+    def test_play_is_sent_when_an_ad_is_waiting_for_the_initial_play_command(self):
+        self.document('''<ytmusic-player-bar></ytmusic-player-bar><ytmusic-popup-container></ytmusic-popup-container><script>
+          window.calls=[];
+          document.querySelector('ytmusic-popup-container').store={getState:()=>({player:{adPlaying:true}})};
+          document.querySelector('ytmusic-player-bar').playerApi={isReady:()=>true,
+            getPlayerResponse:()=>({videoDetails:{videoId:'advert00001'}}), getPlayerState:()=>2,
+            getCurrentTime:()=>0, getDuration:()=>30, setVolume:()=>{},
+            playVideo:()=>calls.push('play'), pauseVideo:()=>calls.push('pause'), seekTo:()=>{}};
+        </script>''')
+        self.poll()
+        self.poll()
+        self.assertIn('play', self.javascript('calls'))
+
+    def test_video_data_supplies_the_id_when_player_response_has_no_details(self):
+        self.document('''<ytmusic-player-bar></ytmusic-player-bar><script>
+          document.querySelector('ytmusic-player-bar').playerApi={isReady:()=>true,
+            getPlayerResponse:()=>({playabilityStatus:{status:'OK'}}),
+            getVideoData:()=>({video_id:'browser0001'}), getPlayerState:()=>1,
+            getCurrentTime:()=>1, getDuration:()=>180, setVolume:()=>{},
+            playVideo:()=>{}, pauseVideo:()=>{}, seekTo:()=>{}};
+        </script>''')
+        self.assertEqual(self.poll()['videoId'], 'browser0001')
+
+    def test_javascript_error_is_reported_instead_of_a_silent_wait(self):
+        self.document('''<ytmusic-player-bar></ytmusic-player-bar><script>
+          document.querySelector('ytmusic-player-bar').playerApi={isReady:()=>true,
+            getPlayerResponse:()=>({videoDetails:{videoId:'browser0001'}}),
+            getPlayerState:()=>{throw new Error('state-unavailable');}, playVideo:()=>{},
+            setVolume:()=>{}};
+        </script>''')
+        response = self.poll()
+        self.assertEqual(response['phase'], 'script_error')
+        self.assertIn('state-unavailable', response['error'])
+
+    def test_unresponsive_renderer_has_a_bounded_callback_timeout(self):
+        self.document('<!doctype html><title>Unresponsive renderer fixture</title>')
+        self.player._source = QUrl('https://music.youtube.com/watch?v=browser0001')
+        self.player.JAVASCRIPT_TIMEOUT_MS = 25
+        errors = QSignalSpy(self.player.errorOccurred)
+        with patch.object(self.page, 'runJavaScript'):
+            self.player.play()
+            wait_for(lambda: len(errors) == 1)
+        self.assertTrue(self.player._failed)
+        self.assertIn('не ответил', errors[0][1])
+
+    def test_successful_page_load_accepts_added_query_parameters(self):
+        self.player._source = QUrl('https://music.youtube.com/watch?v=browser0001')
+        info = SimpleNamespace(
+            status=lambda: backend.QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus,
+            url=lambda: QUrl('https://music.youtube.com/watch?v=browser0001&feature=share'),
+            errorCode=lambda: 0)
+        with patch.object(self.player, '_poll') as poll:
+            self.player._loading_changed(info)
+        self.assertTrue(self.player._document_ready)
+        poll.assert_called_once()
+
+    def test_other_host_redirect_is_reported_instead_of_an_endless_wait(self):
+        self.player._source = QUrl('https://music.youtube.com/watch?v=browser0001')
+        errors = QSignalSpy(self.player.errorOccurred)
+        info = SimpleNamespace(
+            status=lambda: backend.QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus,
+            url=lambda: QUrl('https://www.youtube.com/premium'), errorCode=lambda: 0)
+        self.player._loading_changed(info)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(self.player._failed)
+
+    def test_waiting_stage_is_visible_in_the_diagnostic_log(self):
+        self.document('<!doctype html><title>Player not initialized</title>')
+        self.player._source = QUrl('https://music.youtube.com/watch?v=browser0001')
+        with self.assertLogs('aurora', level='INFO') as capture:
+            self.player.play()
+            wait_for(lambda: self.player._last_phase == 'waiting_player')
+        self.assertIn('stage=waiting_player', '\n'.join(capture.output))
+        self.assertIn('viewport=1280x720', '\n'.join(capture.output))
+        self.assertIn('не подготовился', self.player.startup_timeout_message())
 
     def test_real_hidden_chromium_audio_advances_pauses_seeks_and_stops(self):
         sound = io.BytesIO()
@@ -374,11 +487,11 @@ class BrowserPlayerContract(unittest.TestCase):
         self.assertEqual(self.javascript('calls'), [])
         desired = self.desired()
         desired.update(commandSerial=2, seekSerial=1, position=0)
-        self.assertIsNone(self.poll(desired))
+        self.assertEqual(self.poll(desired)['phase'], 'seeking')
         self.poll(desired)
         self.assertEqual(self.javascript('calls'), ['seek', 'play'])
         self.javascript('ad=true')
-        self.assertIsNone(self.poll(desired))
+        self.assertEqual(self.poll(desired)['phase'], 'advertisement')
 
     def test_cookie_import_finishes_before_navigation_and_disconnect_clears_session(self):
         self.session.configure(('account',), lambda: 'SAPISID=local-test; __Secure-3PAPISID=local-secure-test')

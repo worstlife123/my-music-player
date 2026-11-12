@@ -45,6 +45,12 @@ class StandaloneStartup(unittest.TestCase):
         result = self.run_python(SOURCE, '--smoke-test')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_an_old_sidecar_does_not_prevent_the_window_from_opening(self):
+        (self.root / 'youtube_music_backend.py').write_text(
+            'QWebEngineProfile = object()\nWEB_DRIVER_PROTOCOL = 1\n', encoding='utf-8')
+        result = self.run_python('player.py', '--smoke-test')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_player_entry_point_survives_missing_qt_webengine_and_dll_errors(self):
         for module in ("QWebEngineProfile = None\n",
                        "raise ImportError('DLL load failed while importing QtWebEngineCore')\n",

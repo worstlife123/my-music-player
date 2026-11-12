@@ -5,6 +5,7 @@ The small QMediaPlayer-compatible adapter keeps Aurora's queue and two slots.
 """
 
 import json
+import logging
 import math
 import re
 from urllib.parse import parse_qs, urlsplit
@@ -13,6 +14,8 @@ from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, Qt, pyqtSignal
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtNetwork import QNetworkCookie
 from PyQt6.QtWidgets import QWidget
+
+WEB_DRIVER_PROTOCOL = 2
 
 try:
     # Import before QApplication is constructed, including in frozen builds.
@@ -167,54 +170,67 @@ class YouTubeMusicSession(QObject):
 _PLAYER_SCRIPT = r"""
 (() => {
     const desired = __DESIRED__;
+    const report = (phase, extra = {}) => ({token: desired.token, phase,
+        visibility: document.visibilityState, width: innerWidth, height: innerHeight, ...extra});
+    try {
     const bar = document.querySelector('ytmusic-player-bar');
-    const api = bar && bar.playerApi;
-    if (!api || !api.isReady || !api.isReady()) return null;
+    if (!bar) return report('waiting_player');
+    let api;
+    try { api = bar.playerApi; } catch (_) { return report('waiting_api'); }
+    if (!api || typeof api.isReady !== 'function' || typeof api.playVideo !== 'function')
+        return report('waiting_api');
+    let response = {};
+    try { response = api.getPlayerResponse?.() || {}; } catch (_) {}
+    const details = response.videoDetails || {};
+    let currentId = details.videoId;
+    if (!currentId) {
+        try { currentId = api.getVideoData?.()?.video_id; } catch (_) {}
+    }
+    const playability = response.playabilityStatus || {};
+    if (playability.status && playability.status !== 'OK' &&
+        (currentId === desired.videoId || (!currentId && new URL(location.href).searchParams.get('v') === desired.videoId))) {
+        return report('playability_error', {error: String(playability.reason || 'Трек недоступен в YouTube Music').slice(0, 220)});
+    }
+    let ready = false;
+    try { ready = api.isReady(); } catch (_) {}
+    if (!ready) return report('api_not_ready');
     let control = window.__auroraPlayback;
     if (!control || control.token !== desired.token) {
-        control = window.__auroraPlayback = {token: desired.token, matched: false, seek: -1};
+        control = window.__auroraPlayback = {token: desired.token, matched: false, seek: -1, navigated: false};
         api.setVolume(0);
-        const details = api.getPlayerResponse()?.videoDetails || {};
-        if (details.videoId !== desired.videoId) {
-            document.dispatchEvent(new CustomEvent('yt-navigate', {detail: {
-                endpoint: {watchEndpoint: {videoId: desired.videoId}}
-            }}));
-            return null;
-        }
     }
-    const response = api.getPlayerResponse() || {};
-    const details = response.videoDetails || {};
-    const state = api.getPlayerState();
+    const state = Number(api.getPlayerState());
     const store = document.querySelector('ytmusic-popup-container')?.store;
     const ad = !!(bar.adPlaying || document.querySelector('.ad-showing') ||
                   store?.getState?.()?.player?.adPlaying);
-    if (ad) return null;
-    const playability = response.playabilityStatus || {};
-    const currentId = details.videoId || api.getVideoData?.()?.video_id;
-    if (playability.status && playability.status !== 'OK' &&
-        (currentId === desired.videoId || (!currentId && new URL(location.href).searchParams.get('v') === desired.videoId))) {
-        return {token: desired.token, error: String(playability.reason || 'Трек недоступен в YouTube Music').slice(0, 220)};
+    if (control.matched && currentId && currentId !== desired.videoId && !ad) {
+        // Aurora owns the queue. Do not start the site's automatically chosen song.
+        api.pauseVideo();
+        return report('ended', {ended: true});
     }
-    if (details.videoId !== desired.videoId) {
-        // Aurora owns the queue. Never let YTM's radio replace the selected song.
-        if (control.matched) {
-            api.pauseVideo();
-            return {token: desired.token, ended: true};
-        }
-        return null;
+    const errorCode = typeof api.getErrorCode === 'function' ? api.getErrorCode() : 0;
+    if (Number(errorCode) > 0 && (ad || !currentId || currentId === desired.videoId)) {
+        return report('player_error', {error: 'Ошибка плеера YouTube Music: ' + errorCode});
     }
-    control.matched = true;
-    if (api.getErrorCode && api.getErrorCode()) {
-        return {token: desired.token, error: 'Ошибка плеера YouTube Music: ' + api.getErrorCode()};
+    if (!control.matched && !control.navigated && currentId !== desired.videoId && !ad) {
+        control.navigated = true;
+        document.dispatchEvent(new CustomEvent('yt-navigate', {detail: {
+            endpoint: {watchEndpoint: {videoId: desired.videoId}}
+        }}));
     }
     api.setVolume(desired.volume);
     if (desired.volume > 0 && api.unMute) api.unMute();
-    if (control.seek !== desired.seekSerial && desired.position !== null) {
-        api.seekTo(desired.position / 1000, true);
-        control.seek = desired.seekSerial;
-        // A seek acknowledgement is not proof that playback has advanced.
-        return null;
+    if (!ad && currentId === desired.videoId) {
+        control.matched = true;
+        if (control.seek !== desired.seekSerial && desired.position !== null) {
+            api.seekTo(desired.position / 1000, true);
+            control.seek = desired.seekSerial;
+            // A seek acknowledgement is not proof that playback has advanced.
+            return report('seeking');
+        }
     }
+    // Start the official player before waiting for content metadata. The first
+    // player response and a preroll can both require this initial Play command.
     if (control.command !== desired.commandSerial) {
         control.command = desired.commandSerial;
         if (desired.playing && !desired.stopped) api.playVideo();
@@ -226,9 +242,15 @@ _PLAYER_SCRIPT = r"""
     } else if (!desired.playing && [1, 3].includes(state)) {
         api.pauseVideo();
     }
-    return {token: desired.token, videoId: details.videoId, state,
+    if (ad) return report('advertisement', {state});
+    if (currentId !== desired.videoId) return report('waiting_video', {state});
+    return report(state === 1 ? 'playing' : state === 3 ? 'buffering' : state === 0 ? 'ended' : 'paused',
+           {videoId: currentId, state,
             position: api.getCurrentTime(), duration: api.getDuration(),
-            live: !!details.isLiveContent, seekSerial: desired.seekSerial};
+            live: !!details.isLiveContent, seekSerial: desired.seekSerial});
+    } catch (error) {
+        return report('script_error', {error: 'Ошибка управления плеером YouTube Music: ' + String(error.message || error).slice(0, 180)});
+    }
 })()
 """
 
@@ -242,6 +264,7 @@ class YouTubeMusicPlayer(QObject):
     mediaStatusChanged = pyqtSignal(object)
     errorOccurred = pyqtSignal(object, str)
     seekableChanged = pyqtSignal(bool)
+    JAVASCRIPT_TIMEOUT_MS = 10_000
 
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -279,15 +302,45 @@ class YouTubeMusicPlayer(QObject):
         self._failed = False
         self._closed = False
         self._document_ready = False
+        self._page_loading = False
+        self._page_load_url = QUrl()
+        self._page_load_signature = None
+        self._last_phase = ''
+        self._last_document_state = None
+        self._last_api_state = None
         self._seek_position = None
         self._seek_serial = 0
         self._command_serial = 0
         self._timer = QTimer(self)
         self._timer.setInterval(200)
         self._timer.timeout.connect(self._poll)
+        self._javascript_timer = QTimer(self)
+        self._javascript_timer.setSingleShot(True)
+        self._javascript_timer.timeout.connect(lambda: self._fail(
+            "Встроенный плеер YouTube Music не ответил. Этап загрузки записан в player.log."))
         session.prepared.connect(self._navigate)
         session.failed.connect(lambda message: self._fail(message) if not self._document_ready else None)
         session._players.append(self)
+        logging.getLogger('aurora').info('YouTube Music: web_driver=%d; initialized', WEB_DRIVER_PROTOCOL)
+
+    def _set_phase(self, phase):
+        if isinstance(phase, str) and re.fullmatch(r'[a-z_]{1,32}', phase) and phase != self._last_phase:
+            self._last_phase = phase
+            # Do not log page contents, cookies or URL query parameters.
+            logging.getLogger('aurora').info('YouTube Music: stage=%s; host=%s', phase, self.page.url().host())
+
+    def startup_timeout_message(self):
+        if self._last_phase == 'waiting_session':
+            return 'Не удалось подключить сессию YouTube Music. Проверь настройки аккаунта.'
+        if self._last_phase in ('loading_page', 'created'):
+            return 'Не удалось загрузить YouTube Music. Проверь открытие music.youtube.com в браузере.'
+        if self._last_phase in ('waiting_player', 'waiting_api', 'api_not_ready'):
+            return 'Страница YouTube Music открылась, но её плеер не подготовился. Этап записан в player.log.'
+        if self._last_phase == 'waiting_video':
+            return 'YouTube Music не подтвердил открытие выбранного трека. Проверь его доступность на сайте.'
+        if self._last_phase == 'advertisement':
+            return 'Не удалось дождаться начала трека после рекламы YouTube Music.'
+        return 'YouTube Music не начал передавать аудио. Этап загрузки записан в player.log.'
 
     def source(self):
         return QUrl(self._source)
@@ -346,10 +399,12 @@ class YouTubeMusicPlayer(QObject):
             f"if (a && c?.token === {token}) a.setVolume({volume}); }})()"
         )
 
-    def setSource(self, url):
+    def setSource(self, url, preserve_document=False):
         self._generation += 1
         self._inflight = False
+        self._javascript_timer.stop()
         self._source = QUrl(url)
+        self._last_api_state = None
         self._failed = False
         self._want_playing = False
         self._stopped = True
@@ -362,17 +417,32 @@ class YouTubeMusicPlayer(QObject):
         self._set_status(QMediaPlayer.MediaStatus.NoMedia if url.isEmpty() else QMediaPlayer.MediaStatus.LoadingMedia)
         if url.isEmpty():
             self._timer.stop()
-            self._document_ready = False
-            self.page.load(QUrl("about:blank"))
+            if not preserve_document:
+                self._document_ready = False
+                self._page_loading = False
+                self._page_load_url = QUrl()
+                self.page.load(QUrl("about:blank"))
         else:
             self._timer.start()
             self._navigate()
 
     def _navigate(self):
-        if self._closed or self._source.isEmpty() or not self.session.ready:
+        if self._closed or self._source.isEmpty():
+            return
+        if not self.session.ready:
+            self._set_phase('waiting_session')
+            return
+        if self._page_loading and self._page_load_signature == getattr(self.session, '_signature', None):
+            # Retarget the command after readiness; do not restart the website's
+            # bootstrap on every click while its scripts are still loading.
+            self._set_phase('loading_page')
             return
         # Keep a loaded YTM document; the script uses yt-navigate for later songs.
         if self.page.url().host() != "music.youtube.com" or not self._document_ready:
+            self._set_phase('loading_page')
+            self._page_loading = True
+            self._page_load_url = QUrl(self._source)
+            self._page_load_signature = getattr(self.session, '_signature', None)
             self.page.load(self._source)
         else:
             self._poll()
@@ -386,16 +456,23 @@ class YouTubeMusicPlayer(QObject):
                           QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus) or info.errorCode() == -3:
             return
         host = info.url().host()
-        if host not in ("music.youtube.com", "consent.youtube.com", "accounts.google.com"):
+        if not host:
             return
-        if host == "music.youtube.com" and info.url().query() != self._source.query():
+        if host == "music.youtube.com" and self._video_id(info.url()) not in (
+                '', self._video_id(self._source), self._video_id(self._page_load_url)):
             return
+        self._page_loading = False
+        logging.getLogger('aurora').info('YouTube Music: page_status=%s; host=%s; network_error=%d',
+                                       status.name, host, info.errorCode())
         if host in ("consent.youtube.com", "accounts.google.com"):
             self._fail("Открой YouTube Music в выбранном браузере, подтверди вход и обнови cookies в настройках аккаунта.")
+        elif host != 'music.youtube.com':
+            self._fail('YouTube Music перенаправил на другую страницу. Открой music.youtube.com в браузере и проверь вход и доступность сервиса.')
         elif status == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
             self._fail("Не удалось открыть YouTube Music. Проверь подключение и доступ к music.youtube.com.")
         else:
             self._document_ready = True
+            self._set_phase('page_loaded')
             self._poll()
 
     def play(self):
@@ -435,13 +512,18 @@ class YouTubeMusicPlayer(QObject):
                 or not self.session.ready or self.page.url().host() != "music.youtube.com"):
             return
         generation = self._generation
-        desired = {"token": str(generation), "videoId": self._source.query().partition("v=")[2],
+        desired = {"token": str(generation), "videoId": self._video_id(self._source),
                    "volume": self._volume(), "playing": self._want_playing,
                    "stopped": self._stopped, "position": self._seek_position, "seekSerial": self._seek_serial,
                    "commandSerial": self._command_serial}
         self._inflight = True
+        self._javascript_timer.start(self.JAVASCRIPT_TIMEOUT_MS)
         self.page.runJavaScript(_PLAYER_SCRIPT.replace("__DESIRED__", json.dumps(desired)),
                                 lambda data, g=generation: self._snapshot(g, data))
+
+    @staticmethod
+    def _video_id(url):
+        return parse_qs(url.query()).get('v', [''])[0]
 
     @staticmethod
     def _milliseconds(value):
@@ -455,8 +537,20 @@ class YouTubeMusicPlayer(QObject):
         if self._closed or generation != self._generation:
             return
         self._inflight = False
+        self._javascript_timer.stop()
         if self._failed or self._source.isEmpty() or not isinstance(data, dict) or data.get("token") != str(generation):
             return
+        self._set_phase(data.get('phase'))
+        visibility, width, height = data.get('visibility'), data.get('width'), data.get('height')
+        if visibility in ('visible', 'hidden', 'prerender') and isinstance(width, int) and isinstance(height, int):
+            document_state = (visibility, width, height)
+            if document_state != self._last_document_state:
+                self._last_document_state = document_state
+                logging.getLogger('aurora').info('YouTube Music: visibility=%s; viewport=%dx%d', visibility, width, height)
+        state = data.get('state')
+        if state in (-1, 0, 1, 2, 3, 5) and state != self._last_api_state:
+            self._last_api_state = state
+            logging.getLogger('aurora').info('YouTube Music: player_state=%d; stage=%s', state, self._last_phase)
         if data.get("error"):
             self._fail(str(data["error"]))
             return
@@ -465,7 +559,7 @@ class YouTubeMusicPlayer(QObject):
             self._set_state(QMediaPlayer.PlaybackState.StoppedState)
             self._set_status(QMediaPlayer.MediaStatus.EndOfMedia)
             return
-        if data.get("videoId") != self._source.query().partition("v=")[2]:
+        if data.get("videoId") != self._video_id(self._source):
             return
         duration = self._milliseconds(data.get("duration"))
         if duration != self._duration:
@@ -500,6 +594,8 @@ class YouTubeMusicPlayer(QObject):
         self._failed = True
         self._document_ready = False
         self._timer.stop()
+        self._javascript_timer.stop()
+        logging.getLogger('aurora').warning('YouTube Music: failure_stage=%s; message=%s', self._last_phase, message)
         self.page.setAudioMuted(True)
         self._set_state(QMediaPlayer.PlaybackState.StoppedState)
         self._set_status(QMediaPlayer.MediaStatus.InvalidMedia)
@@ -510,6 +606,7 @@ class YouTubeMusicPlayer(QObject):
             return
         self._closed = True
         self._timer.stop()
+        self._javascript_timer.stop()
         self.page.setAudioMuted(True)
         self.view.close()
         self.view.deleteLater()

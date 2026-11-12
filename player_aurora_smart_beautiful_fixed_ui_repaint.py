@@ -132,6 +132,8 @@ def _load_youtube_music_backend():
         import youtube_music_backend as backend
         if backend.QWebEngineProfile is None:
             return False
+        if getattr(backend, 'WEB_DRIVER_PROTOCOL', 0) != 2:
+            raise RuntimeError('Устарел youtube_music_backend.py: обнови весь проект или пересобери EXE из полного main.')
         if YouTubeMusicPlayer is None:
             YouTubeMusicPlayer = backend.YouTubeMusicPlayer
         if YouTubeMusicSession is None:
@@ -19265,7 +19267,7 @@ class MusicPlayer(QMainWindow):
             if isinstance(row, TrackRow) and getattr(row, "_loading", False):
                 row.set_loading(False)
 
-    def cancel_pending_request(self, cancel_supermix=True):
+    def cancel_pending_request(self, cancel_supermix=True, preserve_youtube_page=False):
         """Отменяем запуск неактуального трека, оставляя текущий звук."""
         if cancel_supermix:
             self._cancel_supermix()
@@ -19286,7 +19288,10 @@ class MusicPlayer(QMainWindow):
             self.audio_outputs[slot].setVolume(0.0)
             with QSignalBlocker(self.players[slot]):
                 self.players[slot].stop()
-                self.players[slot].setSource(QUrl())
+                if preserve_youtube_page and _is_youtube_music_player(self.players[slot]):
+                    self.players[slot].setSource(QUrl(), preserve_document=True)
+                else:
+                    self.players[slot].setSource(QUrl())
             self.standby_key = None
             self.standby_ready = False
         self._clear_loading_indicators()
@@ -19470,7 +19475,8 @@ class MusicPlayer(QMainWindow):
             self.queue_mode = "manual"
         elif self.supermix_session is not None:
             self.supermix_session["waiting"] = False
-        self.cancel_pending_request(cancel_supermix=self.supermix_session is None)
+        self.cancel_pending_request(cancel_supermix=self.supermix_session is None,
+                                    preserve_youtube_page=bool(self._key(track) and youtube_music_url(track)))
         if not restore_session:
             self._restored_playback = None
         self._requested_start_position = max(0, int(start_position))
@@ -19690,9 +19696,12 @@ class MusicPlayer(QMainWindow):
         """Ограничивает ожидание Qt; обработчик ошибки сохраняет старый трек."""
         if self.pending_slot is None or self.requested_track is None:
             return
+        player = self.players[self.pending_slot]
+        message = (player.startup_timeout_message() if _is_youtube_music_player(player) else
+                   "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз.")
         self.on_slot_error(
             self.pending_slot, QMediaPlayer.Error.ResourceError,
-            "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз."
+            message
         )
 
     def _remote_playback(self):
