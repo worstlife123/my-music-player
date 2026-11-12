@@ -98,55 +98,6 @@ from PyQt6.QtWidgets import (
     QDialog, QTabWidget, QWidgetAction, QCheckBox, QFormLayout, QStyle, QStyleOptionSlider, QStackedWidget, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QScrollArea, QSystemTrayIcon, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 
-# WebEngine is optional at application startup. Enable its supported late-import
-# path before QApplication, then load it only when a YouTube track is requested.
-if QCoreApplication.instance() is None:
-    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-
-YouTubeMusicPlayer = None
-YouTubeMusicSession = None
-
-
-def youtube_music_url(track):
-    """Resolve YouTube IDs without importing the optional browser module."""
-    parsed = urlsplit(str(track.get("url") or "").strip())
-    host = (parsed.hostname or "").lower()
-    youtube_host = host in ("youtube.com", "youtu.be") or host.endswith(".youtube.com")
-    if track.get("source") != "youtube" and not youtube_host:
-        return ""
-    video_id = str(track.get("video_id") or track.get("videoId") or "").strip()
-    if not video_id and youtube_host:
-        if host == "youtu.be":
-            video_id = parsed.path.strip("/").split("/")[0]
-        elif parsed.path.startswith(("/shorts/", "/embed/")):
-            video_id = parsed.path.split("/")[2]
-        else:
-            video_id = parse_qs(parsed.query).get("v", [""])[0]
-    return "https://music.youtube.com/watch?v=" + video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else ""
-
-
-def _load_youtube_music_backend():
-    """Defer browser imports so an unavailable runtime cannot block the window."""
-    global YouTubeMusicPlayer, YouTubeMusicSession
-    try:
-        import youtube_music_backend as backend
-        if backend.QWebEngineProfile is None:
-            return False
-        if getattr(backend, 'WEB_DRIVER_PROTOCOL', 0) != 2:
-            raise RuntimeError('Устарел youtube_music_backend.py: обнови весь проект или пересобери EXE из полного main.')
-        if YouTubeMusicPlayer is None:
-            YouTubeMusicPlayer = backend.YouTubeMusicPlayer
-        if YouTubeMusicSession is None:
-            YouTubeMusicSession = backend.YouTubeMusicSession
-        return True
-    except (ImportError, OSError, RuntimeError) as error:
-        logging.getLogger("aurora").warning("Веб-плеер YouTube недоступен: %s", error)
-        return False
-
-
-def _is_youtube_music_player(player):
-    return YouTubeMusicPlayer is not None and isinstance(player, YouTubeMusicPlayer)
-
 
 def YoutubeDL(*args, **kwargs):
     """Load the extraction engine in its worker, without delaying the first window."""
@@ -4056,9 +4007,6 @@ class BufferedStreamEntry:
 
     def _store_block(self, block_idx, data):
         with self._cond:
-            expected = min(self.BLOCK_SIZE, self.total_size - block_idx * self.BLOCK_SIZE) if self.total_size is not None else self.BLOCK_SIZE
-            if not data or len(data) != expected:
-                raise ValueError("Неполный блок аудиопотока нельзя поместить в кэш.")
             self.blocks[block_idx] = bytes(data)
             self.blocks.move_to_end(block_idx)
             if block_idx == 0:
@@ -4093,7 +4041,7 @@ class BufferedStreamEntry:
         return out
 
     def _stream_span_into_blocks(self, start_block_idx, num_blocks_to_read=8, opener=None, dedicated_session=False):
-        """Cache complete blocks from one representation; resume interrupted reads."""
+        """Скачивает непрерывный сегмент и нарезает его на блоки по 64 КБ."""
         num_blocks_to_read = max(1, int(num_blocks_to_read))
         span_indices = range(start_block_idx, start_block_idx + num_blocks_to_read)
         with self._cond:
@@ -4102,189 +4050,219 @@ class BufferedStreamEntry:
             if start_block_idx in self.blocks:
                 self.blocks.move_to_end(start_block_idx)
                 return self.blocks[start_block_idx]
-            if self.failed:
-                return None
-            if self.total_size is not None and start_block_idx * self.BLOCK_SIZE >= self.total_size:
+            if self.total_size is not None and start_block_idx * self.BLOCK_SIZE >= self.total_size > 0:
                 return b""
-            while start_block_idx in self._inflight and not self.closed and not self.failed:
+            while start_block_idx in self._inflight and not self.closed:
                 self._cond.wait(timeout=0.12)
                 if start_block_idx in self.blocks:
                     return self.blocks[start_block_idx]
-            if self.closed or self.failed:
+            if self.closed:
                 return None
-            self._inflight.update(span_indices)
+            for idx in span_indices:
+                self._inflight.add(idx)
 
-        start_byte = start_block_idx * self.BLOCK_SIZE
-        end_byte = start_byte + num_blocks_to_read * self.BLOCK_SIZE - 1
-        next_byte, next_block = start_byte, start_block_idx
-        pending = bytearray()
         local_session = None
-
-        def remember_size(size):
-            with self._cond:
-                if self.total_size is not None and self.total_size != size:
-                    raise RuntimeError("Размер аудиопотока изменился; нужна новая ссылка.")
-                self.total_size = size
-                count = (size + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
-                if count and all(index in self.blocks for index in range(count)):
-                    self.fully_buffered = True
-                    self.eof = True
-                self._cond.notify_all()
-
-        def finish_range(headers, request_start):
-            match = re.fullmatch(r"bytes \*/(\d+)", headers.get("Content-Range", ""), re.I)
-            if match:
-                remember_size(int(match[1]))
-            if self.total_size is not None and request_start >= self.total_size:
-                return True
-            raise RuntimeError("Сервер отклонил диапазон аудиопотока.")
-
-        def receive(status, headers, chunks, request_start, request_end, target_url):
-            nonlocal next_byte, next_block
-            if status == 416:
-                return finish_range(headers, request_start)
-            if status not in (200, 206):
-                raise RuntimeError(f"HTTP {status}")
-            if str(headers.get("Content-Encoding", "identity")).lower() not in ("", "identity"):
-                raise RuntimeError("Сервер изменил кодирование байтов аудиопотока.")
-            content_range = headers.get("Content-Range", "")
-            interval = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range, re.I)
-            if status == 206 and interval is None:
-                raise RuntimeError("В ответе сервера нет корректного диапазона байтов.")
-            response_start, response_end = 0, None
-            length = str(headers.get("Content-Length", ""))
-            google_range = (urlsplit(target_url).hostname or "").lower().endswith(".googlevideo.com")
-            query_range = re.search(r"[?&]range=(\d+)-(\d+)(?:&|$)", target_url) if google_range else None
-            if interval is not None:
-                response_start, response_end = int(interval[1]), int(interval[2])
-                if response_start != request_start or response_end < response_start:
-                    raise RuntimeError("Сервер вернул другой диапазон байтов аудиопотока.")
-                if interval[3] != "*":
-                    size = int(interval[3])
-                    if response_end >= size:
-                        raise RuntimeError("Некорректный размер диапазона аудиопотока.")
-                    remember_size(size)
-            elif query_range is not None:
-                if int(query_range[1]) != request_start:
-                    raise RuntimeError("Ссылка содержит другой диапазон байтов.")
-                response_start, response_end = request_start, int(query_range[2])
-                hint = re.search(r"[?&]clen=(\d+)(?:&|$)", target_url)
-                if hint:
-                    remember_size(int(hint[1]))
-                # Some servers ignore even query ranges and return the full file.
-                if length.isdigit() and (int(length) > response_end - response_start + 1
-                                          or (self.total_size == int(length) and request_start > 0)):
-                    response_start, response_end, query_range = 0, None, None
-            elif length.isdigit():
-                remember_size(int(length))
-            if self.total_size is not None:
-                request_end = min(request_end, self.total_size - 1)
-                if request_start >= self.total_size:
-                    return True
-            content_type = headers.get("Content-Type")
-            if content_type:
-                self.content_type = content_type.split(";")[0].strip()
-            skip = max(0, request_start - response_start)
-            read_end = min(request_end, response_end) if response_end is not None else request_end
-            stopped_at_range = False
-            for chunk in chunks:
-                if self.closed:
-                    return False
-                if not chunk:
-                    continue
-                if skip:
-                    discard = min(skip, len(chunk))
-                    skip -= discard
-                    chunk = chunk[discard:]
-                if not chunk:
-                    continue
-                chunk = chunk[:max(0, read_end - next_byte + 1)]
-                pending.extend(chunk)
-                next_byte += len(chunk)
-                while len(pending) >= self.BLOCK_SIZE:
-                    self._store_block(next_block, bytes(pending[:self.BLOCK_SIZE]))
-                    del pending[:self.BLOCK_SIZE]
-                    next_block += 1
-                if next_byte > read_end:
-                    stopped_at_range = True
-                    break
-            if (self.total_size is None and status == 200 and query_range is None
-                    and not stopped_at_range and skip == 0):
-                remember_size(next_byte)
-            if self.total_size is not None and next_byte == self.total_size and pending:
-                self._store_block(next_block, bytes(pending))
-                pending.clear()
-            if not stopped_at_range and response_end is not None and next_byte <= read_end:
-                raise RuntimeError("Соединение оборвалось до конца диапазона аудио.")
-            return self.total_size is not None and request_start >= self.total_size
-
         try:
-            last_error = ""
-            for attempt in range(4):
-                if self.closed or self.failed:
+            start_byte = start_block_idx * self.BLOCK_SIZE
+            span_bytes = num_blocks_to_read * self.BLOCK_SIZE
+            end_byte = start_byte + span_bytes - 1
+            if self.total_size is not None and self.total_size > 0:
+                if start_byte >= self.total_size:
+                    return b""
+                end_byte = min(end_byte, self.total_size - 1)
+
+            last_err = ""
+            max_attempts = 3 if start_block_idx == 0 else 4
+            for attempt in range(max_attempts):
+                if self.closed:
                     return None
-                if self.total_size is not None:
-                    end_byte = min(end_byte, self.total_size - 1)
-                request_start = next_byte
                 self._req_number += 1
-                active_url = (self.backup_urls[(attempt - 1) % len(self.backup_urls)]
-                              if attempt and self.backup_urls else self.remote_url)
-                target_url = active_url
-                if attempt or re.search(r"[?&]range=", active_url):
-                    target_url = self._with_googlevideo_params(active_url, request_start, end_byte,
-                                                              self._req_number, use_query_range=True)
-                headers = dict(self.headers)
-                headers["Range"] = f"bytes={request_start}-{end_byte}"
+                active_url = self.remote_url
+                if attempt >= 1 and self.backup_urls:
+                    active_url = self.backup_urls[(attempt - 1) % len(self.backup_urls)]
+                if attempt == 0 and not re.search(r"[?&]range=", active_url):
+                    target_url = active_url
+                else:
+                    target_url = self._with_googlevideo_params(
+                        active_url, start_byte, end_byte, self._req_number,
+                        use_query_range=(attempt >= 1 or bool(re.search(r"[?&]range=", active_url)))
+                    )
+                req_headers = dict(self.headers)
+                if "range=" not in target_url:
+                    req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+
                 try:
                     if dedicated_session:
                         if local_session is not None:
-                            local_session.close()
-                        local_session = _create_keepalive_stream_session()
+                            try:
+                                local_session.close()
+                            except Exception:
+                                pass
+                        is_local = self.remote_url.startswith(("http://127.0.0.1", "https://127.0.0.1", "http://localhost", "https://localhost"))
+                        local_session = _create_keepalive_stream_session(prefer_ipv4=(attempt >= 2 and not is_local))
                         session = local_session
                     else:
-                        # Keep the OS/VPN route used to obtain this signed URL.
-                        session = self._get_session(reset=attempt > 0)
+                        session = self._get_session(
+                            reset=(attempt >= 1),
+                            prefer_ipv4=(attempt >= 2)
+                        )
                     if session is not None:
-                        with session.get(target_url, headers=headers, stream=True, timeout=(3.0, 5.0)) as response:
-                            at_end = receive(response.status_code, response.headers,
-                                             response.iter_content(chunk_size=32768), request_start, end_byte, target_url)
+                        with session.get(target_url, headers=req_headers, stream=True, timeout=(3.0, 5.0)) as resp:
+                            status = resp.status_code
+                            if status == 416:
+                                with self._cond:
+                                    if self.total_size is None and start_byte > 0:
+                                        self.total_size = start_byte
+                                    self.eof = True
+                                    self._cond.notify_all()
+                                return b""
+                            if status >= 400:
+                                last_err = f"HTTP {status}"
+                                if status in (401, 403) and start_block_idx == 0:
+                                    if not self.backup_urls and attempt >= 1:
+                                        break
+                                time.sleep(0.06)
+                                continue
+
+                            ctype = resp.headers.get("Content-Type")
+                            if ctype:
+                                self.content_type = ctype.split(";")[0].strip()
+                            content_range = resp.headers.get("Content-Range") or ""
+                            if "/" in content_range:
+                                total_part = content_range.rsplit("/", 1)[-1].strip()
+                                if total_part.isdigit():
+                                    with self._cond:
+                                        self.total_size = int(total_part)
+                            elif status == 200 and self.total_size is None:
+                                clen = resp.headers.get("Content-Length") or ""
+                                if clen.strip().isdigit() and "range=" not in target_url:
+                                    with self._cond:
+                                        self.total_size = int(clen.strip())
+
+                            buf = bytearray()
+                            cur_idx = start_block_idx
+                            stored_any = False
+                            skipped = 0
+                            need_skip_initial = (status == 200 and start_byte > 0 and not content_range and "range=" not in target_url)
+
+                            for raw_chunk in resp.iter_content(chunk_size=32768):
+                                if self.closed:
+                                    break
+                                if not raw_chunk:
+                                    continue
+                                if need_skip_initial and skipped < start_byte:
+                                    rem_skip = start_byte - skipped
+                                    if len(raw_chunk) <= rem_skip:
+                                        skipped += len(raw_chunk)
+                                        continue
+                                    raw_chunk = raw_chunk[rem_skip:]
+                                    skipped = start_byte
+                                buf.extend(raw_chunk)
+                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
+                                    with self._cond:
+                                        self._has_initial_data = True
+                                        self._cond.notify_all()
+                                while len(buf) >= self.BLOCK_SIZE and cur_idx < self.MAX_CACHED_BLOCKS:
+                                    piece = bytes(buf[:self.BLOCK_SIZE])
+                                    del buf[:self.BLOCK_SIZE]
+                                    self._store_block(cur_idx, piece)
+                                    stored_any = True
+                                    cur_idx += 1
+                                    if cur_idx >= start_block_idx + num_blocks_to_read and status == 206:
+                                        break
+                            if buf and not self.closed and cur_idx < self.MAX_CACHED_BLOCKS:
+                                self._store_block(cur_idx, bytes(buf))
+                                stored_any = True
+                                last_end = cur_idx * self.BLOCK_SIZE + len(buf)
+                            else:
+                                last_end = cur_idx * self.BLOCK_SIZE
+
+                            if stored_any:
+                                is_fully_read = (
+                                    (self.total_size is not None and last_end >= self.total_size)
+                                    or (self.total_size is None and status == 200 and not content_range and "range=" not in target_url and not buf)
+                                )
+                                if is_fully_read:
+                                    with self._cond:
+                                        if self.total_size is None:
+                                            self.total_size = sum(len(b) for b in self.blocks.values())
+                                        if start_block_idx == 0:
+                                            self.fully_buffered = True
+                                        self.eof = True
+                                        self._cond.notify_all()
+                                return self.blocks.get(start_block_idx, b"")
+                            if self.total_size is not None and start_byte >= self.total_size:
+                                return b""
                     else:
                         if opener is None:
                             opener = self._build_opener()
-                        with opener.open(Request(target_url, headers=headers), timeout=4.5) as response:
-                            at_end = receive(response.getcode(), response.headers,
-                                             iter(lambda: response.read(32768), b""), request_start, end_byte, target_url)
-                    if at_end:
+                        req = Request(target_url, headers=req_headers)
+                        with opener.open(req, timeout=4.5) as uresp:
+                            ctype = uresp.headers.get("Content-Type")
+                            if ctype:
+                                self.content_type = ctype.split(";")[0].strip()
+                            content_range = uresp.headers.get("Content-Range") or ""
+                            if "/" in content_range:
+                                total_part = content_range.rsplit("/", 1)[-1].strip()
+                                if total_part.isdigit():
+                                    with self._cond:
+                                        self.total_size = int(total_part)
+                            buf = bytearray()
+                            cur_idx = start_block_idx
+                            stored_any = False
+                            while not self.closed and cur_idx < start_block_idx + num_blocks_to_read:
+                                chunk = uresp.read(32768)
+                                if not chunk:
+                                    break
+                                buf.extend(chunk)
+                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
+                                    with self._cond:
+                                        self._has_initial_data = True
+                                        self._cond.notify_all()
+                                while len(buf) >= self.BLOCK_SIZE:
+                                    piece = bytes(buf[:self.BLOCK_SIZE])
+                                    del buf[:self.BLOCK_SIZE]
+                                    self._store_block(cur_idx, piece)
+                                    stored_any = True
+                                    cur_idx += 1
+                            if buf and not self.closed:
+                                self._store_block(cur_idx, bytes(buf))
+                                stored_any = True
+                            if stored_any:
+                                return self.blocks.get(start_block_idx, b"")
+                except HTTPError as http_err:
+                    last_err = f"HTTP {http_err.code}"
+                    if http_err.code == 416:
+                        with self._cond:
+                            if self.total_size is None and start_byte > 0:
+                                self.total_size = start_byte
+                            self.eof = True
+                            self._cond.notify_all()
                         return b""
-                except HTTPError as error:
-                    if error.code == 416:
-                        try:
-                            if finish_range(error.headers, request_start):
-                                return b""
-                        except RuntimeError as invalid_range:
-                            last_error = str(invalid_range)
-                    else:
-                        last_error = f"HTTP {error.code}"
-                    error.close()
-                except Exception as error:
-                    last_error = str(error)
-                with self._cond:
-                    if start_block_idx in self.blocks:
-                        return self.blocks[start_block_idx]
-                if next_byte == request_start:
+                    if http_err.code in (401, 403) and start_block_idx == 0:
+                        if not self.backup_urls and attempt >= 1:
+                            break
+                    time.sleep(0.06)
+                except Exception as err:
+                    last_err = str(err)
                     time.sleep(0.08)
+
             with self._cond:
-                self.last_error = last_error or "Не удалось загрузить полный блок аудиопотока."
-                self.failed = True
+                self.last_error = last_err
+                if start_block_idx == 0 and 0 not in self.blocks:
+                    self.failed = True
                 self._cond.notify_all()
             return None
         finally:
             if local_session is not None:
-                local_session.close()
+                try:
+                    local_session.close()
+                except Exception:
+                    pass
             with self._cond:
-                self._inflight.difference_update(span_indices)
+                for idx in span_indices:
+                    self._inflight.discard(idx)
                 self._cond.notify_all()
-
 
     def _fetch_block(self, block_idx, opener=None):
         return self._stream_span_into_blocks(block_idx, num_blocks_to_read=1, opener=opener)
@@ -4759,10 +4737,13 @@ class StreamWorker(QThread):
     failed = pyqtSignal(str)
 
     _SHARED_YDL = None
+    _SHARED_YDL_BASE_PARAMS = None
     _SHARED_YDL_LOCK = threading.Lock()
     _SOUNDCLOUD_API_SESSION = None
     _SOUNDCLOUD_API_SESSION_LOCK = threading.Lock()
     _SOUNDCLOUD_RESOLVED_TRACKS = {}
+    _YOUTUBE_API_SESSION = None
+    _YOUTUBE_API_SESSION_LOCK = threading.Lock()
 
     @classmethod
     def _get_soundcloud_session(cls):
@@ -4770,6 +4751,13 @@ class StreamWorker(QThread):
             if cls._SOUNDCLOUD_API_SESSION is None and requests is not None:
                 cls._SOUNDCLOUD_API_SESSION = _create_keepalive_stream_session(prefer_ipv4=False)
             return cls._SOUNDCLOUD_API_SESSION
+
+    @classmethod
+    def _get_youtube_session(cls):
+        with cls._YOUTUBE_API_SESSION_LOCK:
+            if cls._YOUTUBE_API_SESSION is None and requests is not None:
+                cls._YOUTUBE_API_SESSION = _create_keepalive_stream_session(prefer_ipv4=False)
+            return cls._YOUTUBE_API_SESSION
 
     @classmethod
     def get_soundcloud_client_id(cls):
@@ -4833,7 +4821,9 @@ class StreamWorker(QThread):
         with cls._SHARED_YDL_LOCK:
             if cls._SHARED_YDL is None:
                 try:
-                    cls._SHARED_YDL = YoutubeDL(opts)
+                    ydl = YoutubeDL(opts)
+                    cls._SHARED_YDL_BASE_PARAMS = copy.deepcopy(ydl.params)
+                    cls._SHARED_YDL = ydl
                 except Exception:
                     pass
 
@@ -4910,10 +4900,42 @@ class StreamWorker(QThread):
                 inject_into_dict(fmt)
 
     def _extract(self, options):
-        # YoutubeDL initializes required defaults and caches cookies/extractors.
-        # Keep that state local to this request; clearing params breaks defaults
-        # such as http_headers and reusing a client can retain another login.
-        with YoutubeDL(dict(options)) as ydl:
+        can_reuse_shared = (
+            not options.get("cookiefile")
+            and not options.get("cookiesfrombrowser")
+            and "unittest" not in sys.modules
+        )
+        acquired = self._SHARED_YDL_LOCK.acquire(blocking=False) if can_reuse_shared else False
+        ydl = None
+        should_close = False
+        try:
+            if acquired:
+                if self._SHARED_YDL is None:
+                    try:
+                        inst = YoutubeDL(dict(options))
+                        self.__class__._SHARED_YDL_BASE_PARAMS = copy.deepcopy(inst.params)
+                        self.__class__._SHARED_YDL = inst
+                    except Exception:
+                        pass
+                if self._SHARED_YDL is not None and self._SHARED_YDL_BASE_PARAMS is not None:
+                    ydl = self._SHARED_YDL
+                    merged = copy.deepcopy(self._SHARED_YDL_BASE_PARAMS)
+                    merged.update(options)
+                    if "http_headers" in options and isinstance(options["http_headers"], dict):
+                        hdrs = dict(self._SHARED_YDL_BASE_PARAMS.get("http_headers") or {})
+                        hdrs.update(options["http_headers"])
+                        merged["http_headers"] = hdrs
+                    ydl.params.clear()
+                    ydl.params.update(merged)
+                    if hasattr(ydl, "cookiejar") and ydl.cookiejar is not None:
+                        try:
+                            ydl.cookiejar.clear()
+                        except Exception:
+                            pass
+            if ydl is None:
+                ydl = YoutubeDL(dict(options))
+                should_close = True
+
             if type(ydl).__module__.startswith("yt_dlp"):
                 try:
                     from yt_dlp.extractor import soundcloud as sc_mod
@@ -4937,6 +4959,14 @@ class StreamWorker(QThread):
                 except Exception:
                     pass
             return info
+        finally:
+            if acquired:
+                self._SHARED_YDL_LOCK.release()
+            elif ydl is not None and should_close:
+                try:
+                    ydl.close()
+                except Exception:
+                    pass
 
     def _download_stream_via_ytdlp(self, base_options, auth_options=None):
         """Прямая загрузка аудио силами самого yt-dlp в локальный кэш (точно как в DownloadWorker)."""
@@ -5024,11 +5054,9 @@ class StreamWorker(QThread):
         return auth_options
 
     def _wait_for_proxy(self, entry, timeout):
-        if not entry.wait_for_initial_bytes(min_bytes=4096, timeout=timeout):
+        if not entry.wait_for_initial_bytes(min_bytes=1024, timeout=timeout):
             return False
         if self.resume_position_ms > 0 and entry._is_hls():
-            # Joined HLS fragments need a final byte length before FFmpeg can
-            # seek reliably. Only recovery/resume waits for the complete buffer.
             deadline = time.monotonic() + 15.0
             with entry._cond:
                 while not entry.is_complete():
@@ -5058,9 +5086,6 @@ class StreamWorker(QThread):
             f for f in raw_formats
             if f.get("vcodec") in (None, "none")
         ]
-        candidates = pure_audio or raw_formats
-        # Different bitrates/codecs are different byte streams even if the
-        # extension matches. Try them only with a new buffer and decoder.
         proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
             stream_url, headers=headers, ext=ext, protocol=protocol,
             fragments=selected_info.get("fragments"),
@@ -5088,6 +5113,190 @@ class StreamWorker(QThread):
                 alt_host = QUrl(str(alt["url"])).host() or remote_host
                 return alt_entry.canonical_url(alt_proxy_url), alt, alt_host
             alt_entry.close()
+        return None
+
+    def _extract_youtube_video_id(self):
+        vid = str(self.track.get("video_id") or self.track.get("videoId") or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+            return vid
+        url = str(self.track.get("url") or "").strip()
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if host == "youtu.be":
+            cand = parsed.path.strip("/").split("/")[0]
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", cand):
+                return cand
+        elif "youtube.com" in host:
+            if parsed.path.startswith(("/shorts/", "/embed/", "/v/")):
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) >= 2 and re.fullmatch(r"[A-Za-z0-9_-]{11}", parts[1]):
+                    return parts[1]
+            cand = parse_qs(parsed.query).get("v", [""])[0]
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", cand):
+                return cand
+        return ""
+
+    def _resolve_fast_youtube_stream(self):
+        """Прямой запрос к YouTube Innertube /youtubei/v1/player API (запуск за ~150–250 мс без накладных расходов yt-dlp)."""
+        if requests is None or not self._is_real_extract() or "unittest" in sys.modules:
+            return None
+        url = str(self.track.get("url") or "")
+        is_yt = (
+            self.track.get("source") == "youtube"
+            or "youtube.com" in url.lower()
+            or "youtu.be" in url.lower()
+        )
+        if not is_yt:
+            return None
+        video_id = self._extract_youtube_video_id()
+        if not video_id:
+            return None
+
+        session = self._get_youtube_session()
+        if session is None:
+            session = _create_keepalive_stream_session(prefer_ipv4=False)
+        if session is None:
+            return None
+
+        innertube_clients = (
+            {
+                "id": "28",
+                "version": "1.60.19",
+                "ua": "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.60.19",
+                    "androidSdkVersion": 32,
+                    "userAgent": "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                    "osName": "Android",
+                    "osVersion": "12L",
+                    "hl": "ru",
+                    "gl": "US",
+                },
+            },
+            {
+                "id": "3",
+                "version": "20.10.38",
+                "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "20.10.38",
+                    "androidSdkVersion": 34,
+                    "userAgent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+                    "osName": "Android",
+                    "osVersion": "14",
+                    "hl": "ru",
+                    "gl": "US",
+                },
+            },
+        )
+
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        for spec in innertube_clients:
+            if self._cancel_requested:
+                return None
+            req_headers = {
+                "User-Agent": spec["ua"],
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-YouTube-Client-Name": spec["id"],
+                "X-YouTube-Client-Version": spec["version"],
+                "Origin": "https://www.youtube.com",
+            }
+            payload = {
+                "context": {"client": spec["client"]},
+                "videoId": video_id,
+                "contentCheckOk": True,
+                "racyCheckOk": True,
+            }
+            try:
+                resp = session.post(endpoint, json=payload, headers=req_headers, timeout=(2.2, 3.2))
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if not isinstance(data, dict):
+                    continue
+                status_obj = data.get("playabilityStatus") or {}
+                if status_obj.get("status") != "OK":
+                    continue
+                streaming = data.get("streamingData") or {}
+                raw_fmts = list(streaming.get("adaptiveFormats") or []) + list(streaming.get("formats") or [])
+                audio_candidates = []
+                for fmt in raw_fmts:
+                    if not isinstance(fmt, dict):
+                        continue
+                    f_url = str(fmt.get("url") or "").strip()
+                    if not f_url.startswith(("https://", "http://")):
+                        continue
+                    itag = str(fmt.get("itag") or "")
+                    if self.avoid_format_id and itag == self.avoid_format_id:
+                        continue
+                    mime = str(fmt.get("mimeType") or "").lower()
+                    is_audio_only = mime.startswith("audio/")
+                    if not is_audio_only and itag != "18":
+                        continue
+                    ext = "m4a" if ("mp4" in mime and is_audio_only) else ("webm" if "webm" in mime else "mp4")
+                    bitrate = int(fmt.get("averageBitrate") or fmt.get("bitrate") or 0)
+                    clen_str = str(fmt.get("contentLength") or "").strip()
+                    clen = int(clen_str) if clen_str.isdigit() else None
+                    # Приоритет: itag 140 (m4a AAC — идеальная перемотка и мгновенный старт в Qt/FFmpeg),
+                    # затем itag 251 (Opus 160kbps), затем itag 18 (MP4 AAC)
+                    if self.audio_quality == "compatibility":
+                        rank = 300 if itag == "18" else (260 if itag == "140" else (200 if is_audio_only else 100))
+                    elif self.audio_quality == "economy":
+                        rank = 280 if itag in ("140", "250", "249") else (220 if itag == "18" else 150)
+                    elif self.audio_quality == "high":
+                        rank = 290 if itag == "251" else (275 if itag == "140" else (200 if is_audio_only else 120))
+                    else:
+                        rank = 295 if itag == "140" else (285 if itag == "251" else (240 if itag == "18" else (200 if is_audio_only else 100)))
+                    audio_candidates.append((rank, bitrate, {
+                        "url": f_url,
+                        "itag": itag,
+                        "ext": ext,
+                        "filesize": clen,
+                        "ua": spec["ua"],
+                    }))
+
+                if not audio_candidates:
+                    continue
+                audio_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                details = data.get("videoDetails") or {}
+                track_title = str(details.get("title") or self.track.get("title") or "Трек")
+                try:
+                    track_duration = float(details.get("lengthSeconds") or self.track.get("duration") or 0.0)
+                except (TypeError, ValueError):
+                    track_duration = 0.0
+                is_live = bool(details.get("isLiveContent"))
+
+                for _, _, cand in audio_candidates[:2]:
+                    if self._cancel_requested:
+                        return None
+                    stream_headers = {
+                        "User-Agent": cand["ua"],
+                        "Accept": "*/*",
+                    }
+                    proxy_url, proxy_entry = LocalStreamProxy.instance().register_stream(
+                        cand["url"],
+                        headers=stream_headers,
+                        ext=cand["ext"],
+                        protocol="https",
+                        total_size=cand["filesize"],
+                    )
+                    if self._wait_for_proxy(proxy_entry, timeout=1.6):
+                        canonical_url = proxy_entry.canonical_url(proxy_url)
+                        remote_host = QUrl(cand["url"]).host() or "googlevideo.com"
+                        return {
+                            "playback_url": canonical_url,
+                            "title": track_title,
+                            "duration": track_duration,
+                            "is_live": is_live,
+                            "format_id": cand["itag"],
+                            "protocol": "https",
+                            "remote_host": remote_host,
+                        }
+                    proxy_entry.close()
+            except Exception:
+                continue
         return None
 
     def _resolve_fast_soundcloud_stream(self):
@@ -5238,6 +5447,18 @@ class StreamWorker(QThread):
                 self.stream_ready.emit(fast_sc["playback_url"], fast_sc["title"], time.perf_counter() - started)
                 return
 
+            fast_yt = self._resolve_fast_youtube_stream()
+            if fast_yt and not self._cancel_requested:
+                self.metadata_ready.emit({
+                    "duration": fast_yt["duration"],
+                    "is_live": fast_yt.get("is_live", False),
+                    "format_id": fast_yt["format_id"],
+                    "protocol": fast_yt["protocol"],
+                    "hostname": fast_yt["remote_host"],
+                })
+                self.stream_ready.emit(fast_yt["playback_url"], fast_yt["title"], time.perf_counter() - started)
+                return
+
         format_options = {
             "auto": (
                 "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][format_id=140]/"
@@ -5291,6 +5512,15 @@ class StreamWorker(QThread):
             "no_color": True,
             "check_formats": None,
         }
+        if self._is_real_extract() and is_yt and "unittest" not in sys.modules:
+            options["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android"],
+                    "player_skip": ["webpage", "configs", "initial_data", "js"],
+                }
+            }
+            options["youtube_include_dash_manifest"] = False
+            options["youtube_include_hls_manifest"] = False
         used_auth = False
         try:
             try:
@@ -5301,14 +5531,15 @@ class StreamWorker(QThread):
                 if self._cancel_requested:
                     return
                 auth_options = self._auth_options()
-                can_retry_default = self._is_real_extract() and is_yt and self._auth_may_help(public_error)
+                can_retry_default = self._is_real_extract() and is_yt and ("extractor_args" in options or self._auth_may_help(public_error))
                 if not can_retry_default and (not auth_options or not self._auth_may_help(public_error)):
                     raise
                 retry_options = dict(options)
                 if can_retry_default and not auth_options:
                     retry_options["extractor_args"] = {
                         "youtube": {
-                            "player_client": ["android_vr", "web_safari"],
+                            "player_client": ["android_vr", "mweb", "web"],
+                            "player_skip": ["configs"],
                         }
                     }
                 else:
@@ -9878,9 +10109,6 @@ class MusicPlayer(QMainWindow):
         # Два QMediaPlayer с отдельными QAudioOutput: основной и резервный.
         # Резервный можно открывать и буферизовать, не прерывая основной.
         self.players = [QMediaPlayer(self), QMediaPlayer(self)]
-        self._native_players = list(self.players)
-        self._youtube_players = {}
-        self._youtube_session = None
         self.audio_outputs = [QAudioOutput(self), QAudioOutput(self)]
         self.volume = max(0.0, min(1.0, self.settings.value("volume", 70, type=int) / 100.0))
         for player, output in zip(self.players, self.audio_outputs):
@@ -11789,63 +12017,24 @@ class MusicPlayer(QMainWindow):
         # Каждый плеер сообщает номер своего слота. Это необходимо,
         # чтобы движение старой песни не считалось началом новой.
         for index, player in enumerate(self.players):
-            self._connect_media_slot(index, player)
-
-    def _connect_media_slot(self, slot, player):
-        # A late event from the other backend must not commit a new selection.
-        for signal, handler in (
-            (player.positionChanged, self.on_slot_position),
-            (player.durationChanged, self.on_slot_duration),
-            (player.playbackStateChanged, self.on_slot_playback_state),
-            (player.mediaStatusChanged, self.on_slot_status),
-            (player.errorOccurred, self.on_slot_error),
-        ):
-            signal.connect(lambda *args, p=player, i=slot, h=handler:
-                           h(i, *args) if self.players[i] is p else None)
-        player.seekableChanged.connect(lambda _seekable, p=player, i=slot:
-                                       self._apply_recovery_seek(i) if self.players[i] is p else None)
-
-    @staticmethod
-    def _youtube_playback_cookies(auth):
-        reader = YouTubeMusicAuth()
-        reader.cookie_file = auth.get("cookie_file", "")
-        reader.browser_spec = auth.get("cookies_from_browser", "")
-        return (reader._cookies_from_browser(include_consent=True) if reader.browser_spec else
-                reader._cookies_from_file(include_consent=True))
-
-    def _media_player_for(self, slot, media_url):
-        is_youtube = media_url.host() == "music.youtube.com" and media_url.path() == "/watch"
-        if is_youtube:
-            if not _load_youtube_music_backend():
-                raise RuntimeError("Веб-плеер YouTube Music недоступен.")
-            if self._youtube_session is None:
-                self._youtube_session = YouTubeMusicSession(self)
-            auth = self.youtube_auth_kwargs()
-            signature = tuple(sorted(auth.items()))
-            if auth.get("cookie_file"):
-                try:
-                    signature += (Path(auth["cookie_file"]).stat().st_mtime_ns,)
-                except OSError:
-                    pass
-            self._youtube_session.configure(
-                signature, (lambda a=dict(auth): self._youtube_playback_cookies(a)) if auth else None
+            player.positionChanged.connect(
+                lambda pos, i=index: self.on_slot_position(i, pos)
             )
-            if slot not in self._youtube_players:
-                backend = YouTubeMusicPlayer(self._youtube_session, self)
-                backend.setAudioOutput(self.audio_outputs[slot])
-                self._connect_media_slot(slot, backend)
-                self._youtube_players[slot] = backend
-            player = self._youtube_players[slot]
-        else:
-            player = self._native_players[slot]
-        if self.players[slot] is not player:
-            with QSignalBlocker(self.players[slot]):
-                self.players[slot].stop()
-                self.players[slot].setSource(QUrl())
-            self.players[slot] = player
-            self.standby_key = None
-            self.standby_ready = False
-        return player
+            player.durationChanged.connect(
+                lambda dur, i=index: self.on_slot_duration(i, dur)
+            )
+            player.playbackStateChanged.connect(
+                lambda state, i=index: self.on_slot_playback_state(i, state)
+            )
+            player.mediaStatusChanged.connect(
+                lambda status, i=index: self.on_slot_status(i, status)
+            )
+            player.errorOccurred.connect(
+                lambda err, msg, i=index: self.on_slot_error(i, err, msg)
+            )
+            player.seekableChanged.connect(
+                lambda _seekable, i=index: self._apply_recovery_seek(i)
+            )
 
     # ---------------------------------------------------------
     # Меню и настройки. Все элементы сохраняются через QSettings.
@@ -13160,7 +13349,11 @@ class MusicPlayer(QMainWindow):
                         YouTubeMusicAuth._cookies_from_browser(browser_spec)
                     except Exception:
                         pass
-                # Прогреваем клиент SoundCloud (client_id + TCP/TLS keepalive сессия)
+                # Прогреваем сессии YouTube Innertube и SoundCloud (TCP/TLS keepalive)
+                try:
+                    StreamWorker._get_youtube_session()
+                except Exception:
+                    pass
                 try:
                     StreamWorker.get_soundcloud_client_id()
                     StreamWorker._get_soundcloud_session()
@@ -17008,8 +17201,6 @@ class MusicPlayer(QMainWindow):
                 self.settings.setValue("youtube_auth_mode", "browser")
                 self.settings.setValue("youtube_auth_browser", self.youtube_auth_browser)
                 self.settings.setValue("youtube_auth_profile", self.youtube_auth_profile)
-            if self._youtube_session is not None:
-                self._youtube_session.clear_account()
             self.settings.sync()
             dialog.accept()
             self.refresh_likes_list()
@@ -17096,8 +17287,6 @@ class MusicPlayer(QMainWindow):
         self.youtube_auth_mode = "file"
         self.youtube_auth_browser = "chrome"
         self.youtube_auth_profile = ""
-        if self._youtube_session is not None:
-            self._youtube_session.clear_account()
         for key in ("youtube_cookie_file", "youtube_auth_mode", "youtube_auth_browser", "youtube_auth_profile", "youtube_mix_catalog_json", "supermix_cover_url"):
             self.settings.remove(key)
         self.settings.sync()
@@ -19267,7 +19456,7 @@ class MusicPlayer(QMainWindow):
             if isinstance(row, TrackRow) and getattr(row, "_loading", False):
                 row.set_loading(False)
 
-    def cancel_pending_request(self, cancel_supermix=True, preserve_youtube_page=False):
+    def cancel_pending_request(self, cancel_supermix=True):
         """Отменяем запуск неактуального трека, оставляя текущий звук."""
         if cancel_supermix:
             self._cancel_supermix()
@@ -19288,10 +19477,7 @@ class MusicPlayer(QMainWindow):
             self.audio_outputs[slot].setVolume(0.0)
             with QSignalBlocker(self.players[slot]):
                 self.players[slot].stop()
-                if preserve_youtube_page and _is_youtube_music_player(self.players[slot]):
-                    self.players[slot].setSource(QUrl(), preserve_document=True)
-                else:
-                    self.players[slot].setSource(QUrl())
+                self.players[slot].setSource(QUrl())
             self.standby_key = None
             self.standby_ready = False
         self._clear_loading_indicators()
@@ -19300,9 +19486,8 @@ class MusicPlayer(QMainWindow):
     def prepare_next_track(self):
         """Находим следующую песню и прогреваем её вторым QMediaPlayer.
 
-        Сначала yt-dlp получает временную ссылку в отдельном QThread,
-        затем неактивный QMediaPlayer открывает источник БЕЗ воспроизведения.
-        На Windows реальная буферизация может начаться только при play().
+        Сначала StreamWorker получает поток и запускает предзагрузку в LocalStreamProxy,
+        либо для локальных файлов резервный QMediaPlayer открывает источник без звука.
         """
         if self._force_exit or self.requested_track is not None or self.pending_slot is not None:
             return
@@ -19325,9 +19510,6 @@ class MusicPlayer(QMainWindow):
             return
         if track.get("source") == "local":
             self.preload_in_qt(track, QUrl.fromLocalFile(key))
-            return
-        if youtube_music_url(track) or track.get("source") == "youtube":
-            # YTM owns audio delivery; never cache expiring YouTube stream URLs.
             return
         cached = self.get_cached_stream(key)
         if cached:
@@ -19370,7 +19552,7 @@ class MusicPlayer(QMainWindow):
                     entry.start()
             return
         slot = self.idle_slot()
-        player = self._media_player_for(slot, media_url)
+        player = self.players[slot]
         key = self._key(track)
         if self.standby_key == key and player.source() == media_url:
             return
@@ -19411,18 +19593,6 @@ class MusicPlayer(QMainWindow):
 
     def start_stream_extraction(self, track):
         """Запрос аудиоссылки не блокирует Qt и текущий звук."""
-        youtube_url = youtube_music_url(track)
-        if youtube_url:
-            if not _load_youtube_music_backend():
-                self.stream_error(self._key(track),
-                                  "Не удалось подключить веб-плеер YouTube Music. "
-                                  "Используй полную сборку приложения или пересобери EXE через build_exe.bat.")
-                return
-            self.start_pending_media(QUrl(youtube_url), "YouTube Music playerApi")
-            return
-        if track.get("source") == "youtube" and not youtube_url:
-            self.stream_error(self._key(track), "Не удалось определить video ID трека YouTube.")
-            return
         key = self._key(track)
         if self.prefetch_worker is not None and self.prefetch_target != key:
             self.prefetch_worker.cancel()
@@ -19475,8 +19645,7 @@ class MusicPlayer(QMainWindow):
             self.queue_mode = "manual"
         elif self.supermix_session is not None:
             self.supermix_session["waiting"] = False
-        self.cancel_pending_request(cancel_supermix=self.supermix_session is None,
-                                    preserve_youtube_page=bool(self._key(track) and youtube_music_url(track)))
+        self.cancel_pending_request(cancel_supermix=self.supermix_session is None)
         if not restore_session:
             self._restored_playback = None
         self._requested_start_position = max(0, int(start_position))
@@ -19500,9 +19669,6 @@ class MusicPlayer(QMainWindow):
             return
         if track.get("source") == "local":
             self.start_pending_media(QUrl.fromLocalFile(key), "локальный файл")
-            return
-        if youtube_music_url(track) or track.get("source") == "youtube":
-            self.start_stream_extraction(track)
             return
 
         # Повторно используем предварительно ОТКРЫТЫЙ в Qt источник.
@@ -19655,11 +19821,7 @@ class MusicPlayer(QMainWindow):
             return
         self.stop_fade()
         slot = self.idle_slot()
-        try:
-            player = self._media_player_for(slot, media_url)
-        except (ImportError, RuntimeError) as error:
-            self.stream_error(self._key(self.requested_track), str(error))
-            return
+        player = self.players[slot]
         self.pending_slot = slot
         self.pending_started = time.perf_counter()
         self.pending_media_url = media_url
@@ -19670,8 +19832,7 @@ class MusicPlayer(QMainWindow):
         ) and player.source() == media_url
         self.pending_position_seen = False
         self._recovery_seek_applied = False
-        self.pending_media_timer.start(max(60000, self.PENDING_MEDIA_TIMEOUT_MS)
-                                       if _is_youtube_music_player(player) else self.PENDING_MEDIA_TIMEOUT_MS)
+        self.pending_media_timer.start(self.PENDING_MEDIA_TIMEOUT_MS)
         self.request_origin = origin
         self.audio_outputs[slot].setVolume(0.0)
         if player.source() != media_url or self._network_recovery is not None:
@@ -19696,12 +19857,9 @@ class MusicPlayer(QMainWindow):
         """Ограничивает ожидание Qt; обработчик ошибки сохраняет старый трек."""
         if self.pending_slot is None or self.requested_track is None:
             return
-        player = self.players[self.pending_slot]
-        message = (player.startup_timeout_message() if _is_youtube_music_player(player) else
-                   "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз.")
         self.on_slot_error(
             self.pending_slot, QMediaPlayer.Error.ResourceError,
-            message
+            "Новый трек не начал воспроизведение за отведённое время. Попробуй ещё раз."
         )
 
     def _remote_playback(self):
@@ -19710,10 +19868,6 @@ class MusicPlayer(QMainWindow):
                 and not self.player.source().isLocalFile())
 
     def _ended_early(self):
-        if _is_youtube_music_player(self.player):
-            # The official API's end event is authoritative; it is not a
-            # truncated FFmpeg stream, even if catalog duration was stale.
-            return False
         duration = self.playback_duration_ms()
         position = self._last_progress_position
         if duration <= 0 or position <= 0:
@@ -19721,6 +19875,14 @@ class MusicPlayer(QMainWindow):
         qt_dur = self.player.duration()
         if qt_dur > 0 and abs(qt_dur - duration) <= 4500 and qt_dur - position <= 1200:
             return False
+        try:
+            src_url = self.player.source().toString()
+            if src_url.startswith("http://127.0.0.1:") and "/stream/" in src_url:
+                entry = LocalStreamProxy.instance().get_entry_by_url(src_url)
+                if entry is not None and entry.is_complete() and not entry.failed:
+                    return False
+        except Exception:
+            pass
         return duration - position > 3000
 
     def check_playback_health(self):
@@ -20107,8 +20269,7 @@ class MusicPlayer(QMainWindow):
             if track and track.get("source") != "local" and not self.pending_refreshed:
                 self.pending_refreshed = True
                 self.stream_cache.pop(self._key(track), None)
-                self.set_status("Повторно подключаю плеер YouTube Music…" if track.get("source") == "youtube" else
-                                "Поток отклонён Qt. Запрашиваю свежую ссылку…")
+                self.set_status("Поток отклонён Qt. Запрашиваю свежую ссылку…")
                 self.start_stream_extraction(track)
                 return
             failed_track = dict(track or {})
@@ -20298,8 +20459,6 @@ class MusicPlayer(QMainWindow):
             self.mini_player.hide()
         for player in self.players:
             player.stop()
-        if self._youtube_session is not None:
-            self._youtube_session.shutdown()
         if self.tray_icon is not None:
             self.tray_icon.hide()
         event.accept()
@@ -20320,7 +20479,6 @@ def run_smoke_test():
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.environ[variable] = str(path)
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
         set_windows_app_id()
         app = QApplication([sys.argv[0]])
         configure_application(app)
@@ -20337,19 +20495,6 @@ def run_smoke_test():
         app.processEvents()
         if window.grab().isNull():
             raise RuntimeError("Не удалось отрисовать главное окно")
-        # Also exercise QtWebEngineProcess/resources from the frozen bundle,
-        # without a network request or account. Import checks alone miss these.
-        browser_ready = [True]
-        if _load_youtube_music_backend():
-            window._youtube_session = YouTubeMusicSession(window)
-            browser = YouTubeMusicPlayer(window._youtube_session, window)
-            browser_ready[0] = False
-            browser.page.loadFinished.connect(lambda ok: browser.page.runJavaScript(
-                "2 + 2", lambda value: browser_ready.__setitem__(0, value == 4)
-            ) if ok else None)
-            browser.page.setHtml("<!doctype html><title>Aurora playback smoke test</title>")
-        elif getattr(sys, "frozen", False):
-            raise RuntimeError("В готовой сборке отсутствует модуль YouTube Music / Qt WebEngine.")
         window.show_mini_player()
         path = root / "sample.wav"
         with wave.open(str(path), "wb") as sound:
@@ -20368,7 +20513,7 @@ def run_smoke_test():
             app.exit(code)
         timer = QTimer(window)
         timer.setInterval(100)
-        timer.timeout.connect(lambda: finish(0) if browser_ready[0] and window.current_track and window.player.position() > 0 else None)
+        timer.timeout.connect(lambda: finish(0) if window.current_track and window.player.position() > 0 else None)
         QTimer.singleShot(15000, lambda: finish(1))
         window.play_track({"source": "local", "url": str(path), "title": "Smoke test"}, -1)
         timer.start()

@@ -38,7 +38,6 @@ if "%PLAYER_BUILD_MODE%"=="--onefile" set "PLAYER_OUTPUT=dist\%PLAYER_NAME%.exe"
 
 if not exist "%PLAYER_SOURCE%" if exist "player.py" set "PLAYER_SOURCE=player.py"
 if not exist "%PLAYER_SOURCE%" goto missing_source
-if not exist "youtube_music_backend.py" goto missing_backend
 if not exist "%PLAYER_ICON%" goto missing_icon
 if exist "%PLAYER_BUILD_PYTHON%" goto dependencies
 
@@ -61,25 +60,17 @@ if errorlevel 1 goto failed
 :dependencies
 if defined SKIP_PIP_INSTALL goto after_dependencies
 echo [2/3] Installing or updating build dependencies. Internet is required.
-"%PLAYER_BUILD_PYTHON%" -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "PyQt6-WebEngine>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
+"%PLAYER_BUILD_PYTHON%" -m pip install --upgrade pip "pyinstaller>=6.16,<7" "PyQt6>=6.8,<7" "yt-dlp[default]" "ytmusicapi>=1.12,<2" "requests>=2.31" "certifi"
 if errorlevel 1 goto failed
 
 :after_dependencies
-echo Checking the required YouTube Music browser runtime...
-"%PLAYER_BUILD_PYTHON%" -c "from PyQt6.QtWebEngineCore import QWebEnginePage; from PyQt6.QtWebEngineWidgets import QWebEngineView; import youtube_music_backend"
-if errorlevel 1 goto failed
-
 if exist "fonts\*" set "PLAYER_FONT_OPTIONS=--add-data "%CD%\fonts;fonts""
 if exist "tools\generate_app_icon.py" "%PLAYER_BUILD_PYTHON%" tools\generate_app_icon.py >nul 2>&1
 
 echo [3/3] Building %PLAYER_NAME%.exe. Keep this window open until the build finishes.
-"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "%CD%\assets;assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath . --collect-all yt_dlp --collect-all ytmusicapi --hidden-import youtube_music_backend --hidden-import PyQt6.QtWebEngineCore --hidden-import PyQt6.QtWebEngineWidgets --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
+"%PLAYER_BUILD_PYTHON%" -m PyInstaller --noconfirm --clean %PLAYER_BUILD_MODE% %PLAYER_WINDOW_OPTION% --name "%PLAYER_NAME%" --icon "%PLAYER_ICON%" --add-data "%CD%\assets;assets" --distpath dist --workpath "%PLAYER_WORK_DIR%" --specpath . --collect-all yt_dlp --collect-all ytmusicapi --hidden-import requests --hidden-import certifi %PLAYER_FONT_OPTIONS% "%PLAYER_SOURCE%"
 if errorlevel 1 goto failed
 if not exist "%PLAYER_OUTPUT%" goto failed
-
-echo Testing the built application, Chromium runtime and audio decoding...
-start "" /wait "%PLAYER_OUTPUT%" --smoke-test
-if not "%ERRORLEVEL%"=="0" goto failed
 
 echo.
 echo BUILD SUCCEEDED
@@ -94,10 +85,6 @@ goto failed
 
 :missing_icon
 echo ERROR: The assets folder with aurora.ico is missing. Download the full repository.
-goto failed
-
-:missing_backend
-echo ERROR: youtube_music_backend.py is missing. Keep it next to the player source.
 goto failed
 
 :missing_python

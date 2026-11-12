@@ -2772,10 +2772,7 @@ class PlayerChanges(unittest.TestCase):
 
     def test_latest_search_selection_starts_before_cancelled_extraction_finishes(self):
         w = self.w
-        # YouTube now uses its browser player; this still covers the extractor
-        # used by SoundCloud, including cancellation and its two-worker budget.
-        tracks = [dict(self.youtube_track('select0000' + str(i)), source='soundcloud',
-                       url='https://soundcloud.com/test/select' + str(i)) for i in range(3)]
+        tracks = [self.youtube_track('select0000' + str(i)) for i in range(3)]
         started = {track['url']: threading.Event() for track in tracks}
         release = {track['url']: threading.Event() for track in tracks}
         opened = []
