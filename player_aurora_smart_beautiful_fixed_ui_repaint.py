@@ -4005,6 +4005,15 @@ class BufferedStreamEntry:
                 return len(self.hls_buffer) > 0
             return bool(self.blocks.get(0)) or getattr(self, "_has_initial_data", False)
 
+    def _check_all_blocks_buffered_locked(self):
+        if self.total_size is not None and self.total_size > 0:
+            num_blocks = (self.total_size + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+            if num_blocks > 0 and len(self.blocks) >= num_blocks and all(i in self.blocks for i in range(num_blocks)):
+                self.fully_buffered = True
+                self.eof = True
+                return True
+        return False
+
     def _store_block(self, block_idx, data):
         with self._cond:
             self.blocks[block_idx] = bytes(data)
@@ -4019,11 +4028,7 @@ class BufferedStreamEntry:
                     self.blocks.move_to_end(oldest_key)
                     oldest_key = next(iter(self.blocks))
                 self.blocks.pop(oldest_key, None)
-            if self.total_size is not None and self.total_size > 0:
-                num_blocks = (self.total_size + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
-                if num_blocks > 0 and len(self.blocks) >= num_blocks and all(i in self.blocks for i in range(num_blocks)):
-                    self.fully_buffered = True
-                    self.eof = True
+            self._check_all_blocks_buffered_locked()
             self._cond.notify_all()
 
     @staticmethod
@@ -4043,7 +4048,9 @@ class BufferedStreamEntry:
     def _stream_span_into_blocks(self, start_block_idx, num_blocks_to_read=8, opener=None, dedicated_session=False):
         """Скачивает непрерывный сегмент и нарезает его на блоки по 64 КБ."""
         num_blocks_to_read = max(1, int(num_blocks_to_read))
-        span_indices = range(start_block_idx, start_block_idx + num_blocks_to_read)
+        initial_start_block = start_block_idx
+        span_end_block = start_block_idx + num_blocks_to_read
+        span_indices = range(start_block_idx, span_end_block)
         with self._cond:
             if self.closed:
                 return None
@@ -4063,25 +4070,35 @@ class BufferedStreamEntry:
 
         local_session = None
         try:
-            start_byte = start_block_idx * self.BLOCK_SIZE
-            span_bytes = num_blocks_to_read * self.BLOCK_SIZE
-            end_byte = start_byte + span_bytes - 1
-            if self.total_size is not None and self.total_size > 0:
-                if start_byte >= self.total_size:
-                    return b""
-                end_byte = min(end_byte, self.total_size - 1)
-
             last_err = ""
             max_attempts = 3 if start_block_idx == 0 else 4
+            cur_start_block = start_block_idx
             for attempt in range(max_attempts):
                 if self.closed:
                     return None
+                while cur_start_block < span_end_block and cur_start_block in self.blocks:
+                    cur_start_block += 1
+                if cur_start_block >= span_end_block:
+                    return self.blocks.get(initial_start_block, b"")
+
+                start_byte = cur_start_block * self.BLOCK_SIZE
+                end_byte = span_end_block * self.BLOCK_SIZE - 1
+                if self.total_size is not None and self.total_size > 0:
+                    if start_byte >= self.total_size:
+                        with self._cond:
+                            self._check_all_blocks_buffered_locked()
+                            self._cond.notify_all()
+                        return self.blocks.get(initial_start_block, b"")
+                    end_byte = min(end_byte, self.total_size - 1)
+
                 self._req_number += 1
                 active_url = self.remote_url
                 if attempt >= 1 and self.backup_urls:
                     active_url = self.backup_urls[(attempt - 1) % len(self.backup_urls)]
                 if attempt == 0 and not re.search(r"[?&]range=", active_url):
-                    target_url = active_url
+                    target_url = self._with_googlevideo_params(
+                        active_url, start_byte, end_byte, self._req_number, use_query_range=False
+                    )
                 else:
                     target_url = self._with_googlevideo_params(
                         active_url, start_byte, end_byte, self._req_number,
@@ -4113,12 +4130,12 @@ class BufferedStreamEntry:
                                 with self._cond:
                                     if self.total_size is None and start_byte > 0:
                                         self.total_size = start_byte
-                                    self.eof = True
+                                    self._check_all_blocks_buffered_locked()
                                     self._cond.notify_all()
-                                return b""
+                                return self.blocks.get(initial_start_block, b"")
                             if status >= 400:
                                 last_err = f"HTTP {status}"
-                                if status in (401, 403) and start_block_idx == 0:
+                                if status in (401, 403) and initial_start_block == 0:
                                     if not self.backup_urls and attempt >= 1:
                                         break
                                 time.sleep(0.06)
@@ -4135,15 +4152,16 @@ class BufferedStreamEntry:
                                         self.total_size = int(total_part)
                             elif status == 200 and self.total_size is None:
                                 clen = resp.headers.get("Content-Length") or ""
-                                if clen.strip().isdigit() and "range=" not in target_url:
+                                if clen.strip().isdigit() and "range=" not in target_url and cur_start_block == 0:
                                     with self._cond:
                                         self.total_size = int(clen.strip())
 
                             buf = bytearray()
-                            cur_idx = start_block_idx
+                            cur_idx = cur_start_block
                             stored_any = False
                             skipped = 0
                             need_skip_initial = (status == 200 and start_byte > 0 and not content_range and "range=" not in target_url)
+                            reached_span_limit = False
 
                             for raw_chunk in resp.iter_content(chunk_size=32768):
                                 if self.closed:
@@ -4158,39 +4176,51 @@ class BufferedStreamEntry:
                                     raw_chunk = raw_chunk[rem_skip:]
                                     skipped = start_byte
                                 buf.extend(raw_chunk)
-                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
-                                    with self._cond:
-                                        self._has_initial_data = True
-                                        self._cond.notify_all()
                                 while len(buf) >= self.BLOCK_SIZE and cur_idx < self.MAX_CACHED_BLOCKS:
                                     piece = bytes(buf[:self.BLOCK_SIZE])
                                     del buf[:self.BLOCK_SIZE]
                                     self._store_block(cur_idx, piece)
                                     stored_any = True
                                     cur_idx += 1
-                                    if cur_idx >= start_block_idx + num_blocks_to_read and status == 206:
+                                    if cur_idx >= span_end_block:
+                                        reached_span_limit = True
+                                        buf.clear()
                                         break
-                            if buf and not self.closed and cur_idx < self.MAX_CACHED_BLOCKS:
-                                self._store_block(cur_idx, bytes(buf))
-                                stored_any = True
-                                last_end = cur_idx * self.BLOCK_SIZE + len(buf)
+                                if reached_span_limit:
+                                    break
+
+                            if buf and not self.closed and not reached_span_limit and cur_idx < self.MAX_CACHED_BLOCKS:
+                                is_final_block = (
+                                    (self.total_size is not None and self.total_size > 0 and (cur_idx * self.BLOCK_SIZE + len(buf)) >= self.total_size)
+                                    or (self.total_size is None and status == 200 and cur_start_block == 0 and not content_range and "range=" not in target_url)
+                                )
+                                if is_final_block:
+                                    self._store_block(cur_idx, bytes(buf))
+                                    stored_any = True
+                                    last_end = cur_idx * self.BLOCK_SIZE + len(buf)
+                                else:
+                                    last_end = cur_idx * self.BLOCK_SIZE
                             else:
                                 last_end = cur_idx * self.BLOCK_SIZE
 
                             if stored_any:
-                                is_fully_read = (
-                                    (self.total_size is not None and last_end >= self.total_size)
-                                    or (self.total_size is None and status == 200 and not content_range and "range=" not in target_url and not buf)
-                                )
-                                if is_fully_read:
-                                    with self._cond:
-                                        if self.total_size is None:
-                                            self.total_size = sum(len(b) for b in self.blocks.values())
-                                        if start_block_idx == 0:
-                                            self.fully_buffered = True
+                                cur_start_block = cur_idx
+                                with self._cond:
+                                    if (self.total_size is None and status == 200
+                                            and initial_start_block == 0 and not content_range and "range=" not in target_url
+                                            and not reached_span_limit):
+                                        self.total_size = sum(len(b) for b in self.blocks.values())
+                                        self.fully_buffered = True
                                         self.eof = True
-                                        self._cond.notify_all()
-                                return self.blocks.get(start_block_idx, b"")
+                                    else:
+                                        self._check_all_blocks_buffered_locked()
+                                    self._cond.notify_all()
+                                if (cur_idx >= span_end_block
+                                        or (self.total_size is not None and last_end >= self.total_size > 0)
+                                        or self.fully_buffered):
+                                    return self.blocks.get(initial_start_block, b"")
+                                # Если соединение оборвалось на середине сегмента — продолжаем докачку с cur_idx
+                                continue
                             if self.total_size is not None and start_byte >= self.total_size:
                                 return b""
                     else:
@@ -4208,38 +4238,45 @@ class BufferedStreamEntry:
                                     with self._cond:
                                         self.total_size = int(total_part)
                             buf = bytearray()
-                            cur_idx = start_block_idx
+                            cur_idx = cur_start_block
                             stored_any = False
-                            while not self.closed and cur_idx < start_block_idx + num_blocks_to_read:
+                            while not self.closed and cur_idx < span_end_block:
                                 chunk = uresp.read(32768)
                                 if not chunk:
                                     break
                                 buf.extend(chunk)
-                                if cur_idx == 0 and 0 not in self.blocks and len(buf) > 0:
-                                    with self._cond:
-                                        self._has_initial_data = True
-                                        self._cond.notify_all()
                                 while len(buf) >= self.BLOCK_SIZE:
                                     piece = bytes(buf[:self.BLOCK_SIZE])
                                     del buf[:self.BLOCK_SIZE]
                                     self._store_block(cur_idx, piece)
                                     stored_any = True
                                     cur_idx += 1
-                            if buf and not self.closed:
-                                self._store_block(cur_idx, bytes(buf))
-                                stored_any = True
+                                    if cur_idx >= span_end_block:
+                                        buf.clear()
+                                        break
+                            if buf and not self.closed and cur_idx < span_end_block:
+                                is_final_block = (
+                                    self.total_size is None
+                                    or (self.total_size > 0 and (cur_idx * self.BLOCK_SIZE + len(buf)) >= self.total_size)
+                                )
+                                if is_final_block:
+                                    self._store_block(cur_idx, bytes(buf))
+                                    stored_any = True
                             if stored_any:
-                                return self.blocks.get(start_block_idx, b"")
+                                with self._cond:
+                                    self._check_all_blocks_buffered_locked()
+                                    self._cond.notify_all()
+                                return self.blocks.get(initial_start_block, b"")
                 except HTTPError as http_err:
                     last_err = f"HTTP {http_err.code}"
                     if http_err.code == 416:
                         with self._cond:
                             if self.total_size is None and start_byte > 0:
                                 self.total_size = start_byte
-                            self.eof = True
+                            self._check_all_blocks_buffered_locked()
                             self._cond.notify_all()
-                        return b""
-                    if http_err.code in (401, 403) and start_block_idx == 0:
+                        return self.blocks.get(initial_start_block, b"")
+                    if http_err.code in (401, 403) and initial_start_block == 0:
                         if not self.backup_urls and attempt >= 1:
                             break
                     time.sleep(0.06)
@@ -4247,9 +4284,11 @@ class BufferedStreamEntry:
                     last_err = str(err)
                     time.sleep(0.08)
 
+            if initial_start_block in self.blocks:
+                return self.blocks[initial_start_block]
             with self._cond:
                 self.last_error = last_err
-                if start_block_idx == 0 and 0 not in self.blocks:
+                if initial_start_block == 0 and 0 not in self.blocks:
                     self.failed = True
                 self._cond.notify_all()
             return None
@@ -4291,20 +4330,32 @@ class BufferedStreamEntry:
 
         block_idx = position // self.BLOCK_SIZE
         offset_in_block = position % self.BLOCK_SIZE
-        wait_deadline = time.monotonic() + 3.0
+        wait_deadline = time.monotonic() + 4.5
         with self._cond:
             is_tail_probe = (
                 self.total_size is not None
-                and self.total_size > self.BLOCK_SIZE * 4
-                and position >= self.total_size - self.BLOCK_SIZE * 2
-                and 1 not in self.blocks
+                and self.total_size > self.BLOCK_SIZE * 6
+                and position >= self.total_size - self.BLOCK_SIZE * 3
+                and (block_idx - 1) not in self.blocks
+                and (block_idx - 2) not in self.blocks
             )
             if not is_tail_probe:
                 self._cursor_block = block_idx
+            if block_idx in self.blocks:
+                existing = self.blocks[block_idx]
+                is_incomplete_middle = (
+                    len(existing) < self.BLOCK_SIZE
+                    and self.total_size is not None
+                    and (block_idx + 1) * self.BLOCK_SIZE <= self.total_size
+                )
+                if is_incomplete_middle:
+                    self.blocks.pop(block_idx, None)
             if block_idx not in self.blocks and block_idx not in self._inflight:
                 self._priority_block = block_idx
                 self._cond.notify_all()
-            while block_idx not in self.blocks and not self.eof and not self.failed and not self.closed:
+            while block_idx not in self.blocks and not self.fully_buffered and not self.failed and not self.closed:
+                if self.eof and self.total_size is not None and position >= self.total_size:
+                    break
                 rem = wait_deadline - time.monotonic()
                 if rem <= 0:
                     break
@@ -4342,24 +4393,22 @@ class BufferedStreamEntry:
 
             while not self.closed:
                 with self._cond:
-                    if self.fully_buffered or self.eof or self.failed:
+                    if self.fully_buffered or self.failed:
+                        break
+                    if self.eof and self._check_all_blocks_buffered_locked():
                         break
                     cursor = self._cursor_block
                     priority = self._priority_block
                     total = self.total_size
 
                 next_to_fetch = None
-                span_blocks = 8
+                span_blocks = 16
                 if priority is not None:
                     with self._cond:
                         if priority not in self.blocks and priority not in self._inflight:
                             if total is None or priority * self.BLOCK_SIZE < total:
                                 next_to_fetch = priority
                                 span_blocks = 4
-                    with self._cond:
-                        if priority not in self.blocks and priority not in self._inflight:
-                            if total is None or priority * self.BLOCK_SIZE < total:
-                                next_to_fetch = priority
 
                 if next_to_fetch is None:
                     for candidate in range(cursor, cursor + self.READAHEAD_BLOCKS):
@@ -4387,9 +4436,11 @@ class BufferedStreamEntry:
                         break
                     if data is None and self.failed:
                         break
+                    if data is None:
+                        time.sleep(0.15)
                 else:
                     with self._cond:
-                        if self.closed or self.fully_buffered:
+                        if self.closed or self._check_all_blocks_buffered_locked():
                             break
                         self._cond.wait(timeout=0.25)
         except Exception as err:
@@ -4397,7 +4448,7 @@ class BufferedStreamEntry:
                 self.last_error = str(err)
                 if 0 not in self.blocks and len(self.hls_buffer) == 0:
                     self.failed = True
-                self.eof = True
+                    self.eof = True
                 self._cond.notify_all()
 
     @staticmethod
@@ -4634,10 +4685,15 @@ class LocalStreamProxy:
                                 want = min(want, limit_byte - cursor + 1)
                             data_slice = entry.read_at(cursor, want)
                             if not data_slice:
-                                if entry.eof or (total is not None and cursor >= total):
+                                if (total is not None and cursor >= total > 0) or (entry.fully_buffered and entry.eof):
                                     break
-                                time.sleep(0.08)
-                                data_slice = entry.read_at(cursor, want)
+                                for _retry in range(4):
+                                    if entry.closed or entry.failed:
+                                        break
+                                    time.sleep(0.12)
+                                    data_slice = entry.read_at(cursor, want)
+                                    if data_slice:
+                                        break
                                 if not data_slice:
                                     break
                             self.wfile.write(data_slice)
@@ -5189,6 +5245,21 @@ class StreamWorker(QThread):
                     "gl": "US",
                 },
             },
+            {
+                "id": "5",
+                "version": "20.10.4",
+                "ua": "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                "client": {
+                    "clientName": "IOS",
+                    "clientVersion": "20.10.4",
+                    "deviceMake": "Apple",
+                    "deviceModel": "iPhone16,2",
+                    "osName": "iPhone",
+                    "osVersion": "18.3.2.22D82",
+                    "hl": "ru",
+                    "gl": "US",
+                },
+            },
         )
 
         endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
@@ -5206,6 +5277,11 @@ class StreamWorker(QThread):
             payload = {
                 "context": {"client": spec["client"]},
                 "videoId": video_id,
+                "playbackContext": {
+                    "contentPlaybackContext": {
+                        "html5Preference": "HTML5_PREF_WANTS",
+                    }
+                },
                 "contentCheckOk": True,
                 "racyCheckOk": True,
             }
@@ -5461,7 +5537,7 @@ class StreamWorker(QThread):
 
         format_options = {
             "auto": (
-                "bestaudio[protocol=https][format_id=251]/bestaudio[protocol=https][format_id=140]/"
+                "bestaudio[protocol=https][format_id=140]/bestaudio[protocol=https][format_id=251]/"
                 "18/bestaudio[protocol=https][ext=m4a]/bestaudio[protocol=https][ext=webm]/"
                 "bestaudio[protocol=https][ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/"
                 "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
